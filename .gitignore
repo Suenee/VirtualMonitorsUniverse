@@ -1,4 +1,5 @@
 # Local development/runtime artifacts
 .runtime/
 alfatest.log
+upgrade.log
 *.local.log
