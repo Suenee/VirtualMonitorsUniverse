@@ -5,7 +5,7 @@ cd /d "%~dp0"
 echo Virtual Monitors Universe - ALPHA acceptance test
 echo.
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\alpha\run-alfatest-current.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\alpha\run-alfatest-ccd.ps1"
 set "ERR=%ERRORLEVEL%"
 
 echo.
