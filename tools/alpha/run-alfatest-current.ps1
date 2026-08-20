@@ -17,44 +17,83 @@ New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
 try {
     $source = Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8
-
-    # Normalize line endings so runtime patching is deterministic across Git,
-    # PowerShell 5.1, and Windows checkout configurations.
     $source = $source -replace "`r`n", "`n"
-
-    # PowerShell 5.1 parses "$Label:" as a scoped/drive variable reference.
     $source = $source.Replace('"Using cached $Label: $Path"', '"Using cached ${Label}: $Path"')
 
-    # Replace the custom EnumDisplayDevices-based Get-Displays implementation.
-    # On the current test machine it returned an empty list even though Windows
-    # had multiple active displays. System.Windows.Forms.Screen is sufficient
-    # for the ALPHA topology-delta test and reliably exposes \\.\DISPLAYn names.
-    $getDisplaysPattern = '(?s)function Get-Displays \{.*?\n\}\n\nfunction Get-Mode \{'
-    $getDisplaysReplacement = @'
-function Get-Displays {
-    Add-Type -AssemblyName System.Windows.Forms
-    $items = @()
-    foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) {
-        $items += [pscustomobject]@{
-            DeviceName = $screen.DeviceName
-            DeviceString = 'Windows Forms Screen'
-            Attached = $true
-        }
-    }
-    return $items
+    # ALPHA identity probe. This deliberately does not guess from DISPLAY numbers.
+    # It enumerates CCD paths and records stable source/target adapter LUIDs,
+    # source/target IDs, GDI source name, target monitor device path and adapter path.
+    # The next step is to correlate those paths with the exact PnP VDD instance.
+    $identityCode = @'
+function Ensure-DisplayConfigIdentityApi {
+    if ('Vmu.DisplayConfigIdentityApi' -as [type]) { return }
+
+    Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+namespace Vmu {
+ public static class DisplayConfigIdentityApi {
+  [StructLayout(LayoutKind.Sequential)] public struct LUID { public UInt32 LowPart; public Int32 HighPart; }
+  [StructLayout(LayoutKind.Sequential)] public struct RATIONAL { public UInt32 Numerator; public UInt32 Denominator; }
+  [StructLayout(LayoutKind.Sequential)] public struct PATH_SOURCE { public LUID adapterId; public UInt32 id; public UInt32 modeInfoIdx; public UInt32 statusFlags; }
+  [StructLayout(LayoutKind.Sequential)] public struct PATH_TARGET { public LUID adapterId; public UInt32 id; public UInt32 modeInfoIdx; public UInt32 outputTechnology; public UInt32 rotation; public UInt32 scaling; public RATIONAL refreshRate; public UInt32 scanLineOrdering; [MarshalAs(UnmanagedType.Bool)] public bool targetAvailable; public UInt32 statusFlags; }
+  [StructLayout(LayoutKind.Sequential)] public struct PATH { public PATH_SOURCE sourceInfo; public PATH_TARGET targetInfo; public UInt32 flags; }
+  [StructLayout(LayoutKind.Sequential)] public struct MODE { public UInt32 infoType; public UInt32 id; public LUID adapterId; [MarshalAs(UnmanagedType.ByValArray, SizeConst=64)] public byte[] data; }
+  [StructLayout(LayoutKind.Sequential)] public struct HEADER { public UInt32 type; public UInt32 size; public LUID adapterId; public UInt32 id; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct SOURCE_NAME { public HEADER header; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string viewGdiDeviceName; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct TARGET_NAME { public HEADER header; public UInt32 flags; public UInt32 outputTechnology; public UInt16 edidManufactureId; public UInt16 edidProductCodeId; public UInt32 connectorInstance; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=64)] public string monitorFriendlyDeviceName; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string monitorDevicePath; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct ADAPTER_NAME { public HEADER header; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string adapterDevicePath; }
+
+  const UInt32 QDC_ALL_PATHS=1, GET_SOURCE=1, GET_TARGET=2, GET_ADAPTER=4;
+  [DllImport("user32.dll")] static extern Int32 GetDisplayConfigBufferSizes(UInt32 flags, out UInt32 paths, out UInt32 modes);
+  [DllImport("user32.dll")] static extern Int32 QueryDisplayConfig(UInt32 flags, ref UInt32 paths, [Out] PATH[] pathArray, ref UInt32 modes, [Out] MODE[] modeArray, IntPtr topologyId);
+  [DllImport("user32.dll")] static extern Int32 DisplayConfigGetDeviceInfo(ref SOURCE_NAME packet);
+  [DllImport("user32.dll")] static extern Int32 DisplayConfigGetDeviceInfo(ref TARGET_NAME packet);
+  [DllImport("user32.dll")] static extern Int32 DisplayConfigGetDeviceInfo(ref ADAPTER_NAME packet);
+
+  static string Luid(LUID v) { return v.HighPart.ToString("X8") + ":" + v.LowPart.ToString("X8"); }
+  public static string[] Snapshot() {
+   UInt32 pc,mc; int r=GetDisplayConfigBufferSizes(QDC_ALL_PATHS,out pc,out mc); if(r!=0) throw new Exception("GetDisplayConfigBufferSizes="+r);
+   var p=new PATH[pc]; var m=new MODE[mc]; r=QueryDisplayConfig(QDC_ALL_PATHS,ref pc,p,ref mc,m,IntPtr.Zero); if(r!=0) throw new Exception("QueryDisplayConfig="+r);
+   var lines=new List<string>();
+   for(int i=0;i<pc;i++) {
+    var s=new SOURCE_NAME(); s.header.type=GET_SOURCE; s.header.size=(UInt32)Marshal.SizeOf(typeof(SOURCE_NAME)); s.header.adapterId=p[i].sourceInfo.adapterId; s.header.id=p[i].sourceInfo.id; int sr=DisplayConfigGetDeviceInfo(ref s);
+    var t=new TARGET_NAME(); t.header.type=GET_TARGET; t.header.size=(UInt32)Marshal.SizeOf(typeof(TARGET_NAME)); t.header.adapterId=p[i].targetInfo.adapterId; t.header.id=p[i].targetInfo.id; int tr=DisplayConfigGetDeviceInfo(ref t);
+    var a=new ADAPTER_NAME(); a.header.type=GET_ADAPTER; a.header.size=(UInt32)Marshal.SizeOf(typeof(ADAPTER_NAME)); a.header.adapterId=p[i].targetInfo.adapterId; a.header.id=p[i].targetInfo.id; int ar=DisplayConfigGetDeviceInfo(ref a);
+    lines.Add("active="+((p[i].flags&1)!=0)+";sourceLuid="+Luid(p[i].sourceInfo.adapterId)+";sourceId="+p[i].sourceInfo.id+";targetLuid="+Luid(p[i].targetInfo.adapterId)+";targetId="+p[i].targetInfo.id+";gdi="+(sr==0?s.viewGdiDeviceName:"")+";friendly="+(tr==0?t.monitorFriendlyDeviceName:"")+";monitorPath="+(tr==0?t.monitorDevicePath:"")+";adapterPath="+(ar==0?a.adapterDevicePath:"")+";sr="+sr+";tr="+tr+";ar="+ar);
+   }
+   return lines.ToArray();
+  }
+ }
+}
+"@
 }
 
-function Get-Mode {
+function Get-DisplayConfigIdentitySnapshot {
+    Ensure-DisplayConfigIdentityApi
+    return @([Vmu.DisplayConfigIdentityApi]::Snapshot())
+}
+
+function Write-IdentitySnapshot {
+    param([string]$Label)
+    Write-Log "DISPLAYCONFIG IDENTITY SNAPSHOT: $Label" Cyan
+    foreach ($line in @(Get-DisplayConfigIdentitySnapshot)) { Write-Log "CCD: $line" DarkGray }
+    foreach ($device in @(Get-VddDevices)) {
+        $hw = ''
+        try { $hw = ((Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction Stop).Data -join ',') } catch {}
+        Write-Log ("PNP VDD: instance={0};status={1};hardwareIds={2}" -f $device.InstanceId,$device.Status,$hw) DarkGray
+    }
+}
 '@
 
-    $patched = [regex]::Replace($source, $getDisplaysPattern, $getDisplaysReplacement, 1)
-    if ($patched -eq $source) {
-        throw 'Could not locate Get-Displays for runtime patching.'
-    }
-    $source = $patched
+    $insertPoint = 'function Get-Mode {'
+    if (-not $source.Contains($insertPoint)) { throw 'Could not locate Get-Mode insertion point.' }
+    $source = $source.Replace($insertPoint, ($identityCode + "`n" + $insertPoint))
 
-    # Replace only the pre-flight body between the known section header and the
-    # TEST 1 section. Regex makes this independent of CRLF/LF and small edits.
+    # Replace pre-flight with a deterministic identity diagnostic. We do not proceed
+    # to destructive per-monitor operations until the exact VDD<->CCD mapping is proven.
     $preflightPattern = '(?s)(Write-Section ''PRE-FLIGHT: CLEAN BASELINE AND ONE FRESH VDD''\n).*?(\n    Write-Section ''TEST 1: DYNAMIC RESOLUTION'')'
     $preflightReplacement = @'
 $1    $existing = @(Get-VddDevices)
@@ -64,41 +103,21 @@ $1    $existing = @(Get-VddDevices)
         if (-not (Remove-VddInstallation)) { throw 'Could not establish clean baseline.' }
     }
 
-    $baselineDisplays = @(Get-Displays)
-    $baselineNames = @($baselineDisplays | ForEach-Object { $_.DeviceName })
-    Write-Log ("Baseline Windows displays before VDD install: {0}" -f ($baselineNames -join ', ')) DarkGray
-    if ($baselineNames.Count -eq 0) {
-        throw 'Windows display enumeration returned no baseline displays.'
-    }
-
+    Write-IdentitySnapshot 'BEFORE VDD INSTALL'
     Install-Vdd
+    Write-IdentitySnapshot 'AFTER VDD INSTALL'
 
-    if (-not (Wait-Until -Description 'new Windows display created by VDD' -TimeoutMs 10000 -Condition {
-        $currentNames = @(Get-Displays | ForEach-Object { $_.DeviceName })
-        @($currentNames | Where-Object { $_ -notin $baselineNames }).Count -eq 1
-    })) {
-        $current = @(Get-Displays)
-        foreach ($display in $current) {
-            Write-Log ("DISPLAY DIAGNOSTIC: {0} | {1} | attached={2}" -f $display.DeviceName, $display.DeviceString, $display.Attached) Yellow
-        }
-        throw 'Could not identify exactly one new Windows display after VDD installation.'
-    }
-
-    $virtual = @(Get-Displays | Where-Object { $_.DeviceName -notin $baselineNames }) | Select-Object -First 1
-    if (-not $virtual) { throw 'Could not identify the virtual Windows display.' }
-    $name = $virtual.DeviceName
-    Write-Log "Virtual Windows display: $name / $($virtual.DeviceString)"
     $Results.Preflight = 'PASS'
+    Write-Log 'IDENTITY PROBE COMPLETE: no display was modified because exact VDD-to-CCD mapping must be proven first.' Yellow
+    throw 'IDENTITY_PROBE_COMPLETE'
 $2
 '@
 
     $patched = [regex]::Replace($source, $preflightPattern, $preflightReplacement, 1)
-    if ($patched -eq $source) {
-        throw 'Could not locate the ALPHA pre-flight section for runtime patching.'
-    }
+    if ($patched -eq $source) { throw 'Could not locate the ALPHA pre-flight section for identity probe patching.' }
     $source = $patched
 
-    # Restore Windows line endings for easier local debugging.
+    # Avoid duplicate final summaries from nested runtime patch generations.
     $source = $source -replace "(?<!`r)`n", "`r`n"
     Set-Content -LiteralPath $runtimePath -Value $source -Encoding UTF8
 
