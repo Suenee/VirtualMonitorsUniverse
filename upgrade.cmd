@@ -10,22 +10,34 @@ if /I "%~1"=="--post-update" goto :post_update
 cls
 cd /d "%~dp0"
 set "REPO_ROOT=%CD%"
+set "LOG_FILE=%REPO_ROOT%\upgrade.log"
+set "TMP_UPDATER=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.cmd"
+
+> "%LOG_FILE%" echo [%DATE% %TIME%] Virtual Monitors Universe - upgrade
+>> "%LOG_FILE%" echo Repository: %REPO_ROOT%
+>> "%LOG_FILE%" echo.
 
 echo ============================================
 echo Virtual Monitors Universe - GitHub upgrade
 echo ============================================
 echo.
 
-if not exist "%REPO_ROOT%\tools\upgrade\run-upgrade.ps1" (
-    echo ERROR: Logged upgrade runner is missing.
-    echo Run git pull once to obtain the current repository files.
+rem Bootstrap must not depend on repository PowerShell helpers. If one of those
+rem helpers is broken, upgrade.cmd still has to be able to fetch its own fix.
+copy /Y "%~f0" "%TMP_UPDATER%" >NUL
+if errorlevel 1 (
+    echo ERROR: Could not create temporary updater.
+    >> "%LOG_FILE%" echo ERROR: Could not create temporary updater.
     goto :fail
 )
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%REPO_ROOT%\tools\upgrade\run-upgrade.ps1" -UpgradeCmd "%~f0" -RepoRoot "%REPO_ROOT%"
+call "%TMP_UPDATER%" --worker "%REPO_ROOT%" >> "%LOG_FILE%" 2>&1
 set "ERR=%ERRORLEVEL%"
+del /Q "%TMP_UPDATER%" >NUL 2>&1
+
+type "%LOG_FILE%"
 echo.
-echo Upgrade log: %REPO_ROOT%\upgrade.log
+echo Upgrade log: %LOG_FILE%
 if not "%ERR%"=="0" goto :fail_with_code
 pause
 exit /b 0
@@ -88,7 +100,7 @@ if not exist ".git" (
     if errorlevel 1 exit /b 1
 )
 
-echo [4/4] Running post-update steps with the newly downloaded upgrade.cmd...
+echo [4/4] Running post-update steps from the newly downloaded upgrade.cmd...
 call "%REPO_ROOT%\upgrade.cmd" --post-update
 exit /b %ERRORLEVEL%
 
@@ -132,5 +144,6 @@ echo.
 echo ============================================
 echo UPGRADE FAILED
 echo ============================================
+echo See upgrade.log for details.
 pause
 exit /b 1
