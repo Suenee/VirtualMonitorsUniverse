@@ -81,12 +81,13 @@ namespace Vmu {
 '@
 }
 
-function Get-Mode([string]$Name){
-    if([string]::IsNullOrWhiteSpace($Name)){ throw 'Cannot read display mode because the GDI display name is empty.' }
+function Get-Mode {
+    param([Parameter(Mandatory=$true,Position=0)][Alias('Name')][string]$DeviceName)
+    if([string]::IsNullOrWhiteSpace($DeviceName)){ throw 'Cannot read display mode because the GDI display name is empty.' }
     Ensure-DisplayApi
     $m=New-Object Vmu.MultiDisplayModeApi+DEVMODE
     $m.dmSize=[Runtime.InteropServices.Marshal]::SizeOf($m)
-    if(-not [Vmu.MultiDisplayModeApi]::EnumDisplaySettings($Name,-1,[ref]$m)){throw "Cannot read $Name mode."}
+    if(-not [Vmu.MultiDisplayModeApi]::EnumDisplaySettings($DeviceName,-1,[ref]$m)){throw "Cannot read $DeviceName mode."}
     return $m
 }
 function Mode-Key([string]$Name){ $m=Get-Mode $Name; return "pos=$($m.dmPositionX),$($m.dmPositionY);mode=$($m.dmPelsWidth)x$($m.dmPelsHeight)@$($m.dmDisplayFrequency);orientation=$($m.dmDisplayOrientation)" }
@@ -106,7 +107,7 @@ function Resolve-LiveIdentity {
 Remove-Item -LiteralPath $LogPath -Force -ErrorAction SilentlyContinue
 . $TopologyHelper
 Write-Log 'Virtual Monitors Universe - MULTI-VDD isolation acceptance test'
-Write-Log 'Runner: multivdd-isolation-v3-live-identity' Cyan
+Write-Log 'Runner: multivdd-isolation-v4-mode-binding' Cyan
 
 try {
     if(@(Get-Vdds).Count -ne 0){ throw 'Multi-VDD test requires the preceding ALPHA test to leave a clean baseline.' }
