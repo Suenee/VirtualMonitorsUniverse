@@ -4,7 +4,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$RunnerVersion = 'standalone-setdisplayconfig-v1'
+$RunnerVersion = 'standalone-setdisplayconfig-v2-adjacency'
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $LogPath = Join-Path $RepoRoot 'alfatest.log'
 $RuntimeRoot = Join-Path $RepoRoot '.runtime\alpha'
@@ -20,10 +20,12 @@ $DriverSha256 = 'e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3
 $NefConVersion = '1.14.0'
 $NefConUrl = 'https://github.com/nefarius/nefcon/releases/download/v1.14.0/nefcon_v1.14.0.zip'
 $NefConSha256 = 'a15557da24a9efca203158de3b43b0eaf982db231f0194031f1ed428bc13e669'
+$MinimumAdjacencyPixels = 64
 
 $Results = [ordered]@{
     Preflight = 'NOT RUN'
     DynamicResolution = 'NOT RUN'
+    TopologyAdjacency = 'NOT RUN'
     DisconnectReconnect = 'NOT RUN'
     UninstallFirstAttempt = 'NOT RUN'
 }
@@ -190,7 +192,8 @@ namespace Vmu {
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct DEVMODE {
    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmDeviceName; public ushort dmSpecVersion,dmDriverVersion,dmSize,dmDriverExtra; public uint dmFields; public int dmPositionX,dmPositionY; public uint dmDisplayOrientation,dmDisplayFixedOutput; public short dmColor,dmDuplex,dmYResolution,dmTTOption,dmCollate; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmFormName; public ushort dmLogPixels; public uint dmBitsPerPel,dmPelsWidth,dmPelsHeight,dmDisplayFlags,dmDisplayFrequency,dmICMMethod,dmICMIntent,dmMediaType,dmDitherType,dmReserved1,dmReserved2,dmPanningWidth,dmPanningHeight;
   }
-  public const int ENUM_CURRENT_SETTINGS=-1; public const uint DM_PELSWIDTH=0x00080000,DM_PELSHEIGHT=0x00100000,DM_DISPLAYFREQUENCY=0x00400000,CDS_UPDATEREGISTRY=1; public const int DISP_CHANGE_SUCCESSFUL=0;
+  public const int ENUM_CURRENT_SETTINGS=-1;
+  public const uint DM_POSITION=0x00000020,DM_PELSWIDTH=0x00080000,DM_PELSHEIGHT=0x00100000,DM_DISPLAYFREQUENCY=0x00400000,CDS_UPDATEREGISTRY=1;
   [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern bool EnumDisplaySettings(string deviceName,int modeNum,ref DEVMODE devMode);
   [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int ChangeDisplaySettingsEx(string deviceName,ref DEVMODE devMode,IntPtr hwnd,uint flags,IntPtr lParam);
  }
@@ -206,18 +209,97 @@ function Get-Mode {
     return $mode
 }
 
+function Get-ActiveDisplayRects {
+    Ensure-DisplayApi
+    Add-Type -AssemblyName System.Windows.Forms
+    $result=@()
+    foreach($screen in [System.Windows.Forms.Screen]::AllScreens){
+        try {
+            $m=Get-Mode -DeviceName $screen.DeviceName
+            $result += [pscustomobject]@{ DeviceName=$screen.DeviceName; X=[int]$m.dmPositionX; Y=[int]$m.dmPositionY; Width=[int]$m.dmPelsWidth; Height=[int]$m.dmPelsHeight; Right=[int]($m.dmPositionX+$m.dmPelsWidth); Bottom=[int]($m.dmPositionY+$m.dmPelsHeight) }
+        } catch {}
+    }
+    return @($result)
+}
+
+function Get-OverlapLength {
+    param([int]$A1,[int]$A2,[int]$B1,[int]$B2)
+    return [Math]::Max(0,[Math]::Min($A2,$B2)-[Math]::Max($A1,$B1))
+}
+
+function Get-AdjacencyAnchor {
+    param([string]$DeviceName)
+    $rects=@(Get-ActiveDisplayRects)
+    $target=$rects | Where-Object { $_.DeviceName -eq $DeviceName } | Select-Object -First 1
+    if($null -eq $target){ throw "Cannot determine desktop position for $DeviceName." }
+    $candidates=@()
+    foreach($n in @($rects | Where-Object { $_.DeviceName -ne $DeviceName })){
+        $vertical=Get-OverlapLength $target.Y $target.Bottom $n.Y $n.Bottom
+        $horizontal=Get-OverlapLength $target.X $target.Right $n.X $n.Right
+        if($target.X -eq $n.Right -and $vertical -gt 0){ $candidates += [pscustomobject]@{Neighbor=$n;Side='Left';Overlap=$vertical} }
+        if($target.Right -eq $n.X -and $vertical -gt 0){ $candidates += [pscustomobject]@{Neighbor=$n;Side='Right';Overlap=$vertical} }
+        if($target.Y -eq $n.Bottom -and $horizontal -gt 0){ $candidates += [pscustomobject]@{Neighbor=$n;Side='Above';Overlap=$horizontal} }
+        if($target.Bottom -eq $n.Y -and $horizontal -gt 0){ $candidates += [pscustomobject]@{Neighbor=$n;Side='Below';Overlap=$horizontal} }
+    }
+    $best=$candidates | Sort-Object Overlap -Descending | Select-Object -First 1
+    if($null -eq $best){
+        Write-Log "WARNING: $DeviceName has no edge-sharing neighbor before mode change; topology repair will use the nearest active display." Yellow
+        $others=@($rects | Where-Object { $_.DeviceName -ne $DeviceName })
+        if($others.Count -eq 0){ return $null }
+        $bestNeighbor=$others | Sort-Object @{Expression={ [Math]::Abs($_.X-$target.X)+[Math]::Abs($_.Y-$target.Y) }} | Select-Object -First 1
+        $best=[pscustomobject]@{Neighbor=$bestNeighbor;Side='Right';Overlap=0}
+    }
+    Write-Log ("Adjacency anchor: {0} is {1} of {2}; shared edge={3}px" -f $DeviceName,$best.Side,$best.Neighbor.DeviceName,$best.Overlap) DarkGray
+    return $best
+}
+
+function Get-ClampedPerpendicularPosition {
+    param([int]$Original,[int]$NewSize,[int]$NeighborStart,[int]$NeighborEnd,[int]$MinimumOverlap)
+    $min=$NeighborStart-$NewSize+$MinimumOverlap
+    $max=$NeighborEnd-$MinimumOverlap
+    if($min -gt $max){ return $NeighborStart }
+    return [Math]::Max($min,[Math]::Min($Original,$max))
+}
+
+function Test-UsableAdjacency {
+    param([string]$DeviceName,[int]$MinimumOverlap=$MinimumAdjacencyPixels)
+    $rects=@(Get-ActiveDisplayRects)
+    $target=$rects | Where-Object { $_.DeviceName -eq $DeviceName } | Select-Object -First 1
+    if($null -eq $target){ return $false }
+    foreach($n in @($rects | Where-Object { $_.DeviceName -ne $DeviceName })){
+        $vertical=Get-OverlapLength $target.Y $target.Bottom $n.Y $n.Bottom
+        $horizontal=Get-OverlapLength $target.X $target.Right $n.X $n.Right
+        if((($target.X -eq $n.Right -or $target.Right -eq $n.X) -and $vertical -ge $MinimumOverlap) -or (($target.Y -eq $n.Bottom -or $target.Bottom -eq $n.Y) -and $horizontal -ge $MinimumOverlap)){ return $true }
+    }
+    return $false
+}
+
 function Test-Mode {
     param([string]$DeviceName,[uint32]$Width,[uint32]$Height)
     try { $m=Get-Mode -DeviceName $DeviceName; return ($m.dmPelsWidth -eq $Width -and $m.dmPelsHeight -eq $Height) } catch { return $false }
 }
 
-function Set-Mode {
+function Set-ModePreserveAdjacency {
     param([string]$DeviceName,[uint32]$Width,[uint32]$Height,[uint32]$RefreshRate)
-    $mode=Get-Mode -DeviceName $DeviceName; $mode.dmPelsWidth=$Width; $mode.dmPelsHeight=$Height; $mode.dmDisplayFrequency=$RefreshRate
-    $mode.dmFields=[Vmu.DisplayModeApi]::DM_PELSWIDTH -bor [Vmu.DisplayModeApi]::DM_PELSHEIGHT -bor [Vmu.DisplayModeApi]::DM_DISPLAYFREQUENCY
+    $current=Get-Mode -DeviceName $DeviceName
+    $anchor=Get-AdjacencyAnchor -DeviceName $DeviceName
+    $newX=[int]$current.dmPositionX; $newY=[int]$current.dmPositionY
+    if($null -ne $anchor){
+        $n=$anchor.Neighbor
+        switch($anchor.Side){
+            'Left'  { $newX=$n.Right; $newY=Get-ClampedPerpendicularPosition $newY ([int]$Height) $n.Y $n.Bottom $MinimumAdjacencyPixels }
+            'Right' { $newX=$n.X-[int]$Width; $newY=Get-ClampedPerpendicularPosition $newY ([int]$Height) $n.Y $n.Bottom $MinimumAdjacencyPixels }
+            'Above' { $newY=$n.Bottom; $newX=Get-ClampedPerpendicularPosition $newX ([int]$Width) $n.X $n.Right $MinimumAdjacencyPixels }
+            'Below' { $newY=$n.Y-[int]$Height; $newX=Get-ClampedPerpendicularPosition $newX ([int]$Width) $n.X $n.Right $MinimumAdjacencyPixels }
+        }
+    }
+    $mode=$current; $mode.dmPelsWidth=$Width; $mode.dmPelsHeight=$Height; $mode.dmDisplayFrequency=$RefreshRate; $mode.dmPositionX=$newX; $mode.dmPositionY=$newY
+    $mode.dmFields=[Vmu.DisplayModeApi]::DM_POSITION -bor [Vmu.DisplayModeApi]::DM_PELSWIDTH -bor [Vmu.DisplayModeApi]::DM_PELSHEIGHT -bor [Vmu.DisplayModeApi]::DM_DISPLAYFREQUENCY
+    Write-Log ("Applying mode ${Width}x${Height}@${RefreshRate} with preserved position relation at ({0},{1})." -f $newX,$newY) DarkGray
     $result=[Vmu.DisplayModeApi]::ChangeDisplaySettingsEx($DeviceName,[ref]$mode,[IntPtr]::Zero,[Vmu.DisplayModeApi]::CDS_UPDATEREGISTRY,[IntPtr]::Zero)
     if($result -ne 0){ throw "Windows rejected ${Width}x${Height}@${RefreshRate} on $DeviceName (result $result)." }
     if(-not (Wait-Until -Description "$DeviceName mode ${Width}x${Height}" -TimeoutMs 5000 -Condition { Test-Mode $DeviceName $Width $Height })){ throw "Timed out waiting for ${Width}x${Height} on $DeviceName." }
+    if($null -ne $anchor -and -not (Wait-Until -Description "$DeviceName has usable edge adjacency" -TimeoutMs 2000 -Condition { Test-UsableAdjacency -DeviceName $DeviceName })){ throw "$DeviceName became active without usable adjacency to the desktop." }
 }
 
 function Open-DisplaySettings { Start-Process 'ms-settings:display' | Out-Null }
@@ -247,12 +329,17 @@ try {
     Write-Log 'PASS: exact PnP VDD instance mapped to exactly one active CCD/GDI display.' Green
     $Results.Preflight='PASS'
 
-    Write-Section 'TEST 1: DYNAMIC RESOLUTION'
-    Set-Mode -DeviceName $name -Width 1920 -Height 1080 -RefreshRate 60; Write-Log 'Set 1920x1080 @ 60 Hz.' Green
-    Set-Mode -DeviceName $name -Width 3840 -Height 2160 -RefreshRate 60; Write-Log 'Set 3840x2160 @ 60 Hz.' Green
+    Write-Section 'TEST 1: DYNAMIC RESOLUTION + TOPOLOGY ADJACENCY'
+    Set-ModePreserveAdjacency -DeviceName $name -Width 1920 -Height 1080 -RefreshRate 60; Write-Log 'Set 1920x1080 @ 60 Hz with adjacency preservation.' Green
+    Set-ModePreserveAdjacency -DeviceName $name -Width 3840 -Height 2160 -RefreshRate 60; Write-Log 'Set 3840x2160 @ 60 Hz with adjacency preservation.' Green
     Open-DisplaySettings
-    $Results.DynamicResolution = if(Ask-User 'Does the virtual monitor now show 3840x2160 and remain usable?'){'PASS'}else{'FAIL'}
-    Set-Mode -DeviceName $name -Width 1920 -Height 1080 -RefreshRate 60; Write-Log 'Returned to 1920x1080 @ 60 Hz.' Green
+    $resolutionOk=Ask-User 'Does the virtual monitor now show 3840x2160 and remain usable?'
+    Set-ModePreserveAdjacency -DeviceName $name -Width 1920 -Height 1080 -RefreshRate 60; Write-Log 'Returned to 1920x1080 @ 60 Hz with adjacency preservation.' Green
+    $adjacencyAutomatic=Test-UsableAdjacency -DeviceName $name
+    Open-DisplaySettings
+    $adjacencyUser=Ask-User 'After UHD to FHD, is the virtual monitor still properly adjacent and reachable by mouse without a corner-only connection?'
+    $Results.DynamicResolution=if($resolutionOk){'PASS'}else{'FAIL'}
+    $Results.TopologyAdjacency=if($adjacencyAutomatic -and $adjacencyUser){'PASS'}else{'FAIL'}
 
     Write-Section 'TEST 2: DISCONNECT / RECONNECT WITHOUT UNINSTALL'
     Write-Log 'Disconnect method: SetDisplayConfig, exact CCD path only. No 0x0 mode is used.' Cyan
@@ -267,14 +354,14 @@ try {
     Write-Log 'PASS: the same exact VDD CCD path is active again.' Green
     Open-DisplaySettings
     $reconnectOk=Ask-User 'Was the same virtual monitor reconnected without reinstalling the driver?'
-    $Results.DisconnectReconnect = if($disconnectOk -and $reconnectOk){'PASS'}else{'FAIL'}
+    $Results.DisconnectReconnect=if($disconnectOk -and $reconnectOk){'PASS'}else{'FAIL'}
 
     Write-Section 'TEST 3: ONE-SHOT UNINSTALL'
     $before=@(Get-VddDevices); Write-Log "VDD device nodes immediately before uninstall: $($before.Count)"
     $uninstallOk=Remove-VddInstallation
     Open-DisplaySettings
     $userOk=Ask-User 'After one uninstall attempt, is the virtual monitor completely gone from Windows display settings?'
-    $Results.UninstallFirstAttempt = if($uninstallOk -and $userOk){'PASS'}else{'FAIL'}
+    $Results.UninstallFirstAttempt=if($uninstallOk -and $userOk){'PASS'}else{'FAIL'}
 }
 catch {
     Write-Log "TEST ERROR: $($_.Exception.Message)" Red
