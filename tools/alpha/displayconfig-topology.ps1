@@ -74,7 +74,7 @@ namespace Vmu
                 ADAPTER_NAME adapter = new ADAPTER_NAME();
                 adapter.header.type = GET_ADAPTER; adapter.header.size = (UInt32)Marshal.SizeOf(typeof(ADAPTER_NAME)); adapter.header.adapterId = paths[i].targetInfo.adapterId; adapter.header.id = paths[i].targetInfo.id;
                 int ar = DisplayConfigGetDeviceInfo(ref adapter);
-                result[i] = "active=" + ((paths[i].flags & DISPLAYCONFIG_PATH_ACTIVE) != 0) + ";sourceLuid=" + Luid(paths[i].sourceInfo.adapterId) + ";sourceId=" + paths[i].sourceInfo.id + ";targetLuid=" + Luid(paths[i].targetInfo.adapterId) + ";targetId=" + paths[i].targetInfo.id + ";gdi=" + (sr == 0 ? source.viewGdiDeviceName : "") + ";friendly=" + (tr == 0 ? target.monitorFriendlyDeviceName : "") + ";monitorPath=" + (tr == 0 ? target.monitorDevicePath : "") + ";adapterPath=" + (ar == 0 ? adapter.adapterDevicePath : "");sr=" + sr + ";tr=" + tr + ";ar=" + ar;
+                result[i] = "active=" + ((paths[i].flags & DISPLAYCONFIG_PATH_ACTIVE) != 0) + ";sourceLuid=" + Luid(paths[i].sourceInfo.adapterId) + ";sourceId=" + paths[i].sourceInfo.id + ";targetLuid=" + Luid(paths[i].targetInfo.adapterId) + ";targetId=" + paths[i].targetInfo.id + ";gdi=" + (sr == 0 ? source.viewGdiDeviceName : "") + ";friendly=" + (tr == 0 ? target.monitorFriendlyDeviceName : "") + ";monitorPath=" + (tr == 0 ? target.monitorDevicePath : "") + ";adapterPath=" + (ar == 0 ? adapter.adapterDevicePath : "") + ";sr=" + sr + ";tr=" + tr + ";ar=" + ar;
             }
             return result;
         }
