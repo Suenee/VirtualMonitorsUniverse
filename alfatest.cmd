@@ -1,11 +1,12 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
+cls
 
 echo Virtual Monitors Universe - ALPHA acceptance test
 echo.
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\alpha\run-alfatest-ccd.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\alpha\alfatest.ps1"
 set "ERR=%ERRORLEVEL%"
 
 echo.
