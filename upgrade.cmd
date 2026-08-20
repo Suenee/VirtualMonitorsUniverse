@@ -8,22 +8,23 @@ if /I "%~1"=="--worker" goto :worker
 if /I "%~1"=="--post-update" goto :post_update
 
 cd /d "%~dp0"
+set "REPO_ROOT=%CD%"
 
 echo ============================================
 echo Virtual Monitors Universe - GitHub upgrade
 echo ============================================
 echo.
 
-if not exist "%~dp0tools\upgrade\run-upgrade.ps1" (
+if not exist "%REPO_ROOT%\tools\upgrade\run-upgrade.ps1" (
     echo ERROR: Logged upgrade runner is missing.
     echo Run git pull once to obtain the current repository files.
     goto :fail
 )
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\upgrade\run-upgrade.ps1" -UpgradeCmd "%~f0" -RepoRoot "%~dp0"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%REPO_ROOT%\tools\upgrade\run-upgrade.ps1" -UpgradeCmd "%~f0" -RepoRoot "%REPO_ROOT%"
 set "ERR=%ERRORLEVEL%"
 echo.
-echo Upgrade log: %~dp0upgrade.log
+echo Upgrade log: %REPO_ROOT%\upgrade.log
 if not "%ERR%"=="0" goto :fail_with_code
 pause
 exit /b 0
@@ -87,7 +88,7 @@ if not exist ".git" (
 )
 
 echo [4/4] Running post-update steps with the newly downloaded upgrade.cmd...
-call "%REPO_ROOT%upgrade.cmd" --post-update
+call "%REPO_ROOT%\upgrade.cmd" --post-update
 exit /b %ERRORLEVEL%
 
 :post_update
