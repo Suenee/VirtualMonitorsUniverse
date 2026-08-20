@@ -26,6 +26,8 @@ $Results = [ordered]@{
     UninstallFirstAttempt = 'NOT RUN'
 }
 
+$script:SavedModes = @{}
+
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message,
@@ -50,8 +52,14 @@ function Ask-User {
 
     while ($true) {
         $answer = (Read-Host "$Prompt [Y/N]").Trim().ToUpperInvariant()
-        if ($answer -eq 'Y') { Write-Log "USER CONFIRMATION: YES - $Prompt" Green; return $true }
-        if ($answer -eq 'N') { Write-Log "USER CONFIRMATION: NO - $Prompt" Red; return $false }
+        if ($answer -eq 'Y') {
+            Write-Log "USER CONFIRMATION: YES - $Prompt" Green
+            return $true
+        }
+        if ($answer -eq 'N') {
+            Write-Log "USER CONFIRMATION: NO - $Prompt" Red
+            return $false
+        }
         Write-Host 'Please enter Y or N.' -ForegroundColor Yellow
     }
 }
@@ -118,7 +126,6 @@ function Wait-Until {
 }
 
 function Get-VddDevices {
-    # Deliberately query only the Display class. Never scan every PnP device.
     return @(
         Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
             Where-Object { $_.FriendlyName -eq 'Virtual Display Driver' }
@@ -189,7 +196,7 @@ function Get-CachedPayload {
     if (Test-Path -LiteralPath $Path) {
         try {
             Assert-Hash -Path $Path -Expected $Sha256
-            Write-Log "Using cached $Label: $Path" DarkGray
+            Write-Log "Using cached ${Label}: $Path" DarkGray
             return
         }
         catch {
@@ -261,62 +268,103 @@ function Install-Vdd {
 }
 
 function Ensure-DisplayApi {
-    if ('Vmu.AlphaDisplayApi2' -as [type]) { return }
+    if ('Vmu.DisplayModeApi' -as [type]) { return }
 
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-namespace Vmu {
- public static class AlphaDisplayApi2 {
-  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct DISPLAY_DEVICE { public int cb; [MarshalAs(UnmanagedType.ByValTStr,SizeConst=32)] public string DeviceName; [MarshalAs(UnmanagedType.ByValTStr,SizeConst=128)] public string DeviceString; public int StateFlags; [MarshalAs(UnmanagedType.ByValTStr,SizeConst=128)] public string DeviceID; [MarshalAs(UnmanagedType.ByValTStr,SizeConst=128)] public string DeviceKey; }
-  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct DEVMODE { [MarshalAs(UnmanagedType.ByValTStr,SizeConst=32)] public string dmDeviceName; public ushort dmSpecVersion,dmDriverVersion,dmSize,dmDriverExtra; public uint dmFields; public int dmPositionX,dmPositionY; public uint dmDisplayOrientation,dmDisplayFixedOutput; public short dmColor,dmDuplex,dmYResolution,dmTTOption,dmCollate; [MarshalAs(UnmanagedType.ByValTStr,SizeConst=32)] public string dmFormName; public ushort dmLogPixels; public uint dmBitsPerPel,dmPelsWidth,dmPelsHeight,dmDisplayFlags,dmDisplayFrequency,dmICMMethod,dmICMIntent,dmMediaType,dmDitherType,dmReserved1,dmReserved2,dmPanningWidth,dmPanningHeight; }
-  public const int ATTACHED=1, ENUM_CURRENT=-1, ENUM_REGISTRY=-2, SUCCESS=0; public const uint DM_POSITION=0x20,DM_WIDTH=0x80000,DM_HEIGHT=0x100000,DM_FREQ=0x400000,CDS_UPDATE=1;
-  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern bool EnumDisplayDevices(string a,uint b,ref DISPLAY_DEVICE c,uint d);
-  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern bool EnumDisplaySettings(string a,int b,ref DEVMODE c);
-  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int ChangeDisplaySettingsEx(string a,ref DEVMODE b,IntPtr c,uint d,IntPtr e);
- }
+
+namespace Vmu
+{
+    public static class DisplayModeApi
+    {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct DEVMODE
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+            public ushort dmSpecVersion;
+            public ushort dmDriverVersion;
+            public ushort dmSize;
+            public ushort dmDriverExtra;
+            public uint dmFields;
+            public int dmPositionX;
+            public int dmPositionY;
+            public uint dmDisplayOrientation;
+            public uint dmDisplayFixedOutput;
+            public short dmColor;
+            public short dmDuplex;
+            public short dmYResolution;
+            public short dmTTOption;
+            public short dmCollate;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+            public ushort dmLogPixels;
+            public uint dmBitsPerPel;
+            public uint dmPelsWidth;
+            public uint dmPelsHeight;
+            public uint dmDisplayFlags;
+            public uint dmDisplayFrequency;
+            public uint dmICMMethod;
+            public uint dmICMIntent;
+            public uint dmMediaType;
+            public uint dmDitherType;
+            public uint dmReserved1;
+            public uint dmReserved2;
+            public uint dmPanningWidth;
+            public uint dmPanningHeight;
+        }
+
+        public const int ENUM_CURRENT_SETTINGS = -1;
+        public const int ENUM_REGISTRY_SETTINGS = -2;
+        public const uint DM_POSITION = 0x00000020;
+        public const uint DM_PELSWIDTH = 0x00080000;
+        public const uint DM_PELSHEIGHT = 0x00100000;
+        public const uint DM_DISPLAYFREQUENCY = 0x00400000;
+        public const uint CDS_UPDATEREGISTRY = 0x00000001;
+        public const int DISP_CHANGE_SUCCESSFUL = 0;
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int ChangeDisplaySettingsEx(string deviceName, ref DEVMODE devMode, IntPtr hwnd, uint flags, IntPtr lParam);
+    }
 }
 '@
 }
 
 function Get-Displays {
-    Ensure-DisplayApi
-    $items = @()
-    [uint32]$i = 0
-
-    while ($true) {
-        $d = New-Object Vmu.AlphaDisplayApi2+DISPLAY_DEVICE
-        $d.cb = [Runtime.InteropServices.Marshal]::SizeOf($d)
-        if (-not [Vmu.AlphaDisplayApi2]::EnumDisplayDevices($null, $i, [ref]$d, 0)) { break }
-        $items += [pscustomobject]@{
-            DeviceName = $d.DeviceName
-            DeviceString = $d.DeviceString
-            Attached = (($d.StateFlags -band 1) -ne 0)
+    Add-Type -AssemblyName System.Windows.Forms
+    return @(
+        [System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+            [pscustomobject]@{
+                DeviceName = $_.DeviceName
+                Primary = $_.Primary
+                Bounds = $_.Bounds
+            }
         }
-        $i++
-    }
-    return $items
+    )
 }
 
 function Get-Mode {
     param([string]$DeviceName, [switch]$Registry)
 
     Ensure-DisplayApi
-    $m = New-Object Vmu.AlphaDisplayApi2+DEVMODE
-    $m.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($m)
-    $index = if ($Registry) { -2 } else { -1 }
-    if (-not [Vmu.AlphaDisplayApi2]::EnumDisplaySettings($DeviceName, $index, [ref]$m)) {
-        throw "Cannot read mode for $DeviceName"
+    $mode = New-Object Vmu.DisplayModeApi+DEVMODE
+    $mode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($mode)
+    $modeIndex = if ($Registry) { [Vmu.DisplayModeApi]::ENUM_REGISTRY_SETTINGS } else { [Vmu.DisplayModeApi]::ENUM_CURRENT_SETTINGS }
+
+    if (-not [Vmu.DisplayModeApi]::EnumDisplaySettings($DeviceName, $modeIndex, [ref]$mode)) {
+        throw "Cannot read display mode for $DeviceName."
     }
-    return $m
+    return $mode
 }
 
 function Test-Mode {
     param([string]$DeviceName, [uint32]$Width, [uint32]$Height)
 
     try {
-        $m = Get-Mode $DeviceName
-        return ($m.dmPelsWidth -eq $Width -and $m.dmPelsHeight -eq $Height)
+        $mode = Get-Mode -DeviceName $DeviceName
+        return ($mode.dmPelsWidth -eq $Width -and $mode.dmPelsHeight -eq $Height)
     }
     catch {
         return $false
@@ -326,13 +374,16 @@ function Test-Mode {
 function Set-Mode {
     param([string]$DeviceName, [uint32]$Width, [uint32]$Height, [uint32]$RefreshRate)
 
-    $m = Get-Mode $DeviceName
-    $m.dmPelsWidth = $Width
-    $m.dmPelsHeight = $Height
-    $m.dmDisplayFrequency = $RefreshRate
-    $m.dmFields = 0x80000 -bor 0x100000 -bor 0x400000
-    $r = [Vmu.AlphaDisplayApi2]::ChangeDisplaySettingsEx($DeviceName, [ref]$m, [IntPtr]::Zero, 1, [IntPtr]::Zero)
-    if ($r -ne 0) { throw "Windows rejected ${Width}x${Height}@${RefreshRate} on $DeviceName (result $r)." }
+    $mode = Get-Mode -DeviceName $DeviceName
+    $mode.dmPelsWidth = $Width
+    $mode.dmPelsHeight = $Height
+    $mode.dmDisplayFrequency = $RefreshRate
+    $mode.dmFields = [Vmu.DisplayModeApi]::DM_PELSWIDTH -bor [Vmu.DisplayModeApi]::DM_PELSHEIGHT -bor [Vmu.DisplayModeApi]::DM_DISPLAYFREQUENCY
+
+    $result = [Vmu.DisplayModeApi]::ChangeDisplaySettingsEx($DeviceName, [ref]$mode, [IntPtr]::Zero, [Vmu.DisplayModeApi]::CDS_UPDATEREGISTRY, [IntPtr]::Zero)
+    if ($result -ne [Vmu.DisplayModeApi]::DISP_CHANGE_SUCCESSFUL) {
+        throw "Windows rejected ${Width}x${Height}@${RefreshRate} on $DeviceName (result $result)."
+    }
 
     if (-not (Wait-Until -Description "$DeviceName mode ${Width}x${Height}" -TimeoutMs 5000 -Condition { Test-Mode $DeviceName $Width $Height })) {
         throw "Timed out waiting for ${Width}x${Height} on $DeviceName."
@@ -342,20 +393,25 @@ function Set-Mode {
 function Test-DisplayAttached {
     param([string]$DeviceName, [bool]$Expected)
 
-    $display = @(Get-Displays | Where-Object { $_.DeviceName -eq $DeviceName } | Select-Object -First 1)
-    if ($display.Count -eq 0) { return $false }
-    return ($display[0].Attached -eq $Expected)
+    $present = @((Get-Displays) | Where-Object { $_.DeviceName -eq $DeviceName }).Count -gt 0
+    return ($present -eq $Expected)
 }
 
 function Disconnect-Display {
     param([string]$DeviceName)
 
-    $m = Get-Mode $DeviceName
-    $m.dmPelsWidth = 0
-    $m.dmPelsHeight = 0
-    $m.dmFields = 0x20 -bor 0x80000 -bor 0x100000
-    $r = [Vmu.AlphaDisplayApi2]::ChangeDisplaySettingsEx($DeviceName, [ref]$m, [IntPtr]::Zero, 1, [IntPtr]::Zero)
-    if ($r -ne 0) { throw "Windows rejected disconnect for $DeviceName (result $r)." }
+    $current = Get-Mode -DeviceName $DeviceName
+    $script:SavedModes[$DeviceName] = $current
+
+    $mode = $current
+    $mode.dmPelsWidth = 0
+    $mode.dmPelsHeight = 0
+    $mode.dmFields = [Vmu.DisplayModeApi]::DM_PELSWIDTH -bor [Vmu.DisplayModeApi]::DM_PELSHEIGHT
+
+    $result = [Vmu.DisplayModeApi]::ChangeDisplaySettingsEx($DeviceName, [ref]$mode, [IntPtr]::Zero, [Vmu.DisplayModeApi]::CDS_UPDATEREGISTRY, [IntPtr]::Zero)
+    if ($result -ne [Vmu.DisplayModeApi]::DISP_CHANGE_SUCCESSFUL) {
+        throw "Windows rejected disconnect for $DeviceName (result $result)."
+    }
 
     if (-not (Wait-Until -Description "$DeviceName disconnected from desktop" -TimeoutMs 5000 -Condition { Test-DisplayAttached $DeviceName $false })) {
         throw "Timed out waiting for $DeviceName to disconnect."
@@ -365,15 +421,23 @@ function Disconnect-Display {
 function Reconnect-Display {
     param([string]$DeviceName)
 
-    $m = Get-Mode $DeviceName -Registry
-    if ($m.dmPelsWidth -eq 0 -or $m.dmPelsHeight -eq 0) {
-        $m.dmPelsWidth = 1920
-        $m.dmPelsHeight = 1080
-        $m.dmDisplayFrequency = 60
+    if ($script:SavedModes.ContainsKey($DeviceName)) {
+        $mode = $script:SavedModes[$DeviceName]
     }
-    $m.dmFields = 0x20 -bor 0x80000 -bor 0x100000 -bor 0x400000
-    $r = [Vmu.AlphaDisplayApi2]::ChangeDisplaySettingsEx($DeviceName, [ref]$m, [IntPtr]::Zero, 1, [IntPtr]::Zero)
-    if ($r -ne 0) { throw "Windows rejected reconnect for $DeviceName (result $r)." }
+    else {
+        $mode = Get-Mode -DeviceName $DeviceName -Registry
+        if ($mode.dmPelsWidth -eq 0 -or $mode.dmPelsHeight -eq 0) {
+            $mode.dmPelsWidth = 1920
+            $mode.dmPelsHeight = 1080
+            $mode.dmDisplayFrequency = 60
+        }
+    }
+
+    $mode.dmFields = [Vmu.DisplayModeApi]::DM_POSITION -bor [Vmu.DisplayModeApi]::DM_PELSWIDTH -bor [Vmu.DisplayModeApi]::DM_PELSHEIGHT -bor [Vmu.DisplayModeApi]::DM_DISPLAYFREQUENCY
+    $result = [Vmu.DisplayModeApi]::ChangeDisplaySettingsEx($DeviceName, [ref]$mode, [IntPtr]::Zero, [Vmu.DisplayModeApi]::CDS_UPDATEREGISTRY, [IntPtr]::Zero)
+    if ($result -ne [Vmu.DisplayModeApi]::DISP_CHANGE_SUCCESSFUL) {
+        throw "Windows rejected reconnect for $DeviceName (result $result)."
+    }
 
     if (-not (Wait-Until -Description "$DeviceName reconnected to desktop" -TimeoutMs 5000 -Condition { Test-DisplayAttached $DeviceName $true })) {
         throw "Timed out waiting for $DeviceName to reconnect."
@@ -387,6 +451,7 @@ function Open-DisplaySettings {
 Restart-AsAdministrator
 Remove-Item -LiteralPath $LogPath -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
+
 Write-Log 'Virtual Monitors Universe - ALPHA acceptance test'
 Write-Log "Repository runtime: $RuntimeRoot"
 Write-Log "Computer: $env:COMPUTERNAME"
@@ -395,42 +460,75 @@ Write-Log "PowerShell: $($PSVersionTable.PSVersion)"
 
 try {
     Write-Section 'PRE-FLIGHT: CLEAN BASELINE AND ONE FRESH VDD'
+
     $existing = @(Get-VddDevices)
     Write-Log "Existing VDD device nodes: $($existing.Count)"
     if ($existing.Count -gt 0) {
-        if (-not (Remove-VddInstallation)) { throw 'Could not establish clean baseline.' }
+        Write-Log 'Previous ALPHA test VDD remnants detected; removing them before the new test.' Yellow
+        if (-not (Remove-VddInstallation)) {
+            throw 'Could not establish clean baseline.'
+        }
+    }
+
+    $baselineDisplays = @(Get-Displays)
+    $baselineNames = @($baselineDisplays | ForEach-Object { $_.DeviceName })
+    Write-Log ("Baseline Windows displays before VDD install: {0}" -f ($baselineNames -join ', '))
+
+    if ($baselineNames.Count -eq 0) {
+        throw 'Windows display enumeration returned zero physical/active displays before VDD installation.'
     }
 
     Install-Vdd
+
+    $newDisplay = $null
+    $found = Wait-Until -Description 'new Windows display created by VDD' -TimeoutMs 10000 -Condition {
+        $current = @(Get-Displays)
+        $new = @($current | Where-Object { $baselineNames -notcontains $_.DeviceName })
+        if ($new.Count -eq 1) {
+            $script:DetectedNewDisplay = $new[0]
+            return $true
+        }
+        return $false
+    }
+
+    if (-not $found -or $null -eq $script:DetectedNewDisplay) {
+        $currentNames = @((Get-Displays) | ForEach-Object { $_.DeviceName })
+        Write-Log ("Windows displays after VDD install: {0}" -f ($currentNames -join ', ')) Yellow
+        throw 'Could not identify exactly one new Windows display after VDD installation.'
+    }
+
+    $newDisplay = $script:DetectedNewDisplay
+    $name = $newDisplay.DeviceName
+    Write-Log "Virtual Windows display identified as: $name" Green
     $Results.Preflight = 'PASS'
 
-    $virtual = @(Get-Displays | Where-Object { $_.DeviceString -match 'Virtual|MTT|VDD' }) | Select-Object -Last 1
-    if (-not $virtual) { throw 'Could not identify the virtual Windows display.' }
-    $name = $virtual.DeviceName
-    Write-Log "Virtual Windows display: $name / $($virtual.DeviceString)"
-
     Write-Section 'TEST 1: DYNAMIC RESOLUTION'
-    Set-Mode $name 1920 1080 60
+    Set-Mode -DeviceName $name -Width 1920 -Height 1080 -RefreshRate 60
     Write-Log 'Set 1920x1080 @ 60 Hz.' Green
-    Set-Mode $name 3840 2160 60
+
+    Set-Mode -DeviceName $name -Width 3840 -Height 2160 -RefreshRate 60
     Write-Log 'Set 3840x2160 @ 60 Hz.' Green
     Open-DisplaySettings
+
     if (Ask-User 'Does the virtual monitor now show 3840x2160 and remain usable?') {
         $Results.DynamicResolution = 'PASS'
     }
     else {
         $Results.DynamicResolution = 'FAIL'
     }
-    Set-Mode $name 1920 1080 60
+
+    Set-Mode -DeviceName $name -Width 1920 -Height 1080 -RefreshRate 60
     Write-Log 'Returned to 1920x1080 @ 60 Hz.' Green
 
     Write-Section 'TEST 2: DISCONNECT / RECONNECT WITHOUT UNINSTALL'
-    Disconnect-Display $name
+    Disconnect-Display -DeviceName $name
     Open-DisplaySettings
     $disconnectOk = Ask-User 'Is the virtual monitor still known by Windows but disconnected from the desktop (not Extend/Clone)?'
-    Reconnect-Display $name
+
+    Reconnect-Display -DeviceName $name
     Open-DisplaySettings
     $reconnectOk = Ask-User 'Was the same virtual monitor reconnected without reinstalling the driver?'
+
     if ($disconnectOk -and $reconnectOk) {
         $Results.DisconnectReconnect = 'PASS'
     }
@@ -444,6 +542,7 @@ try {
     $uninstallOk = Remove-VddInstallation
     Open-DisplaySettings
     $userOk = Ask-User 'After one uninstall attempt, is the virtual monitor completely gone from Windows display settings?'
+
     if ($uninstallOk -and $userOk) {
         $Results.UninstallFirstAttempt = 'PASS'
     }
