@@ -7,6 +7,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Normalize arguments defensively. A quoted Windows path ending in a backslash
+# can otherwise arrive with a stray quote when passed through cmd.exe.
+$UpgradeCmd = [System.IO.Path]::GetFullPath($UpgradeCmd.Trim('"'))
+$RepoRoot = [System.IO.Path]::GetFullPath($RepoRoot.Trim('"')).TrimEnd('\')
+
 $logPath = Join-Path $RepoRoot 'upgrade.log'
 $tempCmd = Join-Path $env:TEMP ("VMU-upgrade-{0}-{1}.cmd" -f $PID, [Guid]::NewGuid().ToString('N'))
 
