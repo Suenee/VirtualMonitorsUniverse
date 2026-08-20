@@ -14,19 +14,19 @@ echo Virtual Monitors Universe - GitHub upgrade
 echo ============================================
 echo.
 
-rem Run Git synchronization from a temporary copy so upgrade.cmd itself can
-rem be safely replaced while the upgrade is running.
-set "TMP_UPDATER=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.cmd"
-copy /Y "%~f0" "%TMP_UPDATER%" >NUL
-if errorlevel 1 (
-    echo ERROR: Could not create temporary updater.
+if not exist "%~dp0tools\upgrade\run-upgrade.ps1" (
+    echo ERROR: Logged upgrade runner is missing.
+    echo Run git pull once to obtain the current repository files.
     goto :fail
 )
 
-call "%TMP_UPDATER%" --worker "%~dp0"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\upgrade\run-upgrade.ps1" -UpgradeCmd "%~f0" -RepoRoot "%~dp0"
 set "ERR=%ERRORLEVEL%"
-del /Q "%TMP_UPDATER%" >NUL 2>&1
-exit /b %ERR%
+echo.
+echo Upgrade log: %~dp0upgrade.log
+if not "%ERR%"=="0" goto :fail_with_code
+pause
+exit /b 0
 
 :worker
 set "REPO_ROOT=%~2"
@@ -86,7 +86,7 @@ if not exist ".git" (
     if errorlevel 1 exit /b 1
 )
 
-echo [4/4] Restarting with the newly downloaded upgrade.cmd...
+echo [4/4] Running post-update steps with the newly downloaded upgrade.cmd...
 call "%REPO_ROOT%upgrade.cmd" --post-update
 exit /b %ERRORLEVEL%
 
@@ -97,8 +97,6 @@ echo.
 echo Applying repository-local upgrade steps...
 if not exist ".runtime\alpha" mkdir ".runtime\alpha" >NUL 2>&1
 
-rem Clean only legacy paths created by earlier VMU ALPHA builds. The PowerShell
-rem script refuses to delete a directory unless known VDD marker files exist.
 if exist "tools\alpha\cleanup-legacy-c.ps1" (
     echo Checking C: for legacy VMU/VDD development artifacts...
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\alpha\cleanup-legacy-c.ps1"
@@ -116,8 +114,16 @@ echo Repository is synchronized with GitHub.
 echo Development/runtime files are stored under: %~dp0.runtime\alpha
 echo Next ALPHA acceptance test: alfatest.cmd
 echo.
-pause
 exit /b 0
+
+:fail_with_code
+echo.
+echo ============================================
+echo UPGRADE FAILED
+echo ============================================
+echo See upgrade.log for details.
+pause
+exit /b %ERR%
 
 :fail
 echo.
