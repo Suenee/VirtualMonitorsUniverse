@@ -81,15 +81,32 @@ namespace Vmu {
 '@
 }
 
-function Get-Mode([string]$Name){ Ensure-DisplayApi; $m=New-Object Vmu.MultiDisplayModeApi+DEVMODE; $m.dmSize=[Runtime.InteropServices.Marshal]::SizeOf($m); if(-not [Vmu.MultiDisplayModeApi]::EnumDisplaySettings($Name,-1,[ref]$m)){throw "Cannot read $Name mode."}; return $m }
+function Get-Mode([string]$Name){
+    if([string]::IsNullOrWhiteSpace($Name)){ throw 'Cannot read display mode because the GDI display name is empty.' }
+    Ensure-DisplayApi
+    $m=New-Object Vmu.MultiDisplayModeApi+DEVMODE
+    $m.dmSize=[Runtime.InteropServices.Marshal]::SizeOf($m)
+    if(-not [Vmu.MultiDisplayModeApi]::EnumDisplaySettings($Name,-1,[ref]$m)){throw "Cannot read $Name mode."}
+    return $m
+}
 function Mode-Key([string]$Name){ $m=Get-Mode $Name; return "pos=$($m.dmPositionX),$($m.dmPositionY);mode=$($m.dmPelsWidth)x$($m.dmPelsHeight)@$($m.dmDisplayFrequency);orientation=$($m.dmDisplayOrientation)" }
 function Set-Resolution([string]$Name,[uint32]$W,[uint32]$H){ $m=Get-Mode $Name; $m.dmPelsWidth=$W; $m.dmPelsHeight=$H; $m.dmDisplayFrequency=60; $m.dmFields=[Vmu.MultiDisplayModeApi]::DM_PELSWIDTH -bor [Vmu.MultiDisplayModeApi]::DM_PELSHEIGHT -bor [Vmu.MultiDisplayModeApi]::DM_DISPLAYFREQUENCY; $r=[Vmu.MultiDisplayModeApi]::ChangeDisplaySettingsEx($Name,[ref]$m,[IntPtr]::Zero,1,[IntPtr]::Zero); if($r -ne 0){throw "Resolution change failed for ${Name}: $r"} }
 function Remove-OneVdd([string]$InstanceId){ Invoke-Native "$env:SystemRoot\System32\pnputil.exe" @('/remove-device',('"{0}"' -f $InstanceId)) | Out-Null; return (Wait-Until { @(Get-Vdds | Where-Object InstanceId -eq $InstanceId).Count -eq 0 } "VDD $InstanceId removed" 5000) }
 
+function Resolve-LiveIdentity {
+    param([Parameter(Mandatory=$true)][string]$InstanceId,[Parameter(Mandatory=$true)][string]$Label)
+    $device=Get-Vdds | Where-Object { $_.InstanceId -eq $InstanceId } | Select-Object -First 1
+    if($null -eq $device){ throw "$Label PnP instance $InstanceId is no longer present." }
+    $identity=Resolve-VmuVddIdentity -Device $device
+    if($null -eq $identity -or [string]::IsNullOrWhiteSpace([string]$identity.GdiName)){ throw "$Label identity resolved without a GDI display name." }
+    Write-Log ("LIVE IDENTITY {0}: instance={1}; gdi={2}; source={3}/{4}; target={5}/{6}" -f $Label,$identity.InstanceId,$identity.GdiName,$identity.SourceLuid,$identity.SourceId,$identity.TargetLuid,$identity.TargetId) DarkGray
+    return $identity
+}
+
 Remove-Item -LiteralPath $LogPath -Force -ErrorAction SilentlyContinue
 . $TopologyHelper
 Write-Log 'Virtual Monitors Universe - MULTI-VDD isolation acceptance test'
-Write-Log 'Runner: multivdd-isolation-v2-display-numbers' Cyan
+Write-Log 'Runner: multivdd-isolation-v3-live-identity' Cyan
 
 try {
     if(@(Get-Vdds).Count -ne 0){ throw 'Multi-VDD test requires the preceding ALPHA test to leave a clean baseline.' }
@@ -108,7 +125,10 @@ try {
     $devices=@(Get-Vdds | Sort-Object InstanceId)
     $a=$devices | Where-Object InstanceId -eq $aDevice.InstanceId | Select-Object -First 1
     $b=$devices | Where-Object InstanceId -ne $aDevice.InstanceId | Select-Object -First 1
-    $ia=Resolve-VmuVddIdentity $a; $ib=Resolve-VmuVddIdentity $b
+    $aInstanceId=$a.InstanceId
+    $bInstanceId=$b.InstanceId
+    $ia=Resolve-LiveIdentity -InstanceId $aInstanceId -Label 'VDD-A'
+    $ib=Resolve-LiveIdentity -InstanceId $bInstanceId -Label 'VDD-B'
     Write-Log "A: $($ia.InstanceId) -> $($ia.GdiName), target $($ia.TargetId)" Green
     Write-Log "B: $($ib.InstanceId) -> $($ib.GdiName), target $($ib.TargetId)" Green
     if($ia.InstanceId -eq $ib.InstanceId -or $ia.GdiName -eq $ib.GdiName){ throw 'VDD identities are not unique.' }
@@ -126,30 +146,38 @@ try {
     $bBefore=Mode-Key $ib.GdiName
     Set-Resolution $ia.GdiName 3840 2160
     Start-Sleep -Milliseconds 300
+    $ib=Resolve-LiveIdentity -InstanceId $bInstanceId -Label 'VDD-B after A resolution change'
     $bAfterResolution=Mode-Key $ib.GdiName
     if($bBefore -ne $bAfterResolution){ throw "Changing A modified B: $bBefore -> $bAfterResolution" }
     Write-Log "PASS: changing resolution of VDD-A (monitor $aNumber) did not modify VDD-B (monitor $bNumber)." Green
     if(-not (Ask-User "Verify monitor $aNumber (VDD-A) changed to UHD while monitor $bNumber (VDD-B) remained unchanged")){ throw 'User rejected resolution isolation.' }
 
-    Invoke-VmuDisconnectExact $ia
-    if(-not (Wait-Until { (Test-VmuVddActive $ia.InstanceId $false) -and (Test-VmuVddActive $ib.InstanceId $true) } "monitor $aNumber inactive while monitor $bNumber remains active" 5000)){ throw 'Disconnect isolation failed.' }
+    $ia=Resolve-LiveIdentity -InstanceId $aInstanceId -Label 'VDD-A before disconnect'
+    $ib=Resolve-LiveIdentity -InstanceId $bInstanceId -Label 'VDD-B before A disconnect'
+    Write-Log ("DISCONNECT TARGET: monitor {0}; instance={1}; gdi={2}; source={3}/{4}; target={5}/{6}" -f $aNumber,$ia.InstanceId,$ia.GdiName,$ia.SourceLuid,$ia.SourceId,$ia.TargetLuid,$ia.TargetId) Cyan
+    Invoke-VmuDisconnectExact -Identity $ia
+    if(-not (Wait-Until { (Test-VmuVddActive -InstanceId $aInstanceId -Expected $false) -and (Test-VmuVddActive -InstanceId $bInstanceId -Expected $true) } "monitor $aNumber inactive while monitor $bNumber remains active" 5000)){ throw 'Disconnect isolation failed.' }
+    $ib=Resolve-LiveIdentity -InstanceId $bInstanceId -Label 'VDD-B after A disconnect'
     if((Mode-Key $ib.GdiName) -ne $bBefore){ throw 'Disconnecting A modified B configuration.' }
     Write-Log "PASS: VDD-A (monitor $aNumber) disconnected; VDD-B (monitor $bNumber) remained active and unchanged." Green
     if(-not (Ask-User "Verify monitor $aNumber (VDD-A) is disconnected and monitor $bNumber (VDD-B) is still active")){ throw 'User rejected disconnect isolation.' }
 
     Invoke-VmuReconnectSaved
-    if(-not (Wait-Until { (Test-VmuVddActive $ia.InstanceId $true) -and (Test-VmuVddActive $ib.InstanceId $true) } "monitor $aNumber reconnected while monitor $bNumber remains active" 5000)){ throw 'Reconnect isolation failed.' }
+    if(-not (Wait-Until { (Test-VmuVddActive -InstanceId $aInstanceId -Expected $true) -and (Test-VmuVddActive -InstanceId $bInstanceId -Expected $true) } "monitor $aNumber reconnected while monitor $bNumber remains active" 5000)){ throw 'Reconnect isolation failed.' }
+    $ia=Resolve-LiveIdentity -InstanceId $aInstanceId -Label 'VDD-A after reconnect'
+    $ib=Resolve-LiveIdentity -InstanceId $bInstanceId -Label 'VDD-B after A reconnect'
     if((Mode-Key $ib.GdiName) -ne $bBefore){ throw 'Reconnecting A modified B configuration.' }
     Write-Log "PASS: VDD-A (monitor $aNumber) reconnected; VDD-B (monitor $bNumber) remained active and unchanged." Green
     if(-not (Ask-User "Verify monitor $aNumber (VDD-A) returned and monitor $bNumber (VDD-B) is still unchanged")){ throw 'User rejected reconnect isolation.' }
 
-    if(-not (Remove-OneVdd $ia.InstanceId)){ throw 'Could not uninstall A on first attempt.' }
-    if(@(Get-Vdds | Where-Object InstanceId -eq $ib.InstanceId).Count -ne 1 -or -not (Test-VmuVddActive $ib.InstanceId $true)){ throw 'Uninstalling A affected B.' }
+    if(-not (Remove-OneVdd $aInstanceId)){ throw 'Could not uninstall A on first attempt.' }
+    if(@(Get-Vdds | Where-Object InstanceId -eq $bInstanceId).Count -ne 1 -or -not (Test-VmuVddActive -InstanceId $bInstanceId -Expected $true)){ throw 'Uninstalling A affected B.' }
+    $ib=Resolve-LiveIdentity -InstanceId $bInstanceId -Label 'VDD-B after A uninstall'
     if((Mode-Key $ib.GdiName) -ne $bBefore){ throw 'Uninstalling A modified B configuration.' }
     Write-Log "PASS: uninstalling VDD-A (monitor $aNumber) did not remove, disconnect, or reconfigure VDD-B (monitor $bNumber)." Green
     if(-not (Ask-User "Verify monitor $aNumber (VDD-A) is gone and monitor $bNumber (VDD-B) still works")){ throw 'User rejected uninstall isolation.' }
 
-    if(-not (Remove-OneVdd $ib.InstanceId)){ throw 'Could not uninstall B during cleanup.' }
+    if(-not (Remove-OneVdd $bInstanceId)){ throw 'Could not uninstall B during cleanup.' }
     Write-Log 'MULTI-VDD ISOLATION: PASS' Green
     exit 0
 }
