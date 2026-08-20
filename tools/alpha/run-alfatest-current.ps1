@@ -20,10 +20,9 @@ try {
     $source = $source -replace "`r`n", "`n"
     $source = $source.Replace('"Using cached $Label: $Path"', '"Using cached ${Label}: $Path"')
 
-    # ALPHA identity probe. This deliberately does not guess from DISPLAY numbers.
-    # It enumerates CCD paths and records stable source/target adapter LUIDs,
-    # source/target IDs, GDI source name, target monitor device path and adapter path.
-    # The next step is to correlate those paths with the exact PnP VDD instance.
+    # CCD is used only to establish an exact identity chain:
+    # PnP VDD instance -> CCD adapter path -> adapter LUID/source/target -> GDI display name.
+    # No DISPLAY number guessing or topology-order assumptions are allowed.
     $identityCode = @'
 function Ensure-DisplayConfigIdentityApi {
     if ('Vmu.DisplayConfigIdentityApi' -as [type]) { return }
@@ -76,14 +75,53 @@ function Get-DisplayConfigIdentitySnapshot {
     return @([Vmu.DisplayConfigIdentityApi]::Snapshot())
 }
 
-function Write-IdentitySnapshot {
-    param([string]$Label)
-    Write-Log "DISPLAYCONFIG IDENTITY SNAPSHOT: $Label" Cyan
-    foreach ($line in @(Get-DisplayConfigIdentitySnapshot)) { Write-Log "CCD: $line" DarkGray }
-    foreach ($device in @(Get-VddDevices)) {
-        $hw = ''
-        try { $hw = ((Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction Stop).Data -join ',') } catch {}
-        Write-Log ("PNP VDD: instance={0};status={1};hardwareIds={2}" -f $device.InstanceId,$device.Status,$hw) DarkGray
+function Get-CcdField {
+    param([string]$Line, [string]$Name)
+    foreach ($part in ($Line -split ';')) {
+        $pair = $part -split '=', 2
+        if ($pair.Count -eq 2 -and $pair[0] -eq $Name) { return $pair[1] }
+    }
+    return ''
+}
+
+function Resolve-VddDisplayIdentity {
+    param([Parameter(Mandatory = $true)]$Device)
+
+    $instanceToken = $Device.InstanceId.Replace('\', '#')
+    $all = @(Get-DisplayConfigIdentitySnapshot)
+    $adapterMatches = @($all | Where-Object {
+        $adapterPath = Get-CcdField $_ 'adapterPath'
+        -not [string]::IsNullOrWhiteSpace($adapterPath) -and
+        $adapterPath.IndexOf($instanceToken, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+
+    if ($adapterMatches.Count -eq 0) {
+        throw "No CCD adapter path maps to PnP VDD instance $($Device.InstanceId)."
+    }
+
+    $activeMatches = @($adapterMatches | Where-Object { (Get-CcdField $_ 'active') -eq 'True' })
+    if ($activeMatches.Count -ne 1) {
+        foreach ($line in $adapterMatches) { Write-Log "VDD CCD CANDIDATE: $line" Yellow }
+        throw "Expected exactly one active CCD path for $($Device.InstanceId), found $($activeMatches.Count)."
+    }
+
+    $line = $activeMatches[0]
+    $gdi = Get-CcdField $line 'gdi'
+    if ([string]::IsNullOrWhiteSpace($gdi)) {
+        throw "The active CCD path for $($Device.InstanceId) has no GDI display name."
+    }
+
+    return [pscustomobject]@{
+        InstanceId = $Device.InstanceId
+        GdiName = $gdi
+        FriendlyName = Get-CcdField $line 'friendly'
+        SourceLuid = Get-CcdField $line 'sourceLuid'
+        SourceId = Get-CcdField $line 'sourceId'
+        TargetLuid = Get-CcdField $line 'targetLuid'
+        TargetId = Get-CcdField $line 'targetId'
+        MonitorPath = Get-CcdField $line 'monitorPath'
+        AdapterPath = Get-CcdField $line 'adapterPath'
+        Raw = $line
     }
 }
 '@
@@ -92,8 +130,6 @@ function Write-IdentitySnapshot {
     if (-not $source.Contains($insertPoint)) { throw 'Could not locate Get-Mode insertion point.' }
     $source = $source.Replace($insertPoint, ($identityCode + "`n" + $insertPoint))
 
-    # Replace pre-flight with a deterministic identity diagnostic. We do not proceed
-    # to destructive per-monitor operations until the exact VDD<->CCD mapping is proven.
     $preflightPattern = '(?s)(Write-Section ''PRE-FLIGHT: CLEAN BASELINE AND ONE FRESH VDD''\n).*?(\n    Write-Section ''TEST 1: DYNAMIC RESOLUTION'')'
     $preflightReplacement = @'
 $1    $existing = @(Get-VddDevices)
@@ -103,21 +139,22 @@ $1    $existing = @(Get-VddDevices)
         if (-not (Remove-VddInstallation)) { throw 'Could not establish clean baseline.' }
     }
 
-    Write-IdentitySnapshot 'BEFORE VDD INSTALL'
     Install-Vdd
-    Write-IdentitySnapshot 'AFTER VDD INSTALL'
+    $vddDevices = @(Get-VddDevices)
+    if ($vddDevices.Count -ne 1) { throw "Expected one VDD device for identity mapping, found $($vddDevices.Count)." }
 
+    $identity = Resolve-VddDisplayIdentity -Device $vddDevices[0]
+    $name = $identity.GdiName
+    Write-Log ("VDD IDENTITY: instance={0};gdi={1};friendly={2};source={3}/{4};target={5}/{6};monitorPath={7};adapterPath={8}" -f $identity.InstanceId,$identity.GdiName,$identity.FriendlyName,$identity.SourceLuid,$identity.SourceId,$identity.TargetLuid,$identity.TargetId,$identity.MonitorPath,$identity.AdapterPath) Green
+    Write-Log 'PASS: exact PnP VDD instance mapped to exactly one active CCD/GDI display.' Green
     $Results.Preflight = 'PASS'
-    Write-Log 'IDENTITY PROBE COMPLETE: no display was modified because exact VDD-to-CCD mapping must be proven first.' Yellow
-    throw 'IDENTITY_PROBE_COMPLETE'
 $2
 '@
 
     $patched = [regex]::Replace($source, $preflightPattern, $preflightReplacement, 1)
-    if ($patched -eq $source) { throw 'Could not locate the ALPHA pre-flight section for identity probe patching.' }
+    if ($patched -eq $source) { throw 'Could not locate the ALPHA pre-flight section for VDD identity patching.' }
     $source = $patched
 
-    # Avoid duplicate final summaries from nested runtime patch generations.
     $source = $source -replace "(?<!`r)`n", "`r`n"
     Set-Content -LiteralPath $runtimePath -Value $source -Encoding UTF8
 
