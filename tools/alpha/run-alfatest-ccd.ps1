@@ -4,6 +4,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$RunnerVersion = 'ccd-setdisplayconfig-v2'
 $sourcePath = Join-Path $PSScriptRoot 'alfatest-v2.ps1'
 $helperPath = Join-Path $PSScriptRoot 'displayconfig-topology.ps1'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -24,7 +25,11 @@ try {
     $helperLiteral = $helperPath.Replace("'", "''")
     $anchor = '$ErrorActionPreference = ''Stop'''
     if (-not $source.Contains($anchor)) { throw 'Could not locate ALPHA initialization anchor.' }
-    $source = $source.Replace($anchor, ($anchor + "`n. '$helperLiteral'"))
+    $source = $source.Replace($anchor, ($anchor + "`n. '$helperLiteral'`n`$script:VmuRunnerVersion = '$RunnerVersion'`n`$script:FinalSummaryWritten = `$false"))
+
+    $headerAnchor = "Write-Log 'Virtual Monitors Universe - ALPHA acceptance test'"
+    if (-not $source.Contains($headerAnchor)) { throw 'Could not locate ALPHA log header.' }
+    $source = $source.Replace($headerAnchor, ($headerAnchor + "`nWrite-Log \"ALPHA runner: `$script:VmuRunnerVersion\" Cyan"))
 
     $preflightPattern = '(?s)(Write-Section ''PRE-FLIGHT: CLEAN BASELINE AND ONE FRESH VDD''\n).*?(\n    Write-Section ''TEST 1: DYNAMIC RESOLUTION'')'
     $preflightReplacement = @'
@@ -87,6 +92,22 @@ $2
 '@
     $patched = [regex]::Replace($source, $test2Pattern, $test2Replacement, 1)
     if ($patched -eq $source) { throw 'Could not locate ALPHA TEST 2 section.' }
+    $source = $patched
+
+    # Guard against duplicate FINAL RESULT emission if nested PowerShell/elevation flow ever
+    # reaches the generated finally block more than once.
+    $finalPattern = '(?s)finally \{\n    Write-Section ''FINAL RESULT''\n(.*?)\n\}'
+    $finalReplacement = @'
+finally {
+    if (-not $script:FinalSummaryWritten) {
+        $script:FinalSummaryWritten = $true
+        Write-Section 'FINAL RESULT'
+$1
+    }
+}
+'@
+    $patched = [regex]::Replace($source, $finalPattern, $finalReplacement, 1)
+    if ($patched -eq $source) { throw 'Could not locate FINAL RESULT block for de-duplication guard.' }
     $source = $patched
 
     $source = $source -replace "(?<!`r)`n", "`r`n"
