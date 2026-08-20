@@ -14,8 +14,8 @@ echo Virtual Monitors Universe - GitHub upgrade
 echo ============================================
 echo.
 
-rem Run the Git synchronization from a temporary copy so upgrade.cmd itself
-rem can be safely replaced while the upgrade is running.
+rem Run Git synchronization from a temporary copy so upgrade.cmd itself can
+rem be safely replaced while the upgrade is running.
 set "TMP_UPDATER=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.cmd"
 copy /Y "%~f0" "%TMP_UPDATER%" >NUL
 if errorlevel 1 (
@@ -95,16 +95,25 @@ cd /d "%~dp0"
 
 echo.
 echo Applying repository-local upgrade steps...
+if not exist ".runtime\alpha" mkdir ".runtime\alpha" >NUL 2>&1
 
-rem Keep runtime/test output. Do not use broad git clean here because
-rem alfatest.log and future local configuration files are intentionally untracked.
-if exist "tools\alpha\.alfatest.runtime.ps1" del /Q "tools\alpha\.alfatest.runtime.ps1" >NUL 2>&1
+rem Clean only legacy paths created by earlier VMU ALPHA builds. The PowerShell
+rem script refuses to delete a directory unless known VDD marker files exist.
+if exist "tools\alpha\cleanup-legacy-c.ps1" (
+    echo Checking C: for legacy VMU/VDD development artifacts...
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\alpha\cleanup-legacy-c.ps1"
+    set "CLEANERR=!ERRORLEVEL!"
+    if not "!CLEANERR!"=="0" (
+        echo WARNING: Legacy C: cleanup did not fully complete. Nothing unknown was deleted.
+    )
+)
 
 echo.
 echo ============================================
 echo UPGRADE COMPLETED SUCCESSFULLY
 echo ============================================
 echo Repository is synchronized with GitHub.
+echo Development/runtime files are stored under: %~dp0.runtime\alpha
 echo Next ALPHA acceptance test: alfatest.cmd
 echo.
 pause
