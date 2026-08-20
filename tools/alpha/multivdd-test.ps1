@@ -38,6 +38,29 @@ function Wait-Until {
     return $false
 }
 
+function Ask-User {
+    param([Parameter(Mandatory=$true)][string]$Prompt)
+    while($true){
+        $answer=(Read-Host "$Prompt [Y/N]").Trim().ToUpperInvariant()
+        if($answer -eq 'Y'){ Write-Log "USER CONFIRMATION: YES - $Prompt" Green; return $true }
+        if($answer -eq 'N'){ Write-Log "USER CONFIRMATION: NO - $Prompt" Red; return $false }
+        Write-Host 'Please enter Y or N.' -ForegroundColor Yellow
+    }
+}
+
+function Read-WindowsDisplayNumber {
+    param([Parameter(Mandatory=$true)][string]$Label,[Parameter(Mandatory=$true)][string]$GdiName)
+    while($true){
+        $raw=(Read-Host "Enter the Windows Settings display number for $Label ($GdiName)").Trim()
+        $number=0
+        if([int]::TryParse($raw,[ref]$number) -and $number -gt 0){
+            Write-Log "USER DISPLAY MAPPING: $Label = Windows display $number ($GdiName)" Cyan
+            return $number
+        }
+        Write-Host 'Enter a positive display number, for example 7.' -ForegroundColor Yellow
+    }
+}
+
 function Get-Vdds { return @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq 'Virtual Display Driver' }) }
 
 function Ensure-DisplayApi {
@@ -61,13 +84,12 @@ namespace Vmu {
 function Get-Mode([string]$Name){ Ensure-DisplayApi; $m=New-Object Vmu.MultiDisplayModeApi+DEVMODE; $m.dmSize=[Runtime.InteropServices.Marshal]::SizeOf($m); if(-not [Vmu.MultiDisplayModeApi]::EnumDisplaySettings($Name,-1,[ref]$m)){throw "Cannot read $Name mode."}; return $m }
 function Mode-Key([string]$Name){ $m=Get-Mode $Name; return "pos=$($m.dmPositionX),$($m.dmPositionY);mode=$($m.dmPelsWidth)x$($m.dmPelsHeight)@$($m.dmDisplayFrequency);orientation=$($m.dmDisplayOrientation)" }
 function Set-Resolution([string]$Name,[uint32]$W,[uint32]$H){ $m=Get-Mode $Name; $m.dmPelsWidth=$W; $m.dmPelsHeight=$H; $m.dmDisplayFrequency=60; $m.dmFields=[Vmu.MultiDisplayModeApi]::DM_PELSWIDTH -bor [Vmu.MultiDisplayModeApi]::DM_PELSHEIGHT -bor [Vmu.MultiDisplayModeApi]::DM_DISPLAYFREQUENCY; $r=[Vmu.MultiDisplayModeApi]::ChangeDisplaySettingsEx($Name,[ref]$m,[IntPtr]::Zero,1,[IntPtr]::Zero); if($r -ne 0){throw "Resolution change failed for $Name: $r"} }
-
 function Remove-OneVdd([string]$InstanceId){ Invoke-Native "$env:SystemRoot\System32\pnputil.exe" @('/remove-device',('"{0}"' -f $InstanceId)) | Out-Null; return (Wait-Until { @(Get-Vdds | Where-Object InstanceId -eq $InstanceId).Count -eq 0 } "VDD $InstanceId removed" 5000) }
 
 Remove-Item -LiteralPath $LogPath -Force -ErrorAction SilentlyContinue
 . $TopologyHelper
 Write-Log 'Virtual Monitors Universe - MULTI-VDD isolation acceptance test'
-Write-Log 'Runner: multivdd-isolation-v1' Cyan
+Write-Log 'Runner: multivdd-isolation-v2-display-numbers' Cyan
 
 try {
     if(@(Get-Vdds).Count -ne 0){ throw 'Multi-VDD test requires the preceding ALPHA test to leave a clean baseline.' }
@@ -91,29 +113,43 @@ try {
     Write-Log "B: $($ib.InstanceId) -> $($ib.GdiName), target $($ib.TargetId)" Green
     if($ia.InstanceId -eq $ib.InstanceId -or $ia.GdiName -eq $ib.GdiName){ throw 'VDD identities are not unique.' }
 
+    Start-Process 'ms-settings:display' | Out-Null
+    Write-Host ''
+    Write-Host 'Windows display-number mapping' -ForegroundColor Cyan
+    Write-Host 'Use Windows Settings > System > Display and Identify if needed.' -ForegroundColor Gray
+    Write-Host 'The numbers entered here are USER LABELS only; VMU operations still use exact VDD identities.' -ForegroundColor Gray
+    $aNumber=Read-WindowsDisplayNumber -Label 'VDD-A' -GdiName $ia.GdiName
+    $bNumber=Read-WindowsDisplayNumber -Label 'VDD-B' -GdiName $ib.GdiName
+    if($aNumber -eq $bNumber){ throw "VDD-A and VDD-B cannot both be Windows display $aNumber." }
+    Write-Log "DISPLAY MAP: VDD-A = monitor $aNumber; VDD-B = monitor $bNumber" Green
+
     $bBefore=Mode-Key $ib.GdiName
     Set-Resolution $ia.GdiName 3840 2160
     Start-Sleep -Milliseconds 300
     $bAfterResolution=Mode-Key $ib.GdiName
     if($bBefore -ne $bAfterResolution){ throw "Changing A modified B: $bBefore -> $bAfterResolution" }
-    Write-Log 'PASS: changing resolution of A did not modify B.' Green
+    Write-Log "PASS: changing resolution of VDD-A (monitor $aNumber) did not modify VDD-B (monitor $bNumber)." Green
+    if(-not (Ask-User "Verify monitor $aNumber (VDD-A) changed to UHD while monitor $bNumber (VDD-B) remained unchanged")){ throw 'User rejected resolution isolation.' }
 
     Invoke-VmuDisconnectExact $ia
-    if(-not (Wait-Until { (Test-VmuVddActive $ia.InstanceId $false) -and (Test-VmuVddActive $ib.InstanceId $true) } 'A inactive while B remains active' 5000)){ throw 'Disconnect isolation failed.' }
+    if(-not (Wait-Until { (Test-VmuVddActive $ia.InstanceId $false) -and (Test-VmuVddActive $ib.InstanceId $true) } "monitor $aNumber inactive while monitor $bNumber remains active" 5000)){ throw 'Disconnect isolation failed.' }
     if((Mode-Key $ib.GdiName) -ne $bBefore){ throw 'Disconnecting A modified B configuration.' }
-    Write-Log 'PASS: disconnecting A left B active and unchanged.' Green
+    Write-Log "PASS: VDD-A (monitor $aNumber) disconnected; VDD-B (monitor $bNumber) remained active and unchanged." Green
+    if(-not (Ask-User "Verify monitor $aNumber (VDD-A) is disconnected and monitor $bNumber (VDD-B) is still active")){ throw 'User rejected disconnect isolation.' }
+
     Invoke-VmuReconnectSaved
-    if(-not (Wait-Until { (Test-VmuVddActive $ia.InstanceId $true) -and (Test-VmuVddActive $ib.InstanceId $true) } 'A reconnected while B remains active' 5000)){ throw 'Reconnect isolation failed.' }
+    if(-not (Wait-Until { (Test-VmuVddActive $ia.InstanceId $true) -and (Test-VmuVddActive $ib.InstanceId $true) } "monitor $aNumber reconnected while monitor $bNumber remains active" 5000)){ throw 'Reconnect isolation failed.' }
     if((Mode-Key $ib.GdiName) -ne $bBefore){ throw 'Reconnecting A modified B configuration.' }
-    Write-Log 'PASS: reconnecting A left B active and unchanged.' Green
+    Write-Log "PASS: VDD-A (monitor $aNumber) reconnected; VDD-B (monitor $bNumber) remained active and unchanged." Green
+    if(-not (Ask-User "Verify monitor $aNumber (VDD-A) returned and monitor $bNumber (VDD-B) is still unchanged")){ throw 'User rejected reconnect isolation.' }
 
     if(-not (Remove-OneVdd $ia.InstanceId)){ throw 'Could not uninstall A on first attempt.' }
     if(@(Get-Vdds | Where-Object InstanceId -eq $ib.InstanceId).Count -ne 1 -or -not (Test-VmuVddActive $ib.InstanceId $true)){ throw 'Uninstalling A affected B.' }
     if((Mode-Key $ib.GdiName) -ne $bBefore){ throw 'Uninstalling A modified B configuration.' }
-    Write-Log 'PASS: uninstalling A did not remove, disconnect, or reconfigure B.' Green
+    Write-Log "PASS: uninstalling VDD-A (monitor $aNumber) did not remove, disconnect, or reconfigure VDD-B (monitor $bNumber)." Green
+    if(-not (Ask-User "Verify monitor $aNumber (VDD-A) is gone and monitor $bNumber (VDD-B) still works")){ throw 'User rejected uninstall isolation.' }
 
     if(-not (Remove-OneVdd $ib.InstanceId)){ throw 'Could not uninstall B during cleanup.' }
-    $inf=(Get-PnpDeviceProperty -InstanceId $b.InstanceId -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue).Data
     Write-Log 'MULTI-VDD ISOLATION: PASS' Green
     exit 0
 }
