@@ -7,6 +7,7 @@ set "DEFAULT_BRANCH=feature/alpha-driver-poc"
 if /I "%~1"=="--worker" goto :worker
 if /I "%~1"=="--post-update" goto :post_update
 
+cls
 cd /d "%~dp0"
 set "REPO_ROOT=%CD%"
 
