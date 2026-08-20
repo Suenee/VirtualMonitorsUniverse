@@ -4,7 +4,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$RunnerVersion = 'ccd-setdisplayconfig-v2'
+$RunnerVersion = 'ccd-setdisplayconfig-v3'
 $sourcePath = Join-Path $PSScriptRoot 'alfatest-v2.ps1'
 $helperPath = Join-Path $PSScriptRoot 'displayconfig-topology.ps1'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -29,7 +29,11 @@ try {
 
     $headerAnchor = "Write-Log 'Virtual Monitors Universe - ALPHA acceptance test'"
     if (-not $source.Contains($headerAnchor)) { throw 'Could not locate ALPHA log header.' }
-    $source = $source.Replace($headerAnchor, ($headerAnchor + "`nWrite-Log \"ALPHA runner: `$script:VmuRunnerVersion\" Cyan"))
+    $headerReplacement = @'
+Write-Log 'Virtual Monitors Universe - ALPHA acceptance test'
+Write-Log ("ALPHA runner: {0}" -f $script:VmuRunnerVersion) Cyan
+'@
+    $source = $source.Replace($headerAnchor, $headerReplacement.TrimEnd())
 
     $preflightPattern = '(?s)(Write-Section ''PRE-FLIGHT: CLEAN BASELINE AND ONE FRESH VDD''\n).*?(\n    Write-Section ''TEST 1: DYNAMIC RESOLUTION'')'
     $preflightReplacement = @'
@@ -94,21 +98,23 @@ $2
     if ($patched -eq $source) { throw 'Could not locate ALPHA TEST 2 section.' }
     $source = $patched
 
-    # Guard against duplicate FINAL RESULT emission if nested PowerShell/elevation flow ever
-    # reaches the generated finally block more than once.
-    $finalPattern = '(?s)finally \{\n    Write-Section ''FINAL RESULT''\n(.*?)\n\}'
-    $finalReplacement = @'
+    $finallyPattern = '(?s)finally \{\n    Write-Section ''FINAL RESULT''\n    foreach \(\$entry in \$Results.GetEnumerator\(\)\) \{.*?Write-Log ''Development payload remains only under the repository \.runtime directory\.''\n\}'
+    $finallyReplacement = @'
 finally {
     if (-not $script:FinalSummaryWritten) {
         $script:FinalSummaryWritten = $true
         Write-Section 'FINAL RESULT'
-$1
+        foreach ($entry in $Results.GetEnumerator()) {
+            $color = if ($entry.Value -eq 'PASS') { 'Green' } elseif ($entry.Value -eq 'FAIL') { 'Red' } else { 'Yellow' }
+            Write-Log ("{0}: {1}" -f $entry.Key, $entry.Value) $color
+        }
+        Write-Log "Log file: $LogPath"
+        Write-Log 'Development payload remains only under the repository .runtime directory.'
     }
 }
 '@
-    $patched = [regex]::Replace($source, $finalPattern, $finalReplacement, 1)
-    if ($patched -eq $source) { throw 'Could not locate FINAL RESULT block for de-duplication guard.' }
-    $source = $patched
+    $patched = [regex]::Replace($source, $finallyPattern, $finallyReplacement, 1)
+    if ($patched -ne $source) { $source = $patched }
 
     $source = $source -replace "(?<!`r)`n", "`r`n"
     Set-Content -LiteralPath $runtimePath -Value $source -Encoding UTF8
