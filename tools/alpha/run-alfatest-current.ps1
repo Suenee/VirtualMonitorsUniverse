@@ -18,29 +18,46 @@ New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 try {
     $source = Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8
 
+    # Normalize line endings so runtime patching is deterministic across Git,
+    # PowerShell 5.1, and Windows checkout configurations.
+    $source = $source -replace "`r`n", "`n"
+
     # PowerShell 5.1 parses "$Label:" as a scoped/drive variable reference.
     $source = $source.Replace('"Using cached $Label: $Path"', '"Using cached ${Label}: $Path"')
 
-    # Identify the virtual Windows display by topology delta instead of relying
-    # on a driver/device string whose value varies between Windows/VDD builds.
-    $oldBlock = @'
-    $existing = @(Get-VddDevices)
-    Write-Log "Existing VDD device nodes: $($existing.Count)"
-    if ($existing.Count -gt 0) {
-        if (-not (Remove-VddInstallation)) { throw 'Could not establish clean baseline.' }
+    # Replace the custom EnumDisplayDevices-based Get-Displays implementation.
+    # On the current test machine it returned an empty list even though Windows
+    # had multiple active displays. System.Windows.Forms.Screen is sufficient
+    # for the ALPHA topology-delta test and reliably exposes \\.\DISPLAYn names.
+    $getDisplaysPattern = '(?s)function Get-Displays \{.*?\n\}\n\nfunction Get-Mode \{'
+    $getDisplaysReplacement = @'
+function Get-Displays {
+    Add-Type -AssemblyName System.Windows.Forms
+    $items = @()
+    foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) {
+        $items += [pscustomobject]@{
+            DeviceName = $screen.DeviceName
+            DeviceString = 'Windows Forms Screen'
+            Attached = $true
+        }
     }
+    return $items
+}
 
-    Install-Vdd
-    $Results.Preflight = 'PASS'
-
-    $virtual = @(Get-Displays | Where-Object { $_.DeviceString -match 'Virtual|MTT|VDD' }) | Select-Object -Last 1
-    if (-not $virtual) { throw 'Could not identify the virtual Windows display.' }
-    $name = $virtual.DeviceName
-    Write-Log "Virtual Windows display: $name / $($virtual.DeviceString)"
+function Get-Mode {
 '@
 
-    $newBlock = @'
-    $existing = @(Get-VddDevices)
+    $patched = [regex]::Replace($source, $getDisplaysPattern, $getDisplaysReplacement, 1)
+    if ($patched -eq $source) {
+        throw 'Could not locate Get-Displays for runtime patching.'
+    }
+    $source = $patched
+
+    # Replace only the pre-flight body between the known section header and the
+    # TEST 1 section. Regex makes this independent of CRLF/LF and small edits.
+    $preflightPattern = '(?s)(Write-Section ''PRE-FLIGHT: CLEAN BASELINE AND ONE FRESH VDD''\n).*?(\n    Write-Section ''TEST 1: DYNAMIC RESOLUTION'')'
+    $preflightReplacement = @'
+$1    $existing = @(Get-VddDevices)
     Write-Log "Existing VDD device nodes: $($existing.Count)"
     if ($existing.Count -gt 0) {
         Write-Log 'Previous ALPHA test VDD remnants detected; removing them before the new test.' Yellow
@@ -50,6 +67,9 @@ try {
     $baselineDisplays = @(Get-Displays)
     $baselineNames = @($baselineDisplays | ForEach-Object { $_.DeviceName })
     Write-Log ("Baseline Windows displays before VDD install: {0}" -f ($baselineNames -join ', ')) DarkGray
+    if ($baselineNames.Count -eq 0) {
+        throw 'Windows display enumeration returned no baseline displays.'
+    }
 
     Install-Vdd
 
@@ -69,13 +89,17 @@ try {
     $name = $virtual.DeviceName
     Write-Log "Virtual Windows display: $name / $($virtual.DeviceString)"
     $Results.Preflight = 'PASS'
+$2
 '@
 
-    if (-not $source.Contains($oldBlock)) {
-        throw 'Could not locate the expected ALPHA pre-flight block for runtime patching.'
+    $patched = [regex]::Replace($source, $preflightPattern, $preflightReplacement, 1)
+    if ($patched -eq $source) {
+        throw 'Could not locate the ALPHA pre-flight section for runtime patching.'
     }
+    $source = $patched
 
-    $source = $source.Replace($oldBlock, $newBlock)
+    # Restore Windows line endings for easier local debugging.
+    $source = $source -replace "(?<!`r)`n", "`r`n"
     Set-Content -LiteralPath $runtimePath -Value $source -Encoding UTF8
 
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runtimePath
