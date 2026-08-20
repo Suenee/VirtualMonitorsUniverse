@@ -1,5 +1,7 @@
 Set-StrictMode -Version Latest
 
+$script:VmuSavedConfiguration = $null
+
 function Ensure-VmuDisplayConfigTopologyApi {
     if ('Vmu.DisplayConfigTopologyApi' -as [type]) { return }
 
@@ -74,7 +76,19 @@ namespace Vmu
                 ADAPTER_NAME adapter = new ADAPTER_NAME();
                 adapter.header.type = GET_ADAPTER; adapter.header.size = (UInt32)Marshal.SizeOf(typeof(ADAPTER_NAME)); adapter.header.adapterId = paths[i].targetInfo.adapterId; adapter.header.id = paths[i].targetInfo.id;
                 int ar = DisplayConfigGetDeviceInfo(ref adapter);
-                result[i] = "active=" + ((paths[i].flags & DISPLAYCONFIG_PATH_ACTIVE) != 0) + ";sourceLuid=" + Luid(paths[i].sourceInfo.adapterId) + ";sourceId=" + paths[i].sourceInfo.id + ";targetLuid=" + Luid(paths[i].targetInfo.adapterId) + ";targetId=" + paths[i].targetInfo.id + ";gdi=" + (sr == 0 ? source.viewGdiDeviceName : "") + ";friendly=" + (tr == 0 ? target.monitorFriendlyDeviceName : "") + ";monitorPath=" + (tr == 0 ? target.monitorDevicePath : "") + ";adapterPath=" + (ar == 0 ? adapter.adapterDevicePath : "") + ";sr=" + sr + ";tr=" + tr + ";ar=" + ar;
+                result[i] = "active=" + ((paths[i].flags & DISPLAYCONFIG_PATH_ACTIVE) != 0)
+                    + ";sourceLuid=" + Luid(paths[i].sourceInfo.adapterId) + ";sourceId=" + paths[i].sourceInfo.id
+                    + ";targetLuid=" + Luid(paths[i].targetInfo.adapterId) + ";targetId=" + paths[i].targetInfo.id
+                    + ";gdi=" + (sr == 0 ? source.viewGdiDeviceName : "")
+                    + ";friendly=" + (tr == 0 ? target.monitorFriendlyDeviceName : "")
+                    + ";monitorPath=" + (tr == 0 ? target.monitorDevicePath : "")
+                    + ";adapterPath=" + (ar == 0 ? adapter.adapterDevicePath : "")
+                    + ";rotation=" + paths[i].targetInfo.rotation
+                    + ";scaling=" + paths[i].targetInfo.scaling
+                    + ";refreshNum=" + paths[i].targetInfo.refreshRate.Numerator
+                    + ";refreshDen=" + paths[i].targetInfo.refreshRate.Denominator
+                    + ";scanLineOrdering=" + paths[i].targetInfo.scanLineOrdering
+                    + ";sr=" + sr + ";tr=" + tr + ";ar=" + ar;
             }
             return result;
         }
@@ -138,6 +152,13 @@ function Get-VmuVddCcdPaths {
     })
 }
 
+function Get-VmuActiveVddCcdPath {
+    param([Parameter(Mandatory = $true)][string]$InstanceId)
+    $active = @(Get-VmuVddCcdPaths -InstanceId $InstanceId | Where-Object { (Get-VmuCcdField -Line $_ -Name 'active') -eq 'True' })
+    if ($active.Count -ne 1) { return $null }
+    return $active[0]
+}
+
 function Resolve-VmuVddIdentity {
     param([Parameter(Mandatory = $true)]$Device)
     $paths = @(Get-VmuVddCcdPaths -InstanceId $Device.InstanceId)
@@ -165,9 +186,51 @@ function Test-VmuVddActive {
     return ($activeCount -eq 0)
 }
 
+function Get-VmuConfigurationSnapshot {
+    param([Parameter(Mandatory = $true)]$Identity)
+
+    $mode = Get-Mode -DeviceName $Identity.GdiName
+    $path = Get-VmuActiveVddCcdPath -InstanceId $Identity.InstanceId
+    if ($null -eq $path) { throw "Cannot snapshot configuration: exact VDD CCD path is not uniquely active." }
+
+    return [pscustomobject]@{
+        InstanceId = $Identity.InstanceId
+        GdiName = $Identity.GdiName
+        X = [int]$mode.dmPositionX
+        Y = [int]$mode.dmPositionY
+        Width = [uint32]$mode.dmPelsWidth
+        Height = [uint32]$mode.dmPelsHeight
+        RefreshRate = [uint32]$mode.dmDisplayFrequency
+        Orientation = [uint32]$mode.dmDisplayOrientation
+        FixedOutput = [uint32]$mode.dmDisplayFixedOutput
+        Rotation = Get-VmuCcdField -Line $path -Name 'rotation'
+        Scaling = Get-VmuCcdField -Line $path -Name 'scaling'
+        CcdRefreshNum = Get-VmuCcdField -Line $path -Name 'refreshNum'
+        CcdRefreshDen = Get-VmuCcdField -Line $path -Name 'refreshDen'
+        ScanLineOrdering = Get-VmuCcdField -Line $path -Name 'scanLineOrdering'
+    }
+}
+
+function Compare-VmuConfigurationSnapshots {
+    param([Parameter(Mandatory = $true)]$Before, [Parameter(Mandatory = $true)]$After)
+
+    $fields = @('InstanceId','GdiName','X','Y','Width','Height','RefreshRate','Orientation','FixedOutput','Rotation','Scaling','CcdRefreshNum','CcdRefreshDen','ScanLineOrdering')
+    $differences = @()
+    foreach ($field in $fields) {
+        if ([string]$Before.$field -ne [string]$After.$field) {
+            $differences += ('{0}: {1} -> {2}' -f $field,$Before.$field,$After.$field)
+        }
+    }
+    return @($differences)
+}
+
 function Invoke-VmuDisconnectExact {
     param([Parameter(Mandatory = $true)]$Identity)
     Ensure-VmuDisplayConfigTopologyApi
+
+    $script:VmuSavedConfiguration = Get-VmuConfigurationSnapshot -Identity $Identity
+    Write-Log ("CONFIG SNAPSHOT before disconnect: position=({0},{1}); mode={2}x{3}@{4}; orientation={5}; rotation={6}; scaling={7}" -f $script:VmuSavedConfiguration.X,$script:VmuSavedConfiguration.Y,$script:VmuSavedConfiguration.Width,$script:VmuSavedConfiguration.Height,$script:VmuSavedConfiguration.RefreshRate,$script:VmuSavedConfiguration.Orientation,$script:VmuSavedConfiguration.Rotation,$script:VmuSavedConfiguration.Scaling) DarkGray
+
     $result = [Vmu.DisplayConfigTopologyApi]::DisconnectExact($Identity.SourceLuid, [uint32]$Identity.SourceId, $Identity.TargetLuid, [uint32]$Identity.TargetId)
     if ($result -ne 0) { throw "SetDisplayConfig disconnect failed with result $result." }
 }
@@ -176,4 +239,22 @@ function Invoke-VmuReconnectSaved {
     Ensure-VmuDisplayConfigTopologyApi
     $result = [Vmu.DisplayConfigTopologyApi]::ReconnectSaved()
     if ($result -ne 0) { throw "SetDisplayConfig reconnect failed with result $result." }
+
+    if ($null -eq $script:VmuSavedConfiguration) { throw 'Reconnect completed, but no VMU configuration snapshot exists.' }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(3)
+    do {
+        if (Test-VmuVddActive -InstanceId $script:VmuSavedConfiguration.InstanceId -Expected $true) { break }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $identity = [pscustomobject]@{ InstanceId=$script:VmuSavedConfiguration.InstanceId; GdiName=$script:VmuSavedConfiguration.GdiName }
+    $after = Get-VmuConfigurationSnapshot -Identity $identity
+    $differences = @(Compare-VmuConfigurationSnapshots -Before $script:VmuSavedConfiguration -After $after)
+    if ($differences.Count -gt 0) {
+        foreach ($difference in $differences) { Write-Log "CONFIG DIFFERENCE after reconnect: $difference" Yellow }
+        throw ('Virtual monitor configuration was not fully restored after reconnect ({0} differences).' -f $differences.Count)
+    }
+
+    Write-Log ("PASS: full VDD configuration restored after reconnect: position=({0},{1}); mode={2}x{3}@{4}; orientation={5}; rotation={6}; scaling={7}" -f $after.X,$after.Y,$after.Width,$after.Height,$after.RefreshRate,$after.Orientation,$after.Rotation,$after.Scaling) Green
 }
