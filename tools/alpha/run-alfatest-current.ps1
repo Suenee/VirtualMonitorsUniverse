@@ -20,9 +20,9 @@ try {
     $source = $source -replace "`r`n", "`n"
     $source = $source.Replace('"Using cached $Label: $Path"', '"Using cached ${Label}: $Path"')
 
-    # CCD is used only to establish an exact identity chain:
+    # Exact identity chain:
     # PnP VDD instance -> CCD adapter path -> adapter LUID/source/target -> GDI display name.
-    # No DISPLAY number guessing or topology-order assumptions are allowed.
+    # The same identity is also used to verify active/inactive topology state.
     $identityCode = @'
 function Ensure-DisplayConfigIdentityApi {
     if ('Vmu.DisplayConfigIdentityApi' -as [type]) { return }
@@ -84,45 +84,42 @@ function Get-CcdField {
     return ''
 }
 
-function Resolve-VddDisplayIdentity {
-    param([Parameter(Mandatory = $true)]$Device)
-
-    $instanceToken = $Device.InstanceId.Replace('\', '#')
-    $all = @(Get-DisplayConfigIdentitySnapshot)
-    $adapterMatches = @($all | Where-Object {
+function Get-VddCcdPaths {
+    param([Parameter(Mandatory = $true)][string]$InstanceId)
+    $instanceToken = $InstanceId.Replace('\', '#')
+    return @((Get-DisplayConfigIdentitySnapshot) | Where-Object {
         $adapterPath = Get-CcdField $_ 'adapterPath'
         -not [string]::IsNullOrWhiteSpace($adapterPath) -and
         $adapterPath.IndexOf($instanceToken, [StringComparison]::OrdinalIgnoreCase) -ge 0
     })
+}
 
-    if ($adapterMatches.Count -eq 0) {
-        throw "No CCD adapter path maps to PnP VDD instance $($Device.InstanceId)."
-    }
-
+function Resolve-VddDisplayIdentity {
+    param([Parameter(Mandatory = $true)]$Device)
+    $adapterMatches = @(Get-VddCcdPaths -InstanceId $Device.InstanceId)
+    if ($adapterMatches.Count -eq 0) { throw "No CCD adapter path maps to PnP VDD instance $($Device.InstanceId)." }
     $activeMatches = @($adapterMatches | Where-Object { (Get-CcdField $_ 'active') -eq 'True' })
     if ($activeMatches.Count -ne 1) {
         foreach ($line in $adapterMatches) { Write-Log "VDD CCD CANDIDATE: $line" Yellow }
         throw "Expected exactly one active CCD path for $($Device.InstanceId), found $($activeMatches.Count)."
     }
-
     $line = $activeMatches[0]
     $gdi = Get-CcdField $line 'gdi'
-    if ([string]::IsNullOrWhiteSpace($gdi)) {
-        throw "The active CCD path for $($Device.InstanceId) has no GDI display name."
-    }
-
+    if ([string]::IsNullOrWhiteSpace($gdi)) { throw "The active CCD path for $($Device.InstanceId) has no GDI display name." }
     return [pscustomobject]@{
-        InstanceId = $Device.InstanceId
-        GdiName = $gdi
-        FriendlyName = Get-CcdField $line 'friendly'
-        SourceLuid = Get-CcdField $line 'sourceLuid'
-        SourceId = Get-CcdField $line 'sourceId'
-        TargetLuid = Get-CcdField $line 'targetLuid'
-        TargetId = Get-CcdField $line 'targetId'
-        MonitorPath = Get-CcdField $line 'monitorPath'
-        AdapterPath = Get-CcdField $line 'adapterPath'
-        Raw = $line
+        InstanceId=$Device.InstanceId; GdiName=$gdi; FriendlyName=(Get-CcdField $line 'friendly');
+        SourceLuid=(Get-CcdField $line 'sourceLuid'); SourceId=(Get-CcdField $line 'sourceId');
+        TargetLuid=(Get-CcdField $line 'targetLuid'); TargetId=(Get-CcdField $line 'targetId');
+        MonitorPath=(Get-CcdField $line 'monitorPath'); AdapterPath=(Get-CcdField $line 'adapterPath'); Raw=$line
     }
+}
+
+function Test-VddCcdActive {
+    param([Parameter(Mandatory = $true)][string]$InstanceId, [Parameter(Mandatory = $true)][bool]$Expected)
+    $paths = @(Get-VddCcdPaths -InstanceId $InstanceId)
+    $activeCount = @($paths | Where-Object { (Get-CcdField $_ 'active') -eq 'True' }).Count
+    if ($Expected) { return ($activeCount -eq 1) }
+    return ($activeCount -eq 0)
 }
 '@
 
@@ -142,7 +139,7 @@ $1    $existing = @(Get-VddDevices)
     Install-Vdd
     $vddDevices = @(Get-VddDevices)
     if ($vddDevices.Count -ne 1) { throw "Expected one VDD device for identity mapping, found $($vddDevices.Count)." }
-
+    $vddInstanceId = $vddDevices[0].InstanceId
     $identity = Resolve-VddDisplayIdentity -Device $vddDevices[0]
     $name = $identity.GdiName
     Write-Log ("VDD IDENTITY: instance={0};gdi={1};friendly={2};source={3}/{4};target={5}/{6};monitorPath={7};adapterPath={8}" -f $identity.InstanceId,$identity.GdiName,$identity.FriendlyName,$identity.SourceLuid,$identity.SourceId,$identity.TargetLuid,$identity.TargetId,$identity.MonitorPath,$identity.AdapterPath) Green
@@ -150,14 +147,29 @@ $1    $existing = @(Get-VddDevices)
     $Results.Preflight = 'PASS'
 $2
 '@
-
     $patched = [regex]::Replace($source, $preflightPattern, $preflightReplacement, 1)
     if ($patched -eq $source) { throw 'Could not locate the ALPHA pre-flight section for VDD identity patching.' }
     $source = $patched
 
+    # The VDD must remain installed while its CCD path becomes inactive. Screen.AllScreens
+    # is not authoritative for this state, so replace only the verification logic.
+    $oldDisconnectWait = 'if (-not (Wait-Until -Description "$DeviceName disconnected from desktop" -TimeoutMs 5000 -Condition { Test-DisplayAttached $DeviceName $false })) {'
+    $newDisconnectWait = 'if (-not (Wait-Until -Description "$DeviceName CCD path inactive while PnP VDD remains installed" -TimeoutMs 5000 -Condition { (Test-VddCcdActive -InstanceId $script:VddInstanceId -Expected $false) -and (@(Get-VddDevices | Where-Object { $_.InstanceId -eq $script:VddInstanceId }).Count -eq 1) })) {'
+    if (-not $source.Contains($oldDisconnectWait)) { throw 'Could not locate disconnect verification block.' }
+    $source = $source.Replace($oldDisconnectWait, $newDisconnectWait)
+    $source = $source.Replace('throw "Timed out waiting for $DeviceName to disconnect."', 'throw "Timed out waiting for $DeviceName CCD path to become inactive while VDD remained installed."')
+
+    $oldReconnectWait = 'if (-not (Wait-Until -Description "$DeviceName reconnected to desktop" -TimeoutMs 5000 -Condition { Test-DisplayAttached $DeviceName $true })) {'
+    $newReconnectWait = 'if (-not (Wait-Until -Description "$DeviceName exact VDD CCD path active again" -TimeoutMs 5000 -Condition { Test-VddCcdActive -InstanceId $script:VddInstanceId -Expected $true })) {'
+    if (-not $source.Contains($oldReconnectWait)) { throw 'Could not locate reconnect verification block.' }
+    $source = $source.Replace($oldReconnectWait, $newReconnectWait)
+    $source = $source.Replace('throw "Timed out waiting for $DeviceName to reconnect."', 'throw "Timed out waiting for the exact VDD CCD path to become active again."')
+
+    # Publish the exact instance identity to Disconnect/Reconnect helper functions.
+    $source = $source.Replace("    `$Results.Preflight = 'PASS'`n", "    `$script:VddInstanceId = `$vddInstanceId`n    `$Results.Preflight = 'PASS'`n")
+
     $source = $source -replace "(?<!`r)`n", "`r`n"
     Set-Content -LiteralPath $runtimePath -Value $source -Encoding UTF8
-
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runtimePath
     exit $LASTEXITCODE
 }
