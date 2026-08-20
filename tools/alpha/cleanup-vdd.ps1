@@ -1,15 +1,11 @@
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
-param(
-    [switch]$Execute
-)
+[CmdletBinding()]
+param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$VddPnpPrefix = 'ROOT\\MTTVDD'
-$VddConfigPath = 'C:\VirtualDisplayDriver'
-$VddRegistryPath = 'HKLM:\SOFTWARE\MikeTheTech\VirtualDisplayDriver'
-$WingetPackageId = 'VirtualDrivers.Virtual-Display-Driver'
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$RuntimeRoot = Join-Path $RepoRoot '.runtime\alpha'
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -17,83 +13,38 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function Get-VddDevices {
-    Get-CimInstance Win32_PnPEntity |
-        Where-Object { $_.PNPDeviceID -and $_.PNPDeviceID.ToUpperInvariant().StartsWith($VddPnpPrefix) }
-}
-
-function Show-Plan {
-    Write-Host 'VMU ALPHA cleanup plan:'
-    $devices = @(Get-VddDevices)
-
-    if ($devices.Count -eq 0) {
-        Write-Host '  VDD PnP devices: none found'
-    }
-    else {
-        foreach ($device in $devices) {
-            Write-Host "  VDD PnP device: $($device.PNPDeviceID) [$($device.Status)]"
-        }
-    }
-
-    Write-Host ("  Config directory: {0} ({1})" -f $VddConfigPath, $(if (Test-Path -LiteralPath $VddConfigPath) { 'present' } else { 'absent' }))
-    Write-Host ("  Registry key:     {0} ({1})" -f $VddRegistryPath, $(if (Test-Path -LiteralPath $VddRegistryPath) { 'present' } else { 'absent' }))
-    Write-Host "  Winget package:   $WingetPackageId"
-}
-
-if ($env:OS -ne 'Windows_NT') {
-    throw 'VMU ALPHA cleanup is supported only on Windows.'
-}
-
-Show-Plan
-
-if (-not $Execute) {
-    Write-Host "`nDRY RUN ONLY. Nothing was changed."
-    Write-Host 'Run from an elevated terminal with: .\cleanup-vdd.ps1 -Execute'
-    exit 0
-}
-
 if (-not (Test-IsAdministrator)) {
-    throw 'Cleanup requires an elevated terminal (Run as administrator).'
+    $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"{0}"' -f $PSCommandPath)) -join ' '
+    $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $args -Wait -PassThru
+    exit $process.ExitCode
 }
 
-Write-Host "`nStarting targeted VDD cleanup..."
-
-$winget = Get-Command winget.exe -ErrorAction SilentlyContinue
-if ($winget) {
-    Write-Host 'Requesting official package uninstall through winget...'
-    & $winget.Source uninstall --id $WingetPackageId -e --silent --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning 'winget did not complete the uninstall successfully. Continuing with targeted residual cleanup only.'
-    }
-}
-else {
-    Write-Warning 'winget was not found. Skipping package-manager uninstall.'
-}
-
-# Remove only device nodes whose PNP ID belongs to the selected VDD hardware ID.
-$devices = @(Get-VddDevices)
+$devices = @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq 'Virtual Display Driver' })
+$infPaths = @()
 foreach ($device in $devices) {
-    if ($PSCmdlet.ShouldProcess($device.PNPDeviceID, 'Remove VDD PnP device')) {
-        Write-Host "Removing VDD device: $($device.PNPDeviceID)"
-        & "$env:SystemRoot\System32\pnputil.exe" /remove-device $device.PNPDeviceID
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "pnputil could not remove $($device.PNPDeviceID)."
-        }
-    }
+    try {
+        $inf = (Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction Stop).Data
+        if ($inf) { $infPaths += [string]$inf }
+    } catch {}
+}
+$infPaths = @($infPaths | Sort-Object -Unique)
+
+foreach ($device in $devices) {
+    Write-Host "Removing VDD device node: $($device.InstanceId)" -ForegroundColor Yellow
+    $process = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -ArgumentList @('/remove-device',('"{0}"' -f $device.InstanceId)) -Wait -PassThru -NoNewWindow
+    if ($process.ExitCode -ne 0) { throw "Could not remove $($device.InstanceId)." }
 }
 
-# These locations are exact upstream VDD-owned paths; no wildcard registry cleanup is used.
-if (Test-Path -LiteralPath $VddRegistryPath) {
-    if ($PSCmdlet.ShouldProcess($VddRegistryPath, 'Remove VDD registry key')) {
-        Remove-Item -LiteralPath $VddRegistryPath -Recurse -Force
-    }
+foreach ($inf in $infPaths) {
+    Write-Host "Removing VDD driver package: $inf" -ForegroundColor Yellow
+    $process = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -ArgumentList @('/delete-driver',$inf,'/uninstall','/force') -Wait -PassThru -NoNewWindow
+    if ($process.ExitCode -ne 0) { throw "Could not remove driver package $inf." }
 }
 
-if (Test-Path -LiteralPath $VddConfigPath) {
-    if ($PSCmdlet.ShouldProcess($VddConfigPath, 'Remove VDD configuration directory')) {
-        Remove-Item -LiteralPath $VddConfigPath -Recurse -Force
-    }
+if (Test-Path -LiteralPath $RuntimeRoot) {
+    Write-Host "Removing repository-local ALPHA runtime: $RuntimeRoot" -ForegroundColor Yellow
+    Remove-Item -LiteralPath $RuntimeRoot -Recurse -Force
 }
 
-Write-Host "`nCleanup finished. Restart Windows before repeating the ALPHA installation test."
-Write-Host 'The script intentionally does not delete unrelated display registry entries or arbitrary OEM driver packages.'
+Write-Host 'Targeted VDD cleanup completed. No unrelated display registry keys or directories were touched.' -ForegroundColor Green
+exit 0
