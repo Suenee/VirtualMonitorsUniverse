@@ -10,7 +10,18 @@ if /I "%~1"=="--post-update" goto :post_update
 cls
 cd /d "%~dp0"
 set "REPO_ROOT=%CD%"
-set "LOG_FILE=%REPO_ROOT%\upgrade.log"
+set "LOG_DIR=%REPO_ROOT%\logs"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >NUL 2>&1
+
+rem Migrate legacy root-level logs before opening the current upgrade log.
+for %%L in (alfatest.log multivddtest.log upgrade.log) do (
+    if exist "%REPO_ROOT%\%%L" (
+        if exist "%LOG_DIR%\%%L" del /Q "%LOG_DIR%\%%L" >NUL 2>&1
+        move /Y "%REPO_ROOT%\%%L" "%LOG_DIR%\%%L" >NUL 2>&1
+    )
+)
+
+set "LOG_FILE=%LOG_DIR%\upgrade.log"
 set "TMP_UPDATER=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.cmd"
 
 > "%LOG_FILE%" echo [%DATE% %TIME%] Virtual Monitors Universe - upgrade
@@ -110,6 +121,15 @@ cd /d "%~dp0"
 echo.
 echo Applying repository-local upgrade steps...
 if not exist ".runtime\alpha" mkdir ".runtime\alpha" >NUL 2>&1
+if not exist "logs" mkdir "logs" >NUL 2>&1
+
+rem Root-level logs are legacy artifacts. Do not create new ones here.
+for %%L in (alfatest.log multivddtest.log) do (
+    if exist "%%L" (
+        if exist "logs\%%L" del /Q "logs\%%L" >NUL 2>&1
+        move /Y "%%L" "logs\%%L" >NUL 2>&1
+    )
+)
 
 if exist "tools\alpha\cleanup-legacy-c.ps1" (
     echo Checking C: for legacy VMU/VDD development artifacts...
@@ -126,7 +146,8 @@ echo UPGRADE COMPLETED SUCCESSFULLY
 echo ============================================
 echo Repository is synchronized with GitHub.
 echo Development/runtime files are stored under: %~dp0.runtime\alpha
-echo Next ALPHA acceptance test: alfatest.cmd
+echo Logs are stored under: %~dp0logs
+echo Next regression test: vmu selftest
 echo.
 exit /b 0
 
@@ -135,7 +156,7 @@ echo.
 echo ============================================
 echo UPGRADE FAILED
 echo ============================================
-echo See upgrade.log for details.
+echo See %LOG_FILE% for details.
 pause
 exit /b %ERR%
 
@@ -144,6 +165,6 @@ echo.
 echo ============================================
 echo UPGRADE FAILED
 echo ============================================
-echo See upgrade.log for details.
+echo See %LOG_FILE% for details.
 pause
 exit /b 1
