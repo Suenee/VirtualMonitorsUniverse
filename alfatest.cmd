@@ -10,7 +10,6 @@ echo.
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\alpha\alfatest.ps1"
 set "ERR=%ERRORLEVEL%"
-if exist "%~dp0alfatest.log" move /Y "%~dp0alfatest.log" "%~dp0logs\alfatest.log" >nul
 if not "%ERR%"=="0" goto :done
 
 echo.
@@ -20,7 +19,6 @@ echo ============================================
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\alpha\multivdd-test.ps1"
 set "ERR=%ERRORLEVEL%"
-if exist "%~dp0multivddtest.log" move /Y "%~dp0multivddtest.log" "%~dp0logs\multivddtest.log" >nul
 
 :done
 echo.
