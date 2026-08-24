@@ -12,8 +12,19 @@ $ErrorActionPreference = 'Stop'
 $UpgradeCmd = [System.IO.Path]::GetFullPath($UpgradeCmd.Trim('"'))
 $RepoRoot = [System.IO.Path]::GetFullPath($RepoRoot.Trim('"')).TrimEnd('\')
 
-$logPath = Join-Path $RepoRoot 'upgrade.log'
+$logsDir = Join-Path $RepoRoot 'logs'
+New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+$logPath = Join-Path $logsDir 'upgrade.log'
 $tempCmd = Join-Path $env:TEMP ("VMU-upgrade-{0}-{1}.cmd" -f $PID, [Guid]::NewGuid().ToString('N'))
+
+# Clean up legacy root-level logs from older development builds.
+foreach ($legacyName in @('upgrade.log', 'alfatest.log', 'multivddtest.log')) {
+    $legacyPath = Join-Path $RepoRoot $legacyName
+    if (Test-Path -LiteralPath $legacyPath) {
+        $destination = Join-Path $logsDir $legacyName
+        Move-Item -LiteralPath $legacyPath -Destination $destination -Force
+    }
+}
 
 function Write-UpgradeLog {
     param([AllowEmptyString()][string]$Message)
