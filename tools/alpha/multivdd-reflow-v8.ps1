@@ -52,7 +52,9 @@ function Get-Vdds { return @(Get-PnpDevice -Class Display -ErrorAction SilentlyC
 
 function Ensure-VmuApi {
     if('Vmu.ReflowApi' -as [type]){ return }
-    Add-Type -ReferencedAssemblies 'System.Windows.Forms.dll' -TypeDefinition @'
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    Add-Type -ReferencedAssemblies @('System.Windows.Forms.dll','System.Drawing.dll') -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -172,7 +174,7 @@ Remove-Item -LiteralPath $log_path -Force -ErrorAction SilentlyContinue
 . $topology_helper
 Ensure-VmuApi
 Write-Log 'Virtual Monitors Universe - MULTI-VDD topology reflow acceptance test'
-Write-Log 'Runner: multivdd-isolation-v8-topology-reflow' Cyan
+Write-Log 'Runner: multivdd-isolation-v8-topology-reflow-r2' Cyan
 Write-Log 'Rule: resizing a VDD reflows downstream monitors symmetrically for grow and shrink; windows must retain monitor-relative geometry.' Cyan
 
 try {
@@ -191,7 +193,6 @@ try {
 
     $before=@(Get-DisplaySnapshot);$windows=@([Vmu.ReflowApi]::Windows());$plan=@(New-ReflowPlan $before $ia.GdiName 3840 2160);Assert-PlanNoOverlap $plan
     foreach($p in $plan){Write-Log ("REFLOW: {0}: ({1},{2}) {3}x{4}; delta=({5},{6})"-f$p.DeviceName,$p.X,$p.Y,$p.Width,$p.Height,$p.DeltaX,$p.DeltaY) DarkGray}
-    # Current v8 acceptance scope: VDD-to-VDD reflow. We deliberately refuse to move a physical display until its CCD source identity is mapped deterministically.
     $moved=@($plan|Where-Object {$_.DeltaX-ne0-or$_.DeltaY-ne0})
     foreach($p in $moved){if($p.DeviceName-ne$ia.GdiName-and$p.DeviceName-ne$ib.GdiName){throw "SAFE STOP: reflow requires moving physical display $($p.DeviceName); deterministic GDI-to-CCD mapping is not implemented yet."}}
     $names=@();$xs=@();$ys=@();$widths=@();$heights=@();foreach($p in $plan){$identity=$null;if($p.DeviceName-eq$ia.GdiName){$identity=$ia}elseif($p.DeviceName-eq$ib.GdiName){$identity=$ib}else{continue};$names += "$($identity.SourceLuid)/$($identity.SourceId)";$xs += [int]$p.X;$ys += [int]$p.Y;$widths += [uint32]$p.Width;$heights += [uint32]$p.Height}
@@ -199,14 +200,12 @@ try {
     Test-ReflowWindows $windows $plan $ia.GdiName
     if(-not(Ask-User 'Verify the resized VDD and any shifted VDD kept their windows in the same relative places')){throw 'User rejected grow reflow.'}
 
-    # Symmetry test: shrink back to the original size and close the gap using the same planner.
     $grown=@(Get-DisplaySnapshot);$windows2=@([Vmu.ReflowApi]::Windows());$original=$before|Where-Object DeviceName -eq $ia.GdiName|Select-Object -First 1;$plan2=@(New-ReflowPlan $grown $ia.GdiName $original.Width $original.Height);Assert-PlanNoOverlap $plan2
     $names=@();$xs=@();$ys=@();$widths=@();$heights=@();foreach($p in $plan2){$identity=$null;if($p.DeviceName-eq$ia.GdiName){$identity=$ia}elseif($p.DeviceName-eq$ib.GdiName){$identity=$ib}else{continue};$names += "$($identity.SourceLuid)/$($identity.SourceId)";$xs += [int]$p.X;$ys += [int]$p.Y;$widths += [uint32]$p.Width;$heights += [uint32]$p.Height}
     $result=[Vmu.ReflowApi]::ApplyReflow($ia.SourceLuid,[uint32]$ia.SourceId,[uint32]$original.Width,[uint32]$original.Height,$names,$xs,$ys,$widths,$heights);if($result-ne0){throw "SetDisplayConfig shrink reflow failed: $result"}
     Test-ReflowWindows $windows2 $plan2 $ia.GdiName
     Write-Log 'PASS: grow and shrink reflow are symmetric and window-relative geometry is preserved.' Green
 
-    # Keep the established isolation checks after topology tests.
     $ia=Resolve-LiveIdentity $a_id 'VDD-A before disconnect';Invoke-VmuDisconnectExact -Identity $ia
     if(-not(Wait-Until {(Test-VmuVddActive $a_id $false)-and(Test-VmuVddActive $b_id $true)} 'A disconnected while B remains active' 5000)){throw 'Disconnect isolation failed.'}
     Invoke-VmuReconnectSaved
