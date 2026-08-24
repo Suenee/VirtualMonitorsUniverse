@@ -8,11 +8,14 @@ $repo_root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $logs_dir = Join-Path $repo_root 'logs'
 $log_path = Join-Path $logs_dir 'vmu-selftest.log'
 $acceptance_runner = Join-Path $repo_root 'tools\alpha\multivdd-test.ps1'
+$required_files = @(
+    $acceptance_runner,
+    (Join-Path $repo_root 'tools\alpha\multivdd-reflow-v12.ps1'),
+    (Join-Path $repo_root 'tools\alpha\multivdd-reflow-v10.ps1'),
+    (Join-Path $repo_root 'tools\alpha\displayconfig-topology.ps1')
+)
 
-if (-not (Test-Path -LiteralPath $logs_dir)) {
-    New-Item -ItemType Directory -Path $logs_dir -Force | Out-Null
-}
-
+New-Item -ItemType Directory -Path $logs_dir -Force | Out-Null
 Remove-Item -LiteralPath $log_path -Force -ErrorAction SilentlyContinue
 
 function Write-SelfTestLog {
@@ -29,14 +32,21 @@ function Write-SelfTestLog {
 }
 
 Write-SelfTestLog 'Virtual Monitors Universe - Core self-test' Cyan
-Write-SelfTestLog 'Self-test version: core-selftest-v2-centralized-logs' Cyan
+Write-SelfTestLog 'Self-test version: core-selftest-v3-dependency-preflight' Cyan
 Write-SelfTestLog 'This command is a permanent development regression gate and must exercise the same display behavior used by VMU Core.' DarkGray
 Write-SelfTestLog "Acceptance runner: $acceptance_runner" DarkGray
 
-if (-not (Test-Path -LiteralPath $acceptance_runner)) {
-    Write-SelfTestLog 'RESULT: FAIL - multi-VDD acceptance runner is missing.' Red
+$missing = @($required_files | Where-Object { -not (Test-Path -LiteralPath $_) })
+if ($missing.Count -gt 0) {
+    Write-SelfTestLog 'PREFLIGHT: FAIL' Red
+    foreach ($path in $missing) {
+        Write-SelfTestLog "Missing dependency: $path" Red
+    }
+    Write-SelfTestLog 'RESULT: FAIL' Red
     exit 1
 }
+
+Write-SelfTestLog 'PREFLIGHT: PASS - all self-test dependencies are present.' Green
 
 try {
     & $acceptance_runner
