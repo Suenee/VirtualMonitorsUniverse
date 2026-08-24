@@ -10,7 +10,7 @@ $log_path = Join-Path $logs_dir 'vmu-selftest.log'
 $acceptance_runner = Join-Path $repo_root 'tools\alpha\multivdd-test.ps1'
 $required_files = @(
     $acceptance_runner,
-    (Join-Path $repo_root 'tools\alpha\multivdd-reflow-v12.ps1'),
+    (Join-Path $repo_root 'tools\alpha\multivdd-reflow-v13.ps1'),
     (Join-Path $repo_root 'tools\alpha\multivdd-reflow-v10.ps1'),
     (Join-Path $repo_root 'tools\alpha\displayconfig-topology.ps1')
 )
@@ -32,7 +32,7 @@ function Write-SelfTestLog {
 }
 
 Write-SelfTestLog 'Virtual Monitors Universe - Core self-test' Cyan
-Write-SelfTestLog 'Self-test version: core-selftest-v3-dependency-preflight' Cyan
+Write-SelfTestLog 'Self-test version: core-selftest-v4-runtime-get-mode' Cyan
 Write-SelfTestLog 'This command is a permanent development regression gate and must exercise the same display behavior used by VMU Core.' DarkGray
 Write-SelfTestLog "Acceptance runner: $acceptance_runner" DarkGray
 
