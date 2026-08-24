@@ -4,28 +4,36 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$RunnerVersion = 'ccd-setdisplayconfig-v3'
+$RunnerVersion = 'ccd-setdisplayconfig-v4-centralized-logs'
 $sourcePath = Join-Path $PSScriptRoot 'alfatest-v2.ps1'
 $helperPath = Join-Path $PSScriptRoot 'displayconfig-topology.ps1'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $runtimeDir = Join-Path $repoRoot '.runtime\alpha'
 $runtimePath = Join-Path $runtimeDir 'alfatest.runtime.ps1'
+$logsDir = Join-Path $repoRoot 'logs'
 
 foreach ($required in @($sourcePath, $helperPath)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Required ALPHA file not found: $required" }
 }
 
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 
 try {
     $source = Get-Content -LiteralPath $sourcePath -Raw -Encoding UTF8
     $source = $source -replace "`r`n", "`n"
     $source = $source.Replace('"Using cached $Label: $Path"', '"Using cached ${Label}: $Path"')
 
+    # The runtime script is generated under .runtime\alpha, therefore all repository
+    # dependencies and logs are injected as absolute repository paths. Never derive
+    # helper paths from the runtime script's $PSScriptRoot.
     $helperLiteral = $helperPath.Replace("'", "''")
+    $logsLiteral = $logsDir.Replace("'", "''")
     $anchor = '$ErrorActionPreference = ''Stop'''
     if (-not $source.Contains($anchor)) { throw 'Could not locate ALPHA initialization anchor.' }
     $source = $source.Replace($anchor, ($anchor + "`n. '$helperLiteral'`n`$script:VmuRunnerVersion = '$RunnerVersion'`n`$script:FinalSummaryWritten = `$false"))
+
+    $source = $source.Replace("`$LogPath = Join-Path `$RepoRoot 'alfatest.log'", "`$LogPath = Join-Path '$logsLiteral' 'alfatest.log'")
 
     $headerAnchor = "Write-Log 'Virtual Monitors Universe - ALPHA acceptance test'"
     if (-not $source.Contains($headerAnchor)) { throw 'Could not locate ALPHA log header.' }
