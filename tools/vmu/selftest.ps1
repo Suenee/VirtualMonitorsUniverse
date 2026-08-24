@@ -29,7 +29,7 @@ function Write-SelfTestLog {
 }
 
 Write-SelfTestLog 'Virtual Monitors Universe - Core self-test' Cyan
-Write-SelfTestLog 'Self-test version: core-selftest-v1' Cyan
+Write-SelfTestLog 'Self-test version: core-selftest-v2-centralized-logs' Cyan
 Write-SelfTestLog 'This command is a permanent development regression gate and must exercise the same display behavior used by VMU Core.' DarkGray
 Write-SelfTestLog "Acceptance runner: $acceptance_runner" DarkGray
 
@@ -42,7 +42,7 @@ try {
     & $acceptance_runner
     $exit_code = $LASTEXITCODE
 
-    $acceptance_log = Join-Path $repo_root 'multivddtest.log'
+    $acceptance_log = Join-Path $logs_dir 'multivddtest.log'
     if (Test-Path -LiteralPath $acceptance_log) {
         Add-Content -LiteralPath $log_path -Value '' -Encoding UTF8
         Add-Content -LiteralPath $log_path -Value '================ ACCEPTANCE DETAIL ================' -Encoding UTF8
