@@ -1,0 +1,17 @@
+# Build output
+**/bin/
+**/obj/
+
+# Local runtime and logs
+.runtime/
+logs/
+
+# IDE/user state
+.vs/
+.idea/
+*.user
+*.suo
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
