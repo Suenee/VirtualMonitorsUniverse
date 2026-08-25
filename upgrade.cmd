@@ -51,7 +51,6 @@ echo ============================================
 echo Virtual Monitors Universe - DEVEL upgrade
 echo ============================================
 echo.
-
 echo [%VMU_TIMESTAMP%] Virtual Monitors Universe - DEVEL upgrade
 echo Repository: %REPO_ROOT%
 echo Target branch: %DEFAULT_BRANCH%
@@ -65,9 +64,6 @@ if errorlevel 1 (
     goto :fail
 )
 
-rem Stream worker output live to both console and the central log. PowerShell's
-rem Tee-Object keeps one real-time stream; unlike the old design, the log is not
-rem replayed with TYPE afterwards, so output is never duplicated.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
   "& { & '%TMP_UPDATER%' --worker '%REPO_ROOT%' 2^>^&1 ^| Tee-Object -FilePath '%LOG_FILE%' -Append; exit $LASTEXITCODE }"
 set "ERR=%ERRORLEVEL%"
@@ -94,19 +90,16 @@ if errorlevel 1 (
     echo ERROR: Git for Windows is not installed or git.exe is not in PATH.
     exit /b 1
 )
-
 if not exist ".git" (
     echo ERROR: This DEVEL bootstrap expects an existing Git working copy.
     exit /b 1
 )
-
 for /f "usebackq delims=" %%B in (`git rev-parse --abbrev-ref HEAD 2^>NUL`) do set "CURRENT_BRANCH=%%B"
 if /I not "!CURRENT_BRANCH!"=="%DEFAULT_BRANCH%" (
     echo ERROR: Current branch is !CURRENT_BRANCH!, expected %DEFAULT_BRANCH%.
     echo Switch once with: git fetch origin ^&^& git switch devel
     exit /b 1
 )
-
 git diff --quiet
 if errorlevel 1 (
     echo ERROR: Local tracked files contain changes. Commit or revert them first.
@@ -176,7 +169,6 @@ where dotnet >NUL 2>&1
 if not errorlevel 1 (
     dotnet --list-sdks 2^>NUL | findstr /R /B "10\." >NUL && set "HAS_DOTNET10=1"
 )
-
 if "!HAS_DOTNET10!"=="0" (
     echo .NET 10 SDK is not installed. Starting the official WinGet installation...
     echo A Windows/UAC or installer confirmation may appear. Approve it to continue.
@@ -186,6 +178,7 @@ if "!HAS_DOTNET10!"=="0" (
         echo .NET 8 SDK has NOT been removed.
         exit /b 1
     )
+    call :wait_installer_idle 180
 )
 
 where dotnet >NUL 2>&1
@@ -194,7 +187,6 @@ if errorlevel 1 (
     echo Close this terminal, open a new one, and run upgrade.cmd again.
     exit /b 1
 )
-
 dotnet --list-sdks | findstr /R /B "10\." >NUL
 if errorlevel 1 (
     echo ERROR: .NET 10 SDK could not be verified after installation.
@@ -227,15 +219,32 @@ echo VMU validation on .NET 10: PASS
 set "HAS_DOTNET8=0"
 dotnet --list-sdks 2^>NUL | findstr /R /B "8\." >NUL && set "HAS_DOTNET8=1"
 if "!HAS_DOTNET8!"=="1" (
-    echo .NET 8 SDK is still installed. Starting its standard Windows uninstall...
-    echo A Windows/UAC or uninstaller confirmation may appear. Approve it to continue.
-    winget uninstall --id "%DOTNET_LEGACY_PACKAGE%" --exact --source winget --interactive
-    if errorlevel 1 (
-        echo WARNING: Automatic .NET 8 SDK uninstall did not complete.
-        echo No runtime is being removed. You can finish SDK removal from Windows Installed Apps.
-        echo Continuing because .NET 10 is installed and VMU validation passed.
-    ) else (
+    echo .NET 8 SDK is still installed.
+    echo Waiting for Windows Installer to become idle before uninstall...
+    call :wait_installer_idle 180
+
+    set "UNINSTALL_OK=0"
+    for /L %%A in (1,1,2) do (
+        if "!UNINSTALL_OK!"=="0" (
+            echo Starting .NET 8 SDK uninstall attempt %%A of 2...
+            echo A Windows/UAC or uninstaller confirmation may appear. Approve it to continue.
+            winget uninstall --id "%DOTNET_LEGACY_PACKAGE%" --exact --source winget --interactive
+            if not errorlevel 1 (
+                set "UNINSTALL_OK=1"
+            ) else if "%%A"=="1" (
+                echo Uninstall attempt 1 did not complete. Waiting for installer activity to finish before retrying...
+                timeout /T 10 /NOBREAK >NUL
+                call :wait_installer_idle 180
+            )
+        )
+    )
+
+    if "!UNINSTALL_OK!"=="1" (
         echo .NET 8 SDK uninstall command completed.
+    ) else (
+        echo WARNING: .NET 8 SDK uninstall did not complete after two attempts.
+        echo No .NET runtime was removed. VMU will continue because .NET 10 validation passed.
+        echo If Windows Installer reports 0x80070652, finish any other installer and run upgrade.cmd again.
     )
 )
 
@@ -281,6 +290,19 @@ echo Runtime CLI: %~dp0.runtime\cli
 echo Logs: %~dp0logs
 echo Next check: vmu selftest
 echo.
+exit /b 0
+
+:wait_installer_idle
+set "WAIT_SECONDS=%~1"
+if not defined WAIT_SECONDS set "WAIT_SECONDS=180"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$deadline=(Get-Date).AddSeconds(%WAIT_SECONDS%); do { $busy=@(Get-Process msiexec -ErrorAction SilentlyContinue); if($busy.Count -eq 0){ exit 0 }; Start-Sleep -Seconds 2 } while((Get-Date) -lt $deadline); exit 1"
+if errorlevel 1 (
+    echo WARNING: Windows Installer still appears busy after %WAIT_SECONDS% seconds.
+    echo The next installer operation may ask you to close or finish another installation.
+) else (
+    echo Windows Installer: idle
+)
 exit /b 0
 
 :fail_with_code
