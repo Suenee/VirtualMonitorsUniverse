@@ -12,6 +12,15 @@ cd /d "%~dp0"
 set "REPO_ROOT=%CD%"
 set "LOG_DIR=%REPO_ROOT%\logs"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >NUL 2>&1
+
+rem Migrate any legacy root-level logs before opening the current upgrade log.
+for %%L in (upgrade.log alfatest.log multivddtest.log vmu-selftest.log) do (
+    if exist "%REPO_ROOT%\%%L" (
+        if exist "%LOG_DIR%\%%L" del /Q "%LOG_DIR%\%%L" >NUL 2>&1
+        move /Y "%REPO_ROOT%\%%L" "%LOG_DIR%\%%L" >NUL 2>&1
+    )
+)
+
 set "LOG_FILE=%LOG_DIR%\upgrade.log"
 set "TMP_UPDATER=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.cmd"
 
@@ -79,22 +88,66 @@ if errorlevel 1 (
 
 git remote set-url origin "%REPO_URL%" >NUL 2>&1
 
-echo [1/5] Downloading DEVEL source...
+echo [1/6] Downloading DEVEL source...
 git fetch origin "%DEFAULT_BRANCH%"
 if errorlevel 1 exit /b 1
 
-echo [2/5] Synchronizing local DEVEL branch...
+echo [2/6] Synchronizing local DEVEL branch...
 git reset --hard "origin/%DEFAULT_BRANCH%"
 if errorlevel 1 exit /b 1
 
-echo [3/5] Running dependency checks...
+echo [3/6] Cleaning known obsolete and generated artifacts...
 call "%REPO_ROOT%\upgrade.cmd" --post-update
 exit /b %ERRORLEVEL%
 
 :post_update
 cd /d "%~dp0"
+
+rem ---------------------------------------------------------------------------
+rem Workspace hygiene
+rem ---------------------------------------------------------------------------
+rem Never use a blanket "git clean" here. Only paths that VMU owns and can
+rem safely regenerate, or paths that are explicitly obsolete from the ALPHA
+rem prototype, are removed.
+
+echo Cleaning repository-owned generated files...
+
+rem Runtime/build outputs are always reproducible.
+if exist ".runtime" rmdir /S /Q ".runtime"
+for /D /R "src" %%D in (bin obj) do if exist "%%D" rmdir /S /Q "%%D"
+for /D /R "tests" %%D in (bin obj) do if exist "%%D" rmdir /S /Q "%%D"
+
+rem Known ALPHA/legacy paths are intentionally absent from DEVEL.
+for %%D in (tools client companion server shared) do (
+    if exist "%%D" (
+        echo Removing obsolete path: %%D
+        rmdir /S /Q "%%D"
+    )
+)
+for %%F in (alfatest.cmd alfatest.log multivddtest.log vmu-selftest.log upgrade.log) do (
+    if exist "%%F" (
+        echo Removing obsolete root file: %%F
+        del /Q "%%F"
+    )
+)
+
+rem Recreate only the directories owned by the current DEVEL toolchain.
 if not exist "logs" mkdir "logs" >NUL 2>&1
 if not exist ".runtime\cli" mkdir ".runtime\cli" >NUL 2>&1
+
+rem Sanity check: no known ALPHA paths may survive cleanup.
+set "HYGIENE_ERROR=0"
+for %%D in (tools client companion server shared) do if exist "%%D" (
+    echo ERROR: Obsolete path still exists after cleanup: %%D
+    set "HYGIENE_ERROR=1"
+)
+for %%F in (alfatest.cmd alfatest.log multivddtest.log vmu-selftest.log upgrade.log) do if exist "%%F" (
+    echo ERROR: Obsolete root file still exists after cleanup: %%F
+    set "HYGIENE_ERROR=1"
+)
+if "!HYGIENE_ERROR!"=="1" exit /b 1
+
+echo Workspace hygiene: OK
 
 where dotnet >NUL 2>&1
 if errorlevel 1 (
@@ -112,7 +165,7 @@ if errorlevel 1 (
 
 echo .NET 10 SDK: OK
 
-echo [4/5] Restoring, building and testing...
+echo [4/6] Restoring, building and testing...
 dotnet restore "VirtualMonitorsUniverse.sln"
 if errorlevel 1 exit /b 1
 
@@ -122,11 +175,21 @@ if errorlevel 1 exit /b 1
 dotnet test "tests\Core.Tests\Core.Tests.csproj" -c Debug --no-build --no-restore
 if errorlevel 1 exit /b 1
 
-echo [5/5] Publishing VMU CLI...
+echo [5/6] Publishing VMU CLI...
 if exist ".runtime\cli" rmdir /S /Q ".runtime\cli"
 mkdir ".runtime\cli" >NUL 2>&1
 dotnet publish "src\Cli\Cli.csproj" -c Debug --no-restore -o ".runtime\cli"
 if errorlevel 1 exit /b 1
+
+echo [6/6] Verifying final workspace hygiene...
+set "HYGIENE_ERROR=0"
+for %%D in (tools client companion server shared) do if exist "%%D" set "HYGIENE_ERROR=1"
+for %%F in (alfatest.cmd alfatest.log multivddtest.log vmu-selftest.log upgrade.log) do if exist "%%F" set "HYGIENE_ERROR=1"
+if "!HYGIENE_ERROR!"=="1" (
+    echo ERROR: Repository hygiene check failed after build.
+    exit /b 1
+)
+echo Final workspace hygiene: OK
 
 echo.
 echo ============================================
@@ -134,6 +197,7 @@ echo UPGRADE COMPLETED SUCCESSFULLY
 echo ============================================
 echo Branch: devel
 echo Runtime CLI: %~dp0.runtime\cli
+echo Logs: %~dp0logs
 echo Next check: vmu selftest
 echo.
 exit /b 0
