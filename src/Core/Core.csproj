@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>VirtualMonitorsUniverse.Core</AssemblyName>
+    <RootNamespace>VirtualMonitorsUniverse.Core</RootNamespace>
+  </PropertyGroup>
+</Project>
