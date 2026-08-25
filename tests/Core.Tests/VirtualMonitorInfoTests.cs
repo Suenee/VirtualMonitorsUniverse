@@ -1,4 +1,5 @@
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using VirtualMonitorsUniverse.Core;
 
 namespace VirtualMonitorsUniverse.Core.Tests;
 
