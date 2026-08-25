@@ -1,0 +1,9 @@
+<Project Sdk="MSTest.Sdk/4.3.3">
+  <PropertyGroup>
+    <AssemblyName>VirtualMonitorsUniverse.Core.Tests</AssemblyName>
+    <RootNamespace>VirtualMonitorsUniverse.Core.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Core\Core.csproj" />
+  </ItemGroup>
+</Project>
