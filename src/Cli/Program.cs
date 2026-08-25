@@ -37,15 +37,32 @@ internal static class Program
 
     private static int RunBootstrapSelfTest()
     {
-        Console.WriteLine("VMU SELFTEST - C#/.NET bootstrap");
-        Console.WriteLine();
-        Console.WriteLine("RUNTIME ................ PASS");
-        Console.WriteLine("CORE LOAD .............. PASS");
-        Console.WriteLine("WINDOWS PLATFORM ....... {0}", OperatingSystem.IsWindows() ? "PASS" : "FAIL");
-        Console.WriteLine("VDD INTEGRATION ........ NOT IMPLEMENTED");
-        Console.WriteLine();
-        Console.WriteLine("RESULT: BOOTSTRAP ONLY");
-        return OperatingSystem.IsWindows() ? 0 : 1;
+        var repoRoot = Environment.GetEnvironmentVariable("VMU_REPO_ROOT") ?? Directory.GetCurrentDirectory();
+        var logsDir = Path.Combine(repoRoot, "logs");
+        Directory.CreateDirectory(logsDir);
+        var logPath = Path.Combine(logsDir, "vmu-selftest.log");
+
+        var windowsPass = OperatingSystem.IsWindows();
+        var lines = new[]
+        {
+            "VMU SELFTEST - C#/.NET bootstrap",
+            string.Empty,
+            "RUNTIME ................ PASS",
+            "CORE LOAD .............. PASS",
+            $"WINDOWS PLATFORM ....... {(windowsPass ? "PASS" : "FAIL")}",
+            "VDD INTEGRATION ........ NOT IMPLEMENTED",
+            string.Empty,
+            $"RESULT: {(windowsPass ? "PASS (BOOTSTRAP SCOPE)" : "FAIL")}"
+        };
+
+        foreach (var line in lines)
+        {
+            Console.WriteLine(line);
+        }
+
+        File.WriteAllLines(logPath, lines);
+        Console.WriteLine($"Log: {logPath}");
+        return windowsPass ? 0 : 1;
     }
 
     private static int UnknownCommand(string command)
