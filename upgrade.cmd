@@ -31,7 +31,14 @@ for %%L in (upgrade.log alfatest.log multivddtest.log vmu-selftest.log) do (
     )
 )
 
-> "%LOG_FILE%" echo [%DATE% %TIME%] Virtual Monitors Universe - DEVEL upgrade
+rem Never use cmd.exe's TIME pseudo-variable for log timestamps here. Some
+rem execution paths can be parsed as the interactive TIME command. Generate a
+rem deterministic timestamp through PowerShell instead.
+set "VMU_TIMESTAMP="
+for /f "usebackq delims=" %%T in (`powershell.exe -NoProfile -Command "Get-Date -Format 'dd.MM.yyyy HH:mm:ss'" 2^>NUL`) do set "VMU_TIMESTAMP=%%T"
+if not defined VMU_TIMESTAMP set "VMU_TIMESTAMP=%DATE%"
+
+> "%LOG_FILE%" echo [%VMU_TIMESTAMP%] Virtual Monitors Universe - DEVEL upgrade
 >> "%LOG_FILE%" echo Repository: %REPO_ROOT%
 >> "%LOG_FILE%" echo Target branch: %DEFAULT_BRANCH%
 >> "%LOG_FILE%" echo Required SDK: .NET %DOTNET_REQUIRED_MAJOR%
@@ -60,7 +67,7 @@ set "ERR=%ERRORLEVEL%"
 del /Q "%TMP_UPDATER%" >NUL 2>&1
 
 if not exist "%LOG_FILE%" (
-    > "%LOG_FILE%" echo [%DATE% %TIME%] ERROR: upgrade.log unexpectedly disappeared during execution.
+    > "%LOG_FILE%" echo ERROR: upgrade.log unexpectedly disappeared during execution.
     >> "%LOG_FILE%" echo Worker exit code: %ERR%
 )
 
