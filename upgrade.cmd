@@ -31,9 +31,6 @@ for %%L in (upgrade.log alfatest.log multivddtest.log vmu-selftest.log) do (
     )
 )
 
-rem Never use cmd.exe's TIME pseudo-variable for log timestamps here. Some
-rem execution paths can be parsed as the interactive TIME command. Generate a
-rem deterministic timestamp through PowerShell instead.
 set "VMU_TIMESTAMP="
 for /f "usebackq delims=" %%T in (`powershell.exe -NoProfile -Command "Get-Date -Format 'dd.MM.yyyy HH:mm:ss'" 2^>NUL`) do set "VMU_TIMESTAMP=%%T"
 if not defined VMU_TIMESTAMP set "VMU_TIMESTAMP=%DATE%"
@@ -55,6 +52,12 @@ echo Virtual Monitors Universe - DEVEL upgrade
 echo ============================================
 echo.
 
+echo [%VMU_TIMESTAMP%] Virtual Monitors Universe - DEVEL upgrade
+echo Repository: %REPO_ROOT%
+echo Target branch: %DEFAULT_BRANCH%
+echo Required SDK: .NET %DOTNET_REQUIRED_MAJOR%
+echo.
+
 copy /Y "%~f0" "%TMP_UPDATER%" >NUL
 if errorlevel 1 (
     echo ERROR: Could not create temporary updater.
@@ -62,7 +65,11 @@ if errorlevel 1 (
     goto :fail
 )
 
-call "%TMP_UPDATER%" --worker "%REPO_ROOT%" >> "%LOG_FILE%" 2>&1
+rem Stream worker output live to both console and the central log. PowerShell's
+rem Tee-Object keeps one real-time stream; unlike the old design, the log is not
+rem replayed with TYPE afterwards, so output is never duplicated.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+  "& { & '%TMP_UPDATER%' --worker '%REPO_ROOT%' 2^>^&1 ^| Tee-Object -FilePath '%LOG_FILE%' -Append; exit $LASTEXITCODE }"
 set "ERR=%ERRORLEVEL%"
 del /Q "%TMP_UPDATER%" >NUL 2>&1
 
@@ -71,7 +78,6 @@ if not exist "%LOG_FILE%" (
     >> "%LOG_FILE%" echo Worker exit code: %ERR%
 )
 
-type "%LOG_FILE%"
 echo.
 echo Upgrade log: %LOG_FILE%
 if not "%ERR%"=="0" goto :fail_with_code
