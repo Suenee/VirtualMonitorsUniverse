@@ -11,7 +11,15 @@ cls
 cd /d "%~dp0"
 set "REPO_ROOT=%CD%"
 set "LOG_DIR=%REPO_ROOT%\logs"
+set "LOG_FILE=%LOG_DIR%\upgrade.log"
+set "TMP_UPDATER=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.cmd"
+
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >NUL 2>&1
+if not exist "%LOG_DIR%" (
+    echo ERROR: Could not create log directory: %LOG_DIR%
+    pause
+    exit /b 1
+)
 
 rem Migrate any legacy root-level logs before opening the current upgrade log.
 for %%L in (upgrade.log alfatest.log multivddtest.log vmu-selftest.log) do (
@@ -21,10 +29,16 @@ for %%L in (upgrade.log alfatest.log multivddtest.log vmu-selftest.log) do (
     )
 )
 
-set "LOG_FILE=%LOG_DIR%\upgrade.log"
-set "TMP_UPDATER=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.cmd"
+rem Create the current log before any Git, cleanup, dependency, or build step.
+rem This file is repository-local and ignored by Git.
+type NUL > "%LOG_FILE%"
+if not exist "%LOG_FILE%" (
+    echo ERROR: Could not create upgrade log: %LOG_FILE%
+    pause
+    exit /b 1
+)
 
-> "%LOG_FILE%" echo [%DATE% %TIME%] Virtual Monitors Universe - DEVEL upgrade
+>> "%LOG_FILE%" echo [%DATE% %TIME%] Virtual Monitors Universe - DEVEL upgrade
 >> "%LOG_FILE%" echo Repository: %REPO_ROOT%
 >> "%LOG_FILE%" echo Target branch: %DEFAULT_BRANCH%
 >> "%LOG_FILE%" echo.
@@ -41,9 +55,17 @@ if errorlevel 1 (
     goto :fail
 )
 
+rem Capture the complete worker/post-update output in the single central log.
 call "%TMP_UPDATER%" --worker "%REPO_ROOT%" >> "%LOG_FILE%" 2>&1
 set "ERR=%ERRORLEVEL%"
 del /Q "%TMP_UPDATER%" >NUL 2>&1
+
+rem The log must survive every success/failure path.
+if not exist "%LOG_FILE%" (
+    type NUL > "%LOG_FILE%"
+    >> "%LOG_FILE%" echo [%DATE% %TIME%] ERROR: upgrade.log unexpectedly disappeared during execution.
+    >> "%LOG_FILE%" echo Worker exit code: %ERR%
+)
 
 type "%LOG_FILE%"
 echo.
@@ -108,7 +130,7 @@ rem Workspace hygiene
 rem ---------------------------------------------------------------------------
 rem Never use a blanket "git clean" here. Only paths that VMU owns and can
 rem safely regenerate, or paths that are explicitly obsolete from the ALPHA
-rem prototype, are removed.
+rem prototype, are removed. The logs directory is never removed by cleanup.
 
 echo Cleaning repository-owned generated files...
 
