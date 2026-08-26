@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Reflection;
 using VirtualMonitorsUniverse.Core;
 
@@ -65,15 +64,13 @@ internal static class Program
 
         try
         {
-            if (!service.IsDriverAvailable())
-            {
-                reporter.Write("VDD DRIVER .............. RUN - dependency is unavailable; starting deterministic setup", ConsoleColor.Cyan);
-                EnsureVddDependency(repoRoot, reporter);
-            }
+            var diagnostics = service.GetDriverDiagnostics();
+            WriteDriverDiagnostics(reporter, diagnostics);
 
-            if (!service.IsDriverAvailable(TimeSpan.FromSeconds(2)))
+            if (!diagnostics.PipeAvailable)
             {
-                throw new InvalidOperationException("The MttVDD named pipe is still unavailable after dependency setup.");
+                throw new InvalidOperationException(
+                    "VDD runtime pipe is unavailable. Self-test does not mutate or repair the driver; restore the VDD dependency to a healthy ALPHA-equivalent state first.");
             }
 
             reporter.Write("VDD DRIVER .............. PASS", ConsoleColor.Green);
@@ -81,12 +78,26 @@ internal static class Program
             var baseline = service.GetMonitors();
             var baselineConnected = baseline.Where(monitor => monitor.IsConnected).ToArray();
             baselineCount = baselineConnected.Length;
+
+            // Upstream MttVDD does not support display count 0 as a reversible
+            // runtime state. A baseline of zero cannot therefore be restored
+            // safely through the same pipe API without disabling the PnP device.
+            if (baselineCount == 0)
+            {
+                throw new InvalidOperationException(
+                    "VDD pipe is available but no active VDD display exists. The lifecycle test will not create a display because SETDISPLAYCOUNT 0 cannot safely restore this baseline.");
+            }
+
             requestedCount = checked(baselineCount + 1);
-            var baselineIds = baselineConnected.Select(monitor => monitor.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var baselineIds = baselineConnected
+                .Select(monitor => monitor.Id)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             reporter.Write($"VDD BASELINE ............ PASS - {baselineCount} active VMU/VDD display(s)", ConsoleColor.Green);
             reporter.Log($"CREATE VIRTUAL DISPLAY . RUN - requesting display count {requestedCount}");
-            RunWithSpinner($"CREATE VIRTUAL DISPLAY . RUN - requesting display count {requestedCount}", () => service.SetDisplayCount(requestedCount));
+            RunWithSpinner(
+                $"CREATE VIRTUAL DISPLAY . RUN - requesting display count {requestedCount}",
+                () => service.SetDisplayCount(requestedCount));
             displayCountChanged = true;
 
             var detected = RunWithSpinner(
@@ -94,14 +105,16 @@ internal static class Program
                 () => service.WaitForConnectedCount(requestedCount, TimeSpan.FromSeconds(12)));
             if (!detected)
             {
-                throw new TimeoutException($"Timed out waiting for VDD active display count to become {requestedCount}.");
+                throw new TimeoutException(
+                    $"Timed out waiting for VDD active display count to become {requestedCount}.");
             }
 
             var afterCreate = service.GetMonitors().Where(monitor => monitor.IsConnected).ToArray();
             var created = afterCreate.FirstOrDefault(monitor => !baselineIds.Contains(monitor.Id));
             if (created is null)
             {
-                throw new InvalidOperationException("VDD display count increased, but VMU could not deterministically identify the newly created CCD display path.");
+                throw new InvalidOperationException(
+                    "VDD display count increased, but VMU could not deterministically identify the newly created display path.");
             }
 
             var windowsNumber = GetWindowsDisplayNumber(created.GdiName);
@@ -110,7 +123,9 @@ internal static class Program
                 : created.GdiName ?? created.Id;
 
             reporter.Write($"CREATE VIRTUAL DISPLAY . PASS - {label}", ConsoleColor.Green);
-            reporter.Write($"DISPLAY DETECTED ....... PASS - {created.Width}x{created.Height} at ({created.X},{created.Y})", ConsoleColor.Green);
+            reporter.Write(
+                $"DISPLAY DETECTED ....... PASS - {created.Width}x{created.Height} at ({created.X},{created.Y})",
+                ConsoleColor.Green);
         }
         catch (Exception ex)
         {
@@ -124,7 +139,9 @@ internal static class Program
                 try
                 {
                     reporter.Log($"RESTORE DISPLAY COUNT .. RUN - restoring {baselineCount}");
-                    RunWithSpinner($"RESTORE DISPLAY COUNT .. RUN - restoring {baselineCount}", () => service.SetDisplayCount(baselineCount));
+                    RunWithSpinner(
+                        $"RESTORE DISPLAY COUNT .. RUN - restoring {baselineCount}",
+                        () => service.SetDisplayCount(baselineCount));
                     cleanupPassed = RunWithSpinner(
                         "VERIFY CLEANUP .......... RUN",
                         () => service.WaitForConnectedCount(baselineCount, TimeSpan.FromSeconds(12)));
@@ -152,6 +169,29 @@ internal static class Program
         reporter.Write($"Log: {logPath}", ConsoleColor.DarkGray);
         reporter.Write(passed ? "STATUS: OK" : "STATUS: FAILED", passed ? ConsoleColor.Green : ConsoleColor.Red);
         return passed ? 0 : 1;
+    }
+
+    private static void WriteDriverDiagnostics(SelfTestReporter reporter, VddDriverDiagnostics diagnostics)
+    {
+        if (!diagnostics.DevicePresent)
+        {
+            reporter.Write("VDD DEVICE .............. FAIL - Virtual Display Driver adapter not found", ConsoleColor.Red);
+        }
+        else
+        {
+            var identity = string.IsNullOrWhiteSpace(diagnostics.PnpInstanceId)
+                ? diagnostics.GdiName ?? "unknown identity"
+                : diagnostics.PnpInstanceId;
+            reporter.Write(
+                $"VDD DEVICE .............. {(diagnostics.DeviceActive ? "PASS" : "WARN")} - {identity}; flags=0x{diagnostics.StateFlags:X8}",
+                diagnostics.DeviceActive ? ConsoleColor.Green : ConsoleColor.Yellow);
+        }
+
+        reporter.Write(
+            diagnostics.PipeAvailable
+                ? "VDD PIPE ................ PASS - MTTVirtualDisplayPipe available"
+                : "VDD PIPE ................ FAIL - MTTVirtualDisplayPipe unavailable",
+            diagnostics.PipeAvailable ? ConsoleColor.Green : ConsoleColor.Red);
     }
 
     private static T RunWithSpinner<T>(string text, Func<T> operation)
@@ -194,112 +234,6 @@ internal static class Program
         }
     }
 
-    private static void EnsureVddDependency(string repoRoot, SelfTestReporter reporter)
-    {
-        var scriptPath = Path.Combine(repoRoot, "scripts", "Ensure-Vdd.ps1");
-        if (!File.Exists(scriptPath))
-        {
-            throw new FileNotFoundException("VDD dependency setup script is missing.", scriptPath);
-        }
-
-        reporter.Write("VDD SETUP ............... RUN - Windows may show a UAC confirmation", ConsoleColor.Yellow);
-
-        var setupLogPath = Path.Combine(
-            Path.GetTempPath(),
-            $"VMU-VDD-setup-{Environment.ProcessId}-{Guid.NewGuid():N}.log");
-
-        var escapedScriptPath = EscapePowerShellSingleQuotedString(scriptPath);
-        var escapedSetupLogPath = EscapePowerShellSingleQuotedString(setupLogPath);
-        var command =
-            $"& {{ & '{escapedScriptPath}' *>&1 | Out-File -LiteralPath '{escapedSetupLogPath}' -Encoding utf8; exit $LASTEXITCODE }}";
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "powershell.exe",
-            Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{command.Replace("\"", "\\\"")}\"",
-            UseShellExecute = true,
-            Verb = "runas",
-            WindowStyle = ProcessWindowStyle.Hidden,
-            WorkingDirectory = repoRoot
-        };
-
-        try
-        {
-            using var process = Process.Start(startInfo)
-                ?? throw new InvalidOperationException("Could not start elevated VDD dependency setup.");
-
-            RunWithSpinner("VDD SETUP ............... RUN", () => process.WaitForExit());
-            var setupLines = ReadSetupDiagnostics(setupLogPath);
-            reporter.LogExternal("VDD SETUP", setupLines);
-
-            if (process.ExitCode != 0)
-            {
-                var detail = GetLastMeaningfulSetupLine(setupLines);
-                var suffix = string.IsNullOrWhiteSpace(detail) ? string.Empty : $" - {detail}";
-                throw new InvalidOperationException($"VDD dependency setup failed with exit code {process.ExitCode}{suffix}");
-            }
-        }
-        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
-        {
-            throw new InvalidOperationException("VDD dependency setup was cancelled at the Windows UAC prompt.", ex);
-        }
-        finally
-        {
-            try
-            {
-                if (File.Exists(setupLogPath))
-                {
-                    File.Delete(setupLogPath);
-                }
-            }
-            catch (IOException)
-            {
-                // Diagnostics were already copied into logs/vmu-selftest.log.
-            }
-            catch (UnauthorizedAccessException)
-            {
-                // Diagnostics were already copied into logs/vmu-selftest.log.
-            }
-        }
-
-        reporter.Write("VDD SETUP ............... PASS", ConsoleColor.Green);
-    }
-
-    private static string EscapePowerShellSingleQuotedString(string value) => value.Replace("'", "''", StringComparison.Ordinal);
-
-    private static string[] ReadSetupDiagnostics(string setupLogPath)
-    {
-        if (!File.Exists(setupLogPath))
-        {
-            return Array.Empty<string>();
-        }
-
-        try
-        {
-            return File.ReadAllLines(setupLogPath)
-                .Select(line => line.TrimEnd())
-                .Where(line => !string.IsNullOrWhiteSpace(line))
-                .ToArray();
-        }
-        catch (IOException)
-        {
-            return Array.Empty<string>();
-        }
-    }
-
-    private static string? GetLastMeaningfulSetupLine(IEnumerable<string> lines)
-    {
-        return lines
-            .Reverse()
-            .Select(line => line.Trim())
-            .FirstOrDefault(line =>
-                !string.IsNullOrWhiteSpace(line) &&
-                !line.StartsWith("At ", StringComparison.OrdinalIgnoreCase) &&
-                !line.StartsWith("+ ", StringComparison.Ordinal) &&
-                !line.StartsWith("CategoryInfo", StringComparison.OrdinalIgnoreCase) &&
-                !line.StartsWith("FullyQualifiedErrorId", StringComparison.OrdinalIgnoreCase));
-    }
-
     private static int? GetWindowsDisplayNumber(string? name)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -332,15 +266,8 @@ internal static class Program
             writer = new StreamWriter(logPath, false, new System.Text.UTF8Encoding(false)) { AutoFlush = true };
         }
 
-        public void Log(string message) => writer.WriteLine($"[{DateTime.Now:dd.MM.yyyy HH:mm:ss.fff}] {message}");
-
-        public void LogExternal(string source, IEnumerable<string> lines)
-        {
-            foreach (var line in lines)
-            {
-                Log($"[{source}] {line}");
-            }
-        }
+        public void Log(string message) =>
+            writer.WriteLine($"[{DateTime.Now:dd.MM.yyyy HH:mm:ss.fff}] {message}");
 
         public void Write(string message, ConsoleColor? color = null)
         {
