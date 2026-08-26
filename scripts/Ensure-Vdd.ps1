@@ -71,10 +71,51 @@ function Assert-Hash {
 }
 
 function Invoke-Native {
-    param([Parameter(Mandatory)][string]$FilePath, [Parameter()][string[]]$Arguments = @())
-    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter()][string[]]$Arguments = @()
+    )
+
+    Write-Host ("VDD dependency: RUN {0} {1}" -f $FilePath, ($Arguments -join ' '))
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FilePath
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    foreach ($argument in $Arguments) {
+        [void]$psi.ArgumentList.Add($argument)
+    }
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+    if (-not $process.Start()) {
+        throw "Could not start $FilePath."
+    }
+
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+        foreach ($line in ($stdout -split "`r?`n")) {
+            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                Write-Host "VDD dependency: $line"
+            }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        foreach ($line in ($stderr -split "`r?`n")) {
+            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                Write-Host "VDD dependency ERROR: $line"
+            }
+        }
+    }
+
     if ($process.ExitCode -ne 0) {
-        throw "$FilePath failed with exit code $($process.ExitCode)."
+        $detail = if (-not [string]::IsNullOrWhiteSpace($stderr)) { $stderr.Trim() } elseif (-not [string]::IsNullOrWhiteSpace($stdout)) { $stdout.Trim() } else { 'no process output' }
+        throw "$FilePath failed with exit code $($process.ExitCode): $detail"
     }
 }
 
@@ -95,7 +136,8 @@ $devices = @(Get-VddDevices)
 if ($devices.Count -gt 0) {
     Write-Host "VDD dependency: found $($devices.Count) existing device node(s); enabling them."
     foreach ($device in $devices) {
-        Invoke-Native -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -Arguments @('/enable-device', ('"{0}"' -f $device.InstanceId))
+        Write-Host "VDD dependency: enabling $($device.InstanceId)"
+        Invoke-Native -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -Arguments @('/enable-device', [string]$device.InstanceId)
     }
 
     if (Wait-Until -Description 'existing driver enabled and named pipe available' -TimeoutSeconds 15 -Condition { Test-VddPipe }) {
@@ -136,8 +178,6 @@ try {
         }
     }
 
-    # The signed catalog certificate is imported only when it is not already
-    # trusted. This is the same installation path validated by the ALPHA POC.
     $catalogBytes = [System.IO.File]::ReadAllBytes($catPath)
     $certificates = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
     $certificates.Import($catalogBytes)
@@ -156,7 +196,7 @@ try {
     }
 
     Write-Host 'VDD dependency: installing one root-enumerated MttVDD device...'
-    Invoke-Native -FilePath $nefconExe -Arguments @('install', ('"{0}"' -f $infPath), 'Root\MttVDD')
+    Invoke-Native -FilePath $nefconExe -Arguments @('install', $infPath, 'Root\MttVDD')
 
     if (-not (Wait-Until -Description 'driver installed and named pipe available' -TimeoutSeconds 20 -Condition { Test-VddPipe })) {
         throw 'Virtual Display Driver installation completed, but the named pipe did not become available.'
