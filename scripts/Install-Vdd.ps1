@@ -30,21 +30,13 @@ function Get-VddDevices {
 }
 
 function Test-VddPipe {
-    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(
-        '.',
-        $PipeName,
-        [System.IO.Pipes.PipeDirection]::InOut,
-        [System.IO.Pipes.PipeOptions]::None)
+    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', $PipeName, [System.IO.Pipes.PipeDirection]::InOut, [System.IO.Pipes.PipeOptions]::None)
     try {
         $pipe.Connect(500)
         return $pipe.IsConnected
     }
-    catch {
-        return $false
-    }
-    finally {
-        $pipe.Dispose()
-    }
+    catch { return $false }
+    finally { $pipe.Dispose() }
 }
 
 function Wait-Until {
@@ -61,40 +53,31 @@ function Wait-Until {
         }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
-
     return $false
 }
 
 function Assert-Hash {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$Expected)
-
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Expected)
     $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -ne $Expected.ToLowerInvariant()) {
-        throw "SHA-256 mismatch for $Path."
-    }
+    if ($actual -ne $Expected.ToLowerInvariant()) { throw "SHA-256 mismatch for $Path." }
 }
 
-function Invoke-Native {
+function Invoke-NativeProcess {
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [Parameter()][string[]]$Arguments = @())
 
     Write-Host ("VDD INSTALL: RUN {0} {1}" -f $FilePath, ($Arguments -join ' '))
-    & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$FilePath failed with exit code $LASTEXITCODE."
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
+    Write-Host "VDD INSTALL: EXIT CODE $($process.ExitCode)"
+    if ($process.ExitCode -ne 0) {
+        throw "$FilePath failed with exit code $($process.ExitCode)."
     }
+    return $process.ExitCode
 }
 
-if ($env:OS -ne 'Windows_NT') {
-    throw 'Virtual Display Driver installation is supported only on Windows.'
-}
-
-if (-not (Test-IsAdministrator)) {
-    throw 'Virtual Display Driver installation requires an elevated process.'
-}
+if ($env:OS -ne 'Windows_NT') { throw 'Virtual Display Driver installation is supported only on Windows.' }
+if (-not (Test-IsAdministrator)) { throw 'Virtual Display Driver installation requires an elevated process.' }
 
 $existing = @(Get-VddDevices)
 if ($existing.Count -gt 0) {
@@ -103,7 +86,6 @@ if ($existing.Count -gt 0) {
         Write-Host 'VDD INSTALL: runtime pipe already available.'
         exit 0
     }
-
     throw 'ROOT\MTTVDD device already exists but MTTVirtualDisplayPipe is unavailable. Refusing to mutate an unknown unhealthy state; use a dedicated repair procedure.'
 }
 
@@ -115,15 +97,12 @@ $nefconExtract = Join-Path $workRoot 'nefcon'
 
 try {
     New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
-
     Write-Host "VDD INSTALL: downloading Virtual Display Driver $DriverVersion..."
     Invoke-WebRequest -Uri $DriverUrl -OutFile $driverZip -UseBasicParsing
     Assert-Hash -Path $driverZip -Expected $DriverSha256
-
     Write-Host "VDD INSTALL: downloading NefCon $NefConVersion..."
     Invoke-WebRequest -Uri $NefConUrl -OutFile $nefconZip -UseBasicParsing
     Assert-Hash -Path $nefconZip -Expected $NefConSha256
-
     Expand-Archive -LiteralPath $driverZip -DestinationPath $driverExtract -Force
     Expand-Archive -LiteralPath $nefconZip -DestinationPath $nefconExtract -Force
 
@@ -131,39 +110,29 @@ try {
     $infPath = Join-Path $driverSource 'MttVDD.inf'
     $catPath = Join-Path $driverSource 'mttvdd.cat'
     $nefconExe = Join-Path $nefconExtract 'x64\nefconw.exe'
-
     foreach ($required in @($infPath, $catPath, $nefconExe)) {
-        if (-not (Test-Path -LiteralPath $required)) {
-            throw "Required VDD installation file not found: $required"
-        }
+        if (-not (Test-Path -LiteralPath $required)) { throw "Required VDD installation file not found: $required" }
     }
 
     $catalogBytes = [System.IO.File]::ReadAllBytes($catPath)
     $certificates = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
     $certificates.Import($catalogBytes)
-
     foreach ($certificate in $certificates) {
-        $existingCert = Get-ChildItem 'Cert:\LocalMachine\TrustedPublisher' |
-            Where-Object { $_.Thumbprint -eq $certificate.Thumbprint } |
-            Select-Object -First 1
-        if ($null -ne $existingCert) {
-            continue
-        }
-
+        $existingCert = Get-ChildItem 'Cert:\LocalMachine\TrustedPublisher' | Where-Object { $_.Thumbprint -eq $certificate.Thumbprint } | Select-Object -First 1
+        if ($null -ne $existingCert) { continue }
         $certPath = Join-Path $workRoot ($certificate.Thumbprint + '.cer')
-        [System.IO.File]::WriteAllBytes(
-            $certPath,
-            $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+        [System.IO.File]::WriteAllBytes($certPath, $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
         Import-Certificate -FilePath $certPath -CertStoreLocation 'Cert:\LocalMachine\TrustedPublisher' | Out-Null
     }
 
     Write-Host 'VDD INSTALL: creating exactly one root-enumerated ROOT\MTTVDD device...'
-    Invoke-Native -FilePath $nefconExe -Arguments @('install', $infPath, 'Root\MttVDD')
+    # Keep this invocation byte-for-byte equivalent in semantics to the validated ALPHA path:
+    # Start-Process, explicit quoted INF argument, wait, exit-code validation, no extra console window.
+    Invoke-NativeProcess -FilePath $nefconExe -Arguments @('install', ('"{0}"' -f $infPath), 'Root\MttVDD') | Out-Null
 
     if (-not (Wait-Until -Description 'ROOT\MTTVDD device detected' -Condition { @(Get-VddDevices).Count -eq 1 })) {
         throw "Expected exactly one ROOT\MTTVDD device after installation, found $(@(Get-VddDevices).Count)."
     }
-
     if (-not (Wait-Until -Description 'MTTVirtualDisplayPipe available' -Condition { Test-VddPipe })) {
         throw 'ROOT\MTTVDD was installed, but MTTVirtualDisplayPipe did not become available.'
     }
