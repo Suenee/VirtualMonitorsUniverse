@@ -1,0 +1,272 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$RepoRoot = $env:VMU_UPGRADE_REPO
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+    throw 'VMU_UPGRADE_REPO is not set.'
+}
+
+$RepoRoot = [System.IO.Path]::GetFullPath($RepoRoot)
+$LogDir = Join-Path $RepoRoot 'logs'
+$LogFile = Join-Path $LogDir 'upgrade.log'
+$Solution = Join-Path $RepoRoot 'VirtualMonitorsUniverse.sln'
+$TestProject = Join-Path $RepoRoot 'tests\Core.Tests\Core.Tests.csproj'
+$CliProject = Join-Path $RepoRoot 'src\Cli\Cli.csproj'
+$RuntimeCli = Join-Path $RepoRoot '.runtime\cli'
+$RequiredBranch = 'devel'
+$RequiredSdkMajor = 10
+$RequiredSdkPackage = 'Microsoft.DotNet.SDK.10'
+$LegacySdkPackage = 'Microsoft.DotNet.SDK.8'
+
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+
+# Start-Transcript mirrors the complete PowerShell/native command stream to the
+# terminal and logs\upgrade.log. The bootstrap itself intentionally stays tiny.
+Start-Transcript -Path $LogFile -Force | Out-Null
+
+function Write-Section {
+    param([Parameter(Mandatory)][string]$Text)
+    Write-Host ''
+    Write-Host '============================================'
+    Write-Host $Text
+    Write-Host '============================================'
+}
+
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter()][string[]]$ArgumentList = @(),
+        [Parameter()][string]$FailureMessage = ''
+    )
+
+    & $FilePath @ArgumentList
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        if ([string]::IsNullOrWhiteSpace($FailureMessage)) {
+            $FailureMessage = "$FilePath failed with exit code $exitCode."
+        }
+        throw $FailureMessage
+    }
+}
+
+function Get-InstalledSdks {
+    $output = & dotnet --list-sdks 2>$null
+    if ($LASTEXITCODE -ne 0) { return @() }
+    return @($output)
+}
+
+function Test-SdkMajorInstalled {
+    param([Parameter(Mandatory)][int]$Major)
+    return (Get-InstalledSdks | Where-Object { $_ -match "^$Major\." }).Count -gt 0
+}
+
+function Wait-WindowsInstallerIdle {
+    param([int]$TimeoutSeconds = 180)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $busy = @(Get-Process msiexec -ErrorAction SilentlyContinue)
+        if ($busy.Count -eq 0) {
+            Write-Host 'Windows Installer: idle'
+            return $true
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+
+    Write-Warning "Windows Installer still appears busy after $TimeoutSeconds seconds."
+    return $false
+}
+
+function Remove-KnownGeneratedArtifacts {
+    Write-Host 'Cleaning repository-owned generated files...'
+
+    $runtime = Join-Path $RepoRoot '.runtime'
+    if (Test-Path $runtime) {
+        Remove-Item -LiteralPath $runtime -Recurse -Force
+    }
+
+    foreach ($base in @('src', 'tests')) {
+        $basePath = Join-Path $RepoRoot $base
+        if (-not (Test-Path $basePath)) { continue }
+
+        Get-ChildItem -LiteralPath $basePath -Directory -Recurse -Force |
+            Where-Object { $_.Name -in @('bin', 'obj') } |
+            Sort-Object FullName -Descending |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+    }
+
+    foreach ($obsolete in @('tools', 'client', 'companion', 'server', 'shared')) {
+        $path = Join-Path $RepoRoot $obsolete
+        if (Test-Path $path) {
+            Write-Host "Removing obsolete path: $obsolete"
+            Remove-Item -LiteralPath $path -Recurse -Force
+        }
+    }
+
+    foreach ($obsoleteFile in @('alfatest.cmd', 'alfatest.log', 'multivddtest.log', 'vmu-selftest.log', 'upgrade.log')) {
+        $path = Join-Path $RepoRoot $obsoleteFile
+        if (Test-Path $path) {
+            Write-Host "Removing obsolete root file: $obsoleteFile"
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
+}
+
+function Assert-WorkspaceHygiene {
+    foreach ($obsolete in @('tools', 'client', 'companion', 'server', 'shared')) {
+        if (Test-Path (Join-Path $RepoRoot $obsolete)) {
+            throw "Workspace hygiene check failed: obsolete path remains: $obsolete"
+        }
+    }
+
+    foreach ($obsoleteFile in @('alfatest.cmd', 'alfatest.log', 'multivddtest.log', 'vmu-selftest.log', 'upgrade.log')) {
+        if (Test-Path (Join-Path $RepoRoot $obsoleteFile)) {
+            throw "Workspace hygiene check failed: obsolete root file remains: $obsoleteFile"
+        }
+    }
+
+    Write-Host 'Workspace hygiene: OK'
+}
+
+try {
+    Set-Location -LiteralPath $RepoRoot
+
+    Write-Section 'Virtual Monitors Universe - DEVEL upgrade'
+    Write-Host ("[{0}] Virtual Monitors Universe - DEVEL upgrade" -f (Get-Date -Format 'dd.MM.yyyy HH:mm:ss'))
+    Write-Host "Repository: $RepoRoot"
+    Write-Host "Target branch: $RequiredBranch"
+    Write-Host "Required SDK: .NET $RequiredSdkMajor"
+    Write-Host ''
+
+    if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
+        throw 'Git for Windows is not installed or git.exe is not in PATH.'
+    }
+
+    $inside = & git rev-parse --is-inside-work-tree 2>$null
+    if ($LASTEXITCODE -ne 0 -or $inside -ne 'true') {
+        throw 'This folder is not a Git working tree.'
+    }
+
+    $branch = (& git rev-parse --abbrev-ref HEAD 2>$null).Trim()
+    if ($LASTEXITCODE -ne 0 -or $branch -ne $RequiredBranch) {
+        throw "Current branch is '$branch', expected '$RequiredBranch'."
+    }
+
+    & git diff --quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Local tracked files contain changes. Commit or revert them first.'
+    }
+    & git diff --cached --quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Local staged changes exist. Commit or revert them first.'
+    }
+
+    Write-Host '[1/5] Synchronizing current DEVEL source...'
+    Invoke-Native git @('remote', 'set-url', 'origin', 'https://github.com/Suenee/VirtualMonitorsUniverse.git') 'Could not set the origin URL.'
+    Invoke-Native git @('reset', '--hard', 'origin/devel') 'Could not synchronize the local DEVEL branch.'
+
+    $branchAfterReset = (& git rev-parse --abbrev-ref HEAD 2>$null).Trim()
+    if ($branchAfterReset -ne $RequiredBranch) {
+        throw "Repository is not on '$RequiredBranch' after synchronization."
+    }
+    Write-Host "Active branch after synchronization: $branchAfterReset"
+
+    Write-Host '[2/5] Cleaning known obsolete and generated artifacts...'
+    Remove-KnownGeneratedArtifacts
+    Assert-WorkspaceHygiene
+
+    Write-Host '[3/5] Ensuring .NET 10 SDK and retiring .NET 8 SDK...'
+    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+        throw 'Windows Package Manager (winget) is required to bootstrap the .NET SDK.'
+    }
+
+    if (-not (Test-SdkMajorInstalled -Major 10)) {
+        Write-Host '.NET 10 SDK is not installed. Starting the official WinGet installation...'
+        Write-Host 'A Windows/UAC or installer confirmation may appear. Approve it to continue.'
+        Invoke-Native winget @('install', '--id', $RequiredSdkPackage, '--exact', '--source', 'winget', '--interactive', '--accept-source-agreements', '--accept-package-agreements') '.NET 10 SDK installation failed or was cancelled. .NET 8 SDK has NOT been removed.'
+        Wait-WindowsInstallerIdle -TimeoutSeconds 180 | Out-Null
+    }
+
+    if (-not (Get-Command dotnet.exe -ErrorAction SilentlyContinue)) {
+        throw 'dotnet.exe is unavailable after .NET 10 installation.'
+    }
+    if (-not (Test-SdkMajorInstalled -Major 10)) {
+        throw '.NET 10 SDK could not be verified after installation. .NET 8 SDK has NOT been removed.'
+    }
+
+    Write-Host '.NET 10 SDK: VERIFIED'
+    Write-Host 'Installed SDKs before VMU validation:'
+    & dotnet --list-sdks
+
+    Write-Host 'Validating VMU on .NET 10 before removing the old SDK...'
+    Invoke-Native dotnet @('restore', $Solution) 'Restore failed on .NET 10. .NET 8 SDK has NOT been removed.'
+    Invoke-Native dotnet @('build', $Solution, '-c', 'Debug', '--no-restore') 'Build failed on .NET 10. .NET 8 SDK has NOT been removed.'
+    Invoke-Native dotnet @('test', $TestProject, '-c', 'Debug', '--no-build', '--no-restore') 'Tests failed on .NET 10. .NET 8 SDK has NOT been removed.'
+    Write-Host 'VMU validation on .NET 10: PASS'
+
+    if (Test-SdkMajorInstalled -Major 8) {
+        Write-Host '.NET 8 SDK is still installed.'
+        Write-Host 'Waiting for Windows Installer to become idle before uninstall...'
+        Wait-WindowsInstallerIdle -TimeoutSeconds 180 | Out-Null
+
+        $uninstalled = $false
+        for ($attempt = 1; $attempt -le 2 -and -not $uninstalled; $attempt++) {
+            Write-Host "Starting .NET 8 SDK uninstall attempt $attempt of 2..."
+            Write-Host 'A Windows/UAC or uninstaller confirmation may appear. Approve it to continue.'
+            & winget uninstall --id $LegacySdkPackage --exact --source winget --interactive
+            if ($LASTEXITCODE -eq 0) {
+                $uninstalled = $true
+            }
+            elseif ($attempt -eq 1) {
+                Write-Warning 'Uninstall attempt 1 did not complete. Waiting before retrying...'
+                Start-Sleep -Seconds 10
+                Wait-WindowsInstallerIdle -TimeoutSeconds 180 | Out-Null
+            }
+        }
+
+        if ($uninstalled) {
+            Write-Host '.NET 8 SDK uninstall command completed.'
+        }
+        else {
+            Write-Warning '.NET 8 SDK uninstall did not complete after two attempts. No .NET runtime was removed. VMU will continue because .NET 10 validation passed.'
+        }
+    }
+
+    Write-Host 'Installed SDKs after SDK maintenance:'
+    & dotnet --list-sdks
+
+    Write-Host '[4/5] Restoring, building, testing and publishing with .NET 10...'
+    Remove-KnownGeneratedArtifacts
+    Invoke-Native dotnet @('restore', $Solution) 'Final restore failed.'
+    Invoke-Native dotnet @('build', $Solution, '-c', 'Debug', '--no-restore') 'Final build failed.'
+    Invoke-Native dotnet @('test', $TestProject, '-c', 'Debug', '--no-build', '--no-restore') 'Final tests failed.'
+    New-Item -ItemType Directory -Path $RuntimeCli -Force | Out-Null
+    Invoke-Native dotnet @('publish', $CliProject, '-c', 'Debug', '--no-restore', '-o', $RuntimeCli) 'CLI publish failed.'
+
+    Write-Host '[5/5] Verifying final workspace and SDK state...'
+    Assert-WorkspaceHygiene
+    if (-not (Test-SdkMajorInstalled -Major 10)) {
+        throw 'Final .NET 10 SDK verification failed.'
+    }
+
+    Write-Host 'Final workspace hygiene: OK'
+    Write-Host '.NET 10 SDK: OK'
+    Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'
+    Write-Host 'Branch: devel'
+    Write-Host "Runtime CLI: $RuntimeCli"
+    Write-Host "Logs: $LogDir"
+    Write-Host 'Next check: vmu selftest'
+    exit 0
+}
+catch {
+    Write-Host ''
+    Write-Host '============================================' -ForegroundColor Red
+    Write-Host 'UPGRADE FAILED' -ForegroundColor Red
+    Write-Host '============================================' -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "See logs\upgrade.log for details."
+    exit 1
+}
+finally {
+    try { Stop-Transcript | Out-Null } catch { }
+}
