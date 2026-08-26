@@ -16,6 +16,7 @@ set "REPO_ROOT=%CD%"
 set "LOG_DIR=%REPO_ROOT%\logs"
 set "LOG_FILE=%LOG_DIR%\upgrade.log"
 set "TMP_UPDATER=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.cmd"
+set "TEE_HELPER=%REPO_ROOT%\scripts\Invoke-TeeProcess.ps1"
 
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >NUL 2>&1
 if not exist "%LOG_DIR%" (
@@ -64,8 +65,20 @@ if errorlevel 1 (
     goto :fail
 )
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-  "& { & '%TMP_UPDATER%' --worker '%REPO_ROOT%' 2^>^&1 ^| Tee-Object -FilePath '%LOG_FILE%' -Append; exit $LASTEXITCODE }"
+if not exist "%TEE_HELPER%" (
+    echo ERROR: Missing upgrade stream helper: %TEE_HELPER%
+    >> "%LOG_FILE%" echo ERROR: Missing upgrade stream helper: %TEE_HELPER%
+    del /Q "%TMP_UPDATER%" >NUL 2>&1
+    goto :fail
+)
+
+rem Run the worker through a dedicated PowerShell process wrapper. This avoids
+rem fragile CMD-to-PowerShell pipe escaping while preserving live console output,
+rem the same complete stream in logs\upgrade.log, and the worker exit code.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%TEE_HELPER%" ^
+    -Command "%TMP_UPDATER%" ^
+    -Arguments "--worker","%REPO_ROOT%" ^
+    -LogPath "%LOG_FILE%"
 set "ERR=%ERRORLEVEL%"
 del /Q "%TMP_UPDATER%" >NUL 2>&1
 
