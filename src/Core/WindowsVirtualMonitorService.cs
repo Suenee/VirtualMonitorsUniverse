@@ -149,7 +149,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
         private const uint GetAdapterName = 4;
         private const uint ModeInfoTypeSource = 1;
 
-        private static IReadOnlyList<DisplayPath> GetPaths()
+        public static IReadOnlyList<DisplayPath> GetPaths()
         {
             var result = GetDisplayConfigBufferSizes(QdcAllPaths, out var pathCount, out var modeCount);
             if (result != 0)
@@ -413,6 +413,6 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
             public string adapterDevicePath;
         }
 
-        private sealed record DisplayPath(string SourceKey, string? GdiName, string? PnpInstanceId, string? FriendlyName, string? AdapterPath, bool IsActive, bool IsVdd, int X, int Y, int Width, int Height);
+        public sealed record DisplayPath(string SourceKey, string? GdiName, string? PnpInstanceId, string? FriendlyName, string? AdapterPath, bool IsActive, bool IsVdd, int X, int Y, int Width, int Height);
     }
 }
