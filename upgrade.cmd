@@ -9,8 +9,9 @@ set "DOTNET_LEGACY_PACKAGE=Microsoft.DotNet.SDK.8"
 
 rem IMPORTANT BOOTSTRAP CONTRACT:
 rem The normal entry point must stay dependency-free except for Git/CMD.
-rem It synchronizes DEVEL first, then starts the freshly downloaded script.
-rem Do not add PowerShell, .NET, logging helpers, or build logic before this handoff.
+rem It synchronizes DEVEL first, then starts the freshly downloaded script in a
+rem new cmd.exe process. Do not add PowerShell, .NET, logging helpers, or build
+rem logic before this handoff.
 if /I "%~1"=="--current" goto :current
 if /I "%~1"=="--post-update" goto :post_update
 
@@ -67,10 +68,22 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem upgrade.cmd may have replaced itself above. CALL reparses it from disk and
-rem therefore hands control to the newly downloaded implementation.
-call "%REPO_ROOT%\upgrade.cmd" --current
-exit /b %ERRORLEVEL%
+rem Verify the branch again after reset. This is diagnostic and protects the
+rem handoff from an unexpected detached/changed repository state.
+set "SYNCED_BRANCH="
+for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD 2^>NUL') do set "SYNCED_BRANCH=%%B"
+echo [BOOTSTRAP] Active branch after synchronization: !SYNCED_BRANCH!
+if /I not "!SYNCED_BRANCH!"=="%DEFAULT_BRANCH%" (
+    echo ERROR: Repository is not on %DEFAULT_BRANCH% after synchronization.
+    pause
+    exit /b 1
+)
+
+rem upgrade.cmd may have replaced itself above. Start a NEW cmd.exe process so
+rem the freshly downloaded file is parsed from disk with a clean command context.
+cmd.exe /D /C ""%REPO_ROOT%\upgrade.cmd" --current"
+set "BOOTSTRAP_RESULT=%ERRORLEVEL%"
+exit /b %BOOTSTRAP_RESULT%
 
 :current
 cls
@@ -126,8 +139,6 @@ if not exist "%TEE_HELPER%" (
     goto :fail
 )
 
-rem Run only the current post-update implementation through the tee helper.
-rem Self-update already happened before any PowerShell/helper dependency was used.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%TEE_HELPER%" ^
     -Command "%REPO_ROOT%\upgrade.cmd" ^
     -Arguments "--post-update" ^
