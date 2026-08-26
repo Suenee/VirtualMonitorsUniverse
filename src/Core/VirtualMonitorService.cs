@@ -4,6 +4,8 @@ public interface IVirtualMonitorService
 {
     IReadOnlyList<VirtualMonitorInfo> GetMonitors();
 
+    VddDriverDiagnostics GetDriverDiagnostics(TimeSpan? pipeTimeout = null);
+
     bool IsDriverAvailable(TimeSpan? timeout = null);
 
     void SetDisplayCount(int count, TimeSpan? timeout = null);
@@ -20,3 +22,12 @@ public sealed record VirtualMonitorInfo(
     int Height,
     int X,
     int Y);
+
+public sealed record VddDriverDiagnostics(
+    bool DevicePresent,
+    bool DeviceActive,
+    bool PipeAvailable,
+    string? GdiName,
+    string? PnpInstanceId,
+    string? FriendlyName,
+    int StateFlags);
