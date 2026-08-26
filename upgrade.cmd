@@ -9,14 +9,14 @@ set "DOTNET_LEGACY_PACKAGE=Microsoft.DotNet.SDK.8"
 
 rem IMPORTANT BOOTSTRAP CONTRACT:
 rem The normal entry point must stay dependency-free except for Git/CMD.
-rem It synchronizes DEVEL first, then starts the freshly downloaded script in a
-rem new cmd.exe process. Do not add PowerShell, .NET, logging helpers, or build
-rem logic before this handoff.
+rem It synchronizes DEVEL first, then transfers control through a temporary
+rem launcher created BEFORE the running upgrade.cmd is replaced by Git.
 if /I "%~1"=="--current" goto :current
 if /I "%~1"=="--post-update" goto :post_update
 
 cd /d "%~dp0"
 set "REPO_ROOT=%CD%"
+set "BOOTSTRAP_LAUNCHER=%TEMP%\VMU-upgrade-handoff-%RANDOM%-%RANDOM%.cmd"
 
 where git >NUL 2>&1
 if errorlevel 1 (
@@ -51,10 +51,25 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem Build the external handoff before Git can replace this currently executing
+rem batch file. The temporary launcher is a separate batch context and therefore
+rem cannot inherit stale labels/arguments from the old updater implementation.
+> "%BOOTSTRAP_LAUNCHER%" echo @echo off
+>> "%BOOTSTRAP_LAUNCHER%" echo call "%REPO_ROOT%\upgrade.cmd" --current
+>> "%BOOTSTRAP_LAUNCHER%" echo set "VMU_HANDOFF_RESULT=%%ERRORLEVEL%%"
+>> "%BOOTSTRAP_LAUNCHER%" echo del /Q "%%~f0" ^>NUL 2^>^&1
+>> "%BOOTSTRAP_LAUNCHER%" echo exit /b %%VMU_HANDOFF_RESULT%%
+if not exist "%BOOTSTRAP_LAUNCHER%" (
+    echo ERROR: Could not create temporary upgrade handoff launcher.
+    pause
+    exit /b 1
+)
+
 git remote set-url origin "%REPO_URL%" >NUL 2>&1
 echo [BOOTSTRAP] Downloading current DEVEL source...
 git fetch origin "%DEFAULT_BRANCH%"
 if errorlevel 1 (
+    del /Q "%BOOTSTRAP_LAUNCHER%" >NUL 2>&1
     echo ERROR: Could not download DEVEL from GitHub.
     pause
     exit /b 1
@@ -63,27 +78,25 @@ if errorlevel 1 (
 echo [BOOTSTRAP] Synchronizing local DEVEL branch...
 git reset --hard "origin/%DEFAULT_BRANCH%"
 if errorlevel 1 (
+    del /Q "%BOOTSTRAP_LAUNCHER%" >NUL 2>&1
     echo ERROR: Could not synchronize the local DEVEL branch.
     pause
     exit /b 1
 )
 
-rem Verify the branch again after reset. This is diagnostic and protects the
-rem handoff from an unexpected detached/changed repository state.
 set "SYNCED_BRANCH="
 for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD 2^>NUL') do set "SYNCED_BRANCH=%%B"
 echo [BOOTSTRAP] Active branch after synchronization: !SYNCED_BRANCH!
 if /I not "!SYNCED_BRANCH!"=="%DEFAULT_BRANCH%" (
+    del /Q "%BOOTSTRAP_LAUNCHER%" >NUL 2>&1
     echo ERROR: Repository is not on %DEFAULT_BRANCH% after synchronization.
     pause
     exit /b 1
 )
 
-rem upgrade.cmd may have replaced itself above. Start a NEW cmd.exe process so
-rem the freshly downloaded file is parsed from disk with a clean command context.
-cmd.exe /D /C ""%REPO_ROOT%\upgrade.cmd" --current"
-set "BOOTSTRAP_RESULT=%ERRORLEVEL%"
-exit /b %BOOTSTRAP_RESULT%
+rem Deliberately invoke another batch file WITHOUT CALL. CMD transfers control
+rem to the pre-created launcher and never continues parsing this replaced file.
+"%BOOTSTRAP_LAUNCHER%"
 
 :current
 cls
