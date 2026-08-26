@@ -9,14 +9,15 @@ namespace VirtualMonitorsUniverse.Core;
 /// VirtualDrivers Virtual Display Driver (MttVDD).
 /// </summary>
 /// <remarks>
-/// The implementation intentionally uses the driver's documented local named
-/// pipe for display-count changes and Windows CCD (DisplayConfig) for identity
-/// and verification. It does not move windows or reconfigure physical displays.
+/// The implementation intentionally uses the driver's local named pipe for
+/// display-count changes and Windows CCD (DisplayConfig) for identity and
+/// verification. It does not move windows or reconfigure physical displays.
 /// </remarks>
 public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
 {
     private const string PipeName = "MTTVirtualDisplayPipe";
-    private const string VddAdapterToken = "ROOT#MTTVDD#";
+    private const string VddAdapterToken = "ROOT#MTTVDD";
+    private const string VddFriendlyName = "Virtual Display Driver";
     private static readonly TimeSpan DefaultPipeTimeout = TimeSpan.FromSeconds(5);
 
     public IReadOnlyList<VirtualMonitorInfo> GetMonitors()
@@ -116,7 +117,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
         }
 
         // The upstream driver consumes wchar_t commands, therefore UTF-16 LE
-        // must be used. This is the same protocol verified in the VMU ALPHA POC.
+        // must be used. This is the same transport validated in the ALPHA POC.
         var payload = Encoding.Unicode.GetBytes(command);
         pipe.Write(payload, 0, payload.Length);
         pipe.Flush();
@@ -174,8 +175,13 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
                 var adapterPath = ReadAdapterName(path.targetInfo.adapterId, path.targetInfo.id);
 
                 var sourceMode = TryReadSourceMode(path, modes, modeCount);
-                var isVdd = !string.IsNullOrWhiteSpace(adapterPath) &&
+                var matchesAdapterIdentity = !string.IsNullOrWhiteSpace(adapterPath) &&
                     adapterPath.IndexOf(VddAdapterToken, StringComparison.OrdinalIgnoreCase) >= 0;
+                var matchesFriendlyIdentity = string.Equals(
+                    targetName,
+                    VddFriendlyName,
+                    StringComparison.OrdinalIgnoreCase);
+                var isVdd = matchesAdapterIdentity || matchesFriendlyIdentity;
 
                 snapshots.Add(new DisplayPath(
                     SourceKey: $"{FormatLuid(path.sourceInfo.adapterId)}/{path.sourceInfo.id}",
@@ -266,14 +272,13 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
                 return null;
             }
 
-            var start = tokenIndex;
-            var end = adapterPath.IndexOf("#{", start, StringComparison.OrdinalIgnoreCase);
+            var end = adapterPath.IndexOf("#{", tokenIndex, StringComparison.OrdinalIgnoreCase);
             if (end < 0)
             {
                 end = adapterPath.Length;
             }
 
-            var token = adapterPath[start..end];
+            var token = adapterPath[tokenIndex..end];
             return token.Replace('#', '\\');
         }
 
