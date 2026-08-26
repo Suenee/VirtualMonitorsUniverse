@@ -2,91 +2,97 @@
 
 `upgrade.cmd` is the single supported developer entry point for synchronizing and preparing a Virtual Monitors Universe DEVEL working copy.
 
-## Core rule
+## Architecture
 
-The normal entry point of `upgrade.cmd` must remain self-updating and dependency-light.
+The upgrade mechanism deliberately follows the proven FHM pattern:
 
-Before it uses PowerShell helper scripts, .NET, WinGet, build tooling, or project files, it must:
+- `upgrade.cmd` is a very small and stable bootstrap.
+- `upgrade.ps1` contains the real upgrade implementation.
+- the current `upgrade.ps1` is extracted from `origin/devel` into `%TEMP%` before it is executed;
+- the temporary PowerShell runner may safely synchronize and replace files in the repository, including `upgrade.cmd` itself;
+- `logs` contains logs only.
 
-1. Verify that Git is available.
-2. Verify that the command is running inside the VMU Git working copy.
-3. Verify that the active branch is `devel`.
-4. Refuse to overwrite local tracked or staged changes.
-5. Ensure the repository-local `logs` directory exists.
-6. Create an external handoff launcher at `logs/upgrade-handoff.cmd` while the currently executing updater is still intact.
-7. Fetch `origin/devel`.
-8. Reset the local `devel` branch to `origin/devel`.
-9. Verify that the active branch is still `devel` after synchronization.
-10. Transfer control to the handoff launcher. The launcher starts the freshly downloaded `upgrade.cmd --current`, then removes itself.
+## Bootstrap flow
 
-This ordering is intentional. A stale local `upgrade.cmd` must be able to update itself even when later implementation details have changed or are broken locally.
+`upgrade.cmd` performs only the minimum work required to obtain and start the current upgrade implementation:
 
-## External handoff launcher
+1. Resolve the repository directory.
+2. Ensure `logs` exists so bootstrap failures can be recorded in `logs/upgrade.log`.
+3. Verify that Git is available and the directory is a Git working tree.
+4. Run `git fetch origin`.
+5. Extract `origin/devel:upgrade.ps1` with `git show` into a uniquely named `%TEMP%\VMU-upgrade-<random>.ps1` file.
+6. Set `VMU_UPGRADE_REPO` to the repository directory.
+7. Run the temporary PowerShell runner.
+8. Delete the temporary runner.
+9. Return the runner's exit code.
 
-The updater must not try to continue executing the same batch file after Git has replaced that file on disk. It also must not depend on complicated quoting through `cmd.exe /C` to re-enter itself.
+The final CMD block is intentionally parsed before PowerShell starts. `upgrade.ps1` can therefore update `upgrade.cmd` on disk without the currently running CMD process accidentally continuing inside newly replaced batch-file content.
 
-Instead, the bootstrap creates a small `.cmd` launcher before `git reset --hard origin/devel`. The launcher is stored under `logs`, which is repository-local, ignored by Git, and under VMU's control. This avoids any dependency on the user's `%TEMP%` configuration while ensuring that the launcher survives the Git synchronization step.
+## PowerShell runner
 
-After synchronization, execution transfers to that separate launcher by invoking it without `CALL`. This stops parsing the replaced updater and moves control into a fresh batch context.
+`upgrade.ps1` is the authoritative upgrade implementation. Because it runs from `%TEMP%`, it remains stable while the repository is synchronized underneath it.
 
-The launcher then calls the current repository `upgrade.cmd --current`, captures its exit code, removes itself, and exits with the same code.
+Its responsibilities are:
 
-The bootstrap prints the active branch after synchronization. This is both a diagnostic aid and an explicit guard against accidentally continuing from a detached or unexpected branch state.
+- create and maintain `logs/upgrade.log`;
+- show upgrade output live in the terminal while recording the same session in the log;
+- verify the active `devel` branch;
+- refuse to overwrite tracked or staged local changes;
+- synchronize the working tree to `origin/devel`;
+- remove known obsolete/generated VMU artifacts;
+- verify repository hygiene;
+- ensure .NET 10 SDK is installed;
+- restore, build and test VMU on .NET 10 before any .NET 8 SDK removal attempt;
+- retire the .NET 8 SDK safely when possible, without removing .NET runtimes;
+- perform the final restore/build/test/publish cycle;
+- publish the CLI under `.runtime\cli`;
+- perform final workspace and SDK validation.
 
 ## Bootstrap boundary
 
-Do not place these dependencies before the self-update handoff:
+Do not move project-specific upgrade logic back into `upgrade.cmd`.
 
-- PowerShell scripts
-- `.NET` SDK/runtime
-- WinGet
-- VMU binaries
-- build outputs
-- `.runtime` files
-- logging/tee helper scripts
-- project-specific dependency checks
+The batch bootstrap should remain limited to:
 
-The pre-update bootstrap should depend only on Windows CMD and Git for Windows.
+- CMD built-ins;
+- Git;
+- launching PowerShell;
+- `%TEMP%` for the extracted runner;
+- `logs/upgrade.log` only for bootstrap failure diagnostics.
 
-## Current implementation phase
+It must not contain .NET installation logic, build logic, test logic, workspace cleanup logic, or helper-launcher logic.
 
-After the self-update handoff, `upgrade.cmd --current` may use the current repository implementation. It is responsible for:
+## TEMP policy
 
-- creating `logs/upgrade.log`;
-- streaming upgrade output to both the terminal and the central log;
-- invoking the current post-update implementation;
-- reporting the final exit status.
+Temporary executable/helper files belong in `%TEMP%`, not in `logs`.
 
-## Post-update phase
+`logs` is reserved exclusively for log files. In particular, `logs/upgrade-handoff.cmd` and similar launcher files must never be part of the VMU upgrade design.
 
-`upgrade.cmd --post-update` performs repository preparation and validation:
+The temporary runner uses a randomized name and is deleted after PowerShell returns.
 
-- cleanup of known obsolete/generated files;
-- workspace hygiene validation;
-- .NET 10 SDK verification/installation;
-- VMU restore/build/test validation before retiring .NET 8 SDK;
-- safe .NET 8 SDK uninstall attempts without removing runtimes;
-- final restore/build/test/publish;
-- final workspace and SDK verification.
+## Logging
+
+All VMU logs belong under `logs/`, which is ignored by Git.
+
+The main upgrade log is:
+
+`logs/upgrade.log`
+
+The PowerShell runner uses a transcript so the live terminal session and the persistent log describe the same upgrade run.
 
 ## Safety guarantees
 
 The updater must not:
 
-- use a blanket `git clean` that can delete unknown user files;
+- use blanket `git clean` operations that can delete unknown user files;
 - overwrite tracked or staged local development changes;
-- remove .NET 8 SDK before VMU has successfully restored, built, and tested on .NET 10;
+- remove .NET 8 SDK before VMU has successfully restored, built and tested on .NET 10;
 - automatically remove .NET runtimes as part of SDK cleanup;
-- require a manual `git fetch` / `git reset` merely because a later upgrade implementation changed.
-
-## Logging
-
-All VMU logs belong under `logs/`. The directory is ignored by Git. Upgrade output should be visible live in the terminal and written to `logs/upgrade.log` at the same time.
-
-The temporary bootstrap launcher also lives under `logs` and must remove itself after the handoff completes.
+- store executable bootstrap helpers in `logs`;
+- require manual `git fetch` / `git reset` merely because `upgrade.cmd` itself changed.
 
 ## Regression requirement
 
-Whenever the upgrade mechanism is modified, preserve the bootstrap boundary first. In particular, test the conceptual case where the locally executing updater is older than the version available on `origin/devel`: the old entry point must synchronize the repository before relying on any newly introduced helper or dependency.
+Whenever `upgrade.cmd` is modified, preserve the FHM-style bootstrap contract first.
 
-The handoff itself is regression-sensitive. The currently executing updater may be replaced by Git during synchronization, so the bootstrap must transfer control through the pre-created external launcher rather than continuing to parse the replaced file.
+The important regression scenario is an old local `upgrade.cmd` starting while a newer version exists on `origin/devel`. The old bootstrap must fetch Git, extract the current `upgrade.ps1` into `%TEMP%`, and execute that current runner without depending on the new repository-side implementation already being present locally.
