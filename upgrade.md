@@ -12,11 +12,12 @@ Before it uses PowerShell helper scripts, .NET, WinGet, build tooling, or projec
 2. Verify that the command is running inside the VMU Git working copy.
 3. Verify that the active branch is `devel`.
 4. Refuse to overwrite local tracked or staged changes.
-5. Create a temporary external handoff launcher in `%TEMP%` while the currently executing updater is still intact.
-6. Fetch `origin/devel`.
-7. Reset the local `devel` branch to `origin/devel`.
-8. Verify that the active branch is still `devel` after synchronization.
-9. Transfer control to the temporary launcher. The launcher starts the freshly downloaded `upgrade.cmd --current`, then removes itself.
+5. Ensure the repository-local `logs` directory exists.
+6. Create an external handoff launcher at `logs/upgrade-handoff.cmd` while the currently executing updater is still intact.
+7. Fetch `origin/devel`.
+8. Reset the local `devel` branch to `origin/devel`.
+9. Verify that the active branch is still `devel` after synchronization.
+10. Transfer control to the handoff launcher. The launcher starts the freshly downloaded `upgrade.cmd --current`, then removes itself.
 
 This ordering is intentional. A stale local `upgrade.cmd` must be able to update itself even when later implementation details have changed or are broken locally.
 
@@ -24,9 +25,11 @@ This ordering is intentional. A stale local `upgrade.cmd` must be able to update
 
 The updater must not try to continue executing the same batch file after Git has replaced that file on disk. It also must not depend on complicated quoting through `cmd.exe /C` to re-enter itself.
 
-Instead, the bootstrap creates a small temporary `.cmd` launcher before `git reset --hard origin/devel`. After synchronization, execution transfers to that separate launcher by invoking it without `CALL`. This stops parsing the replaced updater and moves control into a fresh batch context.
+Instead, the bootstrap creates a small `.cmd` launcher before `git reset --hard origin/devel`. The launcher is stored under `logs`, which is repository-local, ignored by Git, and under VMU's control. This avoids any dependency on the user's `%TEMP%` configuration while ensuring that the launcher survives the Git synchronization step.
 
-The temporary launcher then calls the current repository `upgrade.cmd --current`, captures its exit code, removes itself, and exits with the same code.
+After synchronization, execution transfers to that separate launcher by invoking it without `CALL`. This stops parsing the replaced updater and moves control into a fresh batch context.
+
+The launcher then calls the current repository `upgrade.cmd --current`, captures its exit code, removes itself, and exits with the same code.
 
 The bootstrap prints the active branch after synchronization. This is both a diagnostic aid and an explicit guard against accidentally continuing from a detached or unexpected branch state.
 
@@ -79,6 +82,8 @@ The updater must not:
 ## Logging
 
 All VMU logs belong under `logs/`. The directory is ignored by Git. Upgrade output should be visible live in the terminal and written to `logs/upgrade.log` at the same time.
+
+The temporary bootstrap launcher also lives under `logs` and must remove itself after the handoff completes.
 
 ## Regression requirement
 
