@@ -12,20 +12,23 @@ Before it uses PowerShell helper scripts, .NET, WinGet, build tooling, or projec
 2. Verify that the command is running inside the VMU Git working copy.
 3. Verify that the active branch is `devel`.
 4. Refuse to overwrite local tracked or staged changes.
-5. Fetch `origin/devel`.
-6. Reset the local `devel` branch to `origin/devel`.
-7. Verify that the active branch is still `devel` after synchronization.
-8. Start a new `cmd.exe` process that executes the freshly downloaded `upgrade.cmd --current`.
+5. Create a temporary external handoff launcher in `%TEMP%` while the currently executing updater is still intact.
+6. Fetch `origin/devel`.
+7. Reset the local `devel` branch to `origin/devel`.
+8. Verify that the active branch is still `devel` after synchronization.
+9. Transfer control to the temporary launcher. The launcher starts the freshly downloaded `upgrade.cmd --current`, then removes itself.
 
 This ordering is intentional. A stale local `upgrade.cmd` must be able to update itself even when later implementation details have changed or are broken locally.
 
-## Clean process handoff
+## External handoff launcher
 
-The bootstrap must not re-enter the updated batch file with `CALL` inside the old command processor context. After `git reset --hard origin/devel`, it starts a fresh `cmd.exe /D /C` process and passes `--current` to the newly downloaded `upgrade.cmd`.
+The updater must not try to continue executing the same batch file after Git has replaced that file on disk. It also must not depend on complicated quoting through `cmd.exe /C` to re-enter itself.
 
-This clean process boundary prevents stale batch parsing, arguments, labels, delayed-expansion state, and other command-processor context from leaking from the old updater into the current implementation.
+Instead, the bootstrap creates a small temporary `.cmd` launcher before `git reset --hard origin/devel`. After synchronization, execution transfers to that separate launcher by invoking it without `CALL`. This stops parsing the replaced updater and moves control into a fresh batch context.
 
-The bootstrap also prints the active branch after synchronization. This is both a diagnostic aid and an explicit guard against accidentally continuing from a detached or unexpected branch state.
+The temporary launcher then calls the current repository `upgrade.cmd --current`, captures its exit code, removes itself, and exits with the same code.
+
+The bootstrap prints the active branch after synchronization. This is both a diagnostic aid and an explicit guard against accidentally continuing from a detached or unexpected branch state.
 
 ## Bootstrap boundary
 
@@ -81,4 +84,4 @@ All VMU logs belong under `logs/`. The directory is ignored by Git. Upgrade outp
 
 Whenever the upgrade mechanism is modified, preserve the bootstrap boundary first. In particular, test the conceptual case where the locally executing updater is older than the version available on `origin/devel`: the old entry point must synchronize the repository before relying on any newly introduced helper or dependency.
 
-The handoff itself must be treated as a regression-sensitive feature: after synchronization, the new implementation must run in a fresh command processor rather than continuing through the stale batch execution context.
+The handoff itself is regression-sensitive. The currently executing updater may be replaced by Git during synchronization, so the bootstrap must transfer control through the pre-created external launcher rather than continuing to parse the replaced file.
