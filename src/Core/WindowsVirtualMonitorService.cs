@@ -149,7 +149,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
         private const uint GetAdapterName = 4;
         private const uint ModeInfoTypeSource = 1;
 
-        public static IReadOnlyList<DisplayPath> GetPaths()
+        private static IReadOnlyList<DisplayPath> GetPaths()
         {
             var result = GetDisplayConfigBufferSizes(QdcAllPaths, out var pathCount, out var modeCount);
             if (result != 0)
@@ -194,10 +194,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
             return snapshots;
         }
 
-        private static DisplayConfigSourceMode? TryReadSourceMode(
-            DisplayConfigPathInfo path,
-            DisplayConfigModeInfo[] modes,
-            uint modeCount)
+        private static DisplayConfigSourceMode? TryReadSourceMode(DisplayConfigPathInfo path, DisplayConfigModeInfo[] modes, uint modeCount)
         {
             var modeIndex = path.sourceInfo.modeInfoIdx;
             if (modeIndex >= modeCount || modes[modeIndex].infoType != ModeInfoTypeSource)
@@ -286,13 +283,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
         private static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPathArrayElements, out uint numModeInfoArrayElements);
 
         [DllImport("user32.dll")]
-        private static extern int QueryDisplayConfig(
-            uint flags,
-            ref uint numPathArrayElements,
-            [Out] DisplayConfigPathInfo[] pathInfoArray,
-            ref uint modeInfoArrayElements,
-            [Out] DisplayConfigModeInfo[] modeInfoArray,
-            IntPtr currentTopologyId);
+        private static extern int QueryDisplayConfig(uint flags, ref uint numPathArrayElements, [Out] DisplayConfigPathInfo[] pathInfoArray, ref uint modeInfoArrayElements, [Out] DisplayConfigModeInfo[] modeInfoArray, IntPtr currentTopologyId);
 
         [DllImport("user32.dll")]
         private static extern int DisplayConfigGetDeviceInfo(ref DisplayConfigSourceDeviceName requestPacket);
@@ -422,17 +413,6 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
             public string adapterDevicePath;
         }
 
-        private sealed record DisplayPath(
-            string SourceKey,
-            string? GdiName,
-            string? PnpInstanceId,
-            string? FriendlyName,
-            string? AdapterPath,
-            bool IsActive,
-            bool IsVdd,
-            int X,
-            int Y,
-            int Width,
-            int Height);
+        private sealed record DisplayPath(string SourceKey, string? GdiName, string? PnpInstanceId, string? FriendlyName, string? AdapterPath, bool IsActive, bool IsVdd, int X, int Y, int Width, int Height);
     }
 }
