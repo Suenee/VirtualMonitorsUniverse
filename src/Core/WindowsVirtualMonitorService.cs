@@ -8,11 +8,6 @@ namespace VirtualMonitorsUniverse.Core;
 /// Windows implementation of the VMU virtual-monitor API for the upstream
 /// VirtualDrivers Virtual Display Driver (MttVDD).
 /// </summary>
-/// <remarks>
-/// The implementation intentionally uses the driver's local named pipe for
-/// display-count changes and Windows CCD (DisplayConfig) for identity and
-/// verification. It does not move windows or reconfigure physical displays.
-/// </remarks>
 public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
 {
     private const string PipeName = "MTTVirtualDisplayPipe";
@@ -23,401 +18,106 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
     public IReadOnlyList<VirtualMonitorInfo> GetMonitors()
     {
         EnsureWindows();
-
-        return DisplayConfigApi.GetPaths()
-            .Where(path => path.IsVdd)
-            .Select(path => new VirtualMonitorInfo(
-                Id: path.SourceKey,
-                GdiName: path.GdiName,
-                PnpInstanceId: path.PnpInstanceId,
-                IsConnected: path.IsActive,
-                Width: path.Width,
-                Height: path.Height,
-                X: path.X,
-                Y: path.Y))
-            .ToArray();
+        return DisplayConfigApi.GetPaths().Where(path => path.IsVdd).Select(path => new VirtualMonitorInfo(path.SourceKey, path.GdiName, path.PnpInstanceId, path.IsActive, path.Width, path.Height, path.X, path.Y)).ToArray();
     }
 
     public bool IsDriverAvailable(TimeSpan? timeout = null)
     {
         EnsureWindows();
-
-        using var pipe = new NamedPipeClientStream(
-            serverName: ".",
-            pipeName: PipeName,
-            direction: PipeDirection.InOut,
-            options: PipeOptions.None);
-
-        try
-        {
-            pipe.Connect(ToTimeoutMilliseconds(timeout ?? TimeSpan.FromMilliseconds(750)));
-            return pipe.IsConnected;
-        }
-        catch (TimeoutException)
-        {
-            return false;
-        }
-        catch (IOException)
-        {
-            return false;
-        }
+        using var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.None);
+        try { pipe.Connect(ToTimeoutMilliseconds(timeout ?? TimeSpan.FromMilliseconds(750))); return pipe.IsConnected; }
+        catch (TimeoutException) { return false; }
+        catch (IOException) { return false; }
     }
 
     public void SetDisplayCount(int count, TimeSpan? timeout = null)
     {
         EnsureWindows();
-
-        if (count < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(count), count, "Display count cannot be negative.");
-        }
-
-        SendPipeCommand($"SETDISPLAYCOUNT {count}", timeout ?? DefaultPipeTimeout);
+        if (count < 0) throw new ArgumentOutOfRangeException(nameof(count), count, "Display count cannot be negative.");
+        var response = SendPipeCommand($"SETDISPLAYCOUNT {count}", timeout ?? DefaultPipeTimeout);
+        if (response.Contains("error", StringComparison.OrdinalIgnoreCase) || response.Contains("invalid", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"VDD rejected SETDISPLAYCOUNT {count}: {response}");
     }
 
     public bool WaitForConnectedCount(int expectedCount, TimeSpan timeout, TimeSpan? pollingInterval = null)
     {
         EnsureWindows();
-
-        if (expectedCount < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(expectedCount));
-        }
-
+        if (expectedCount < 0) throw new ArgumentOutOfRangeException(nameof(expectedCount));
         var poll = pollingInterval ?? TimeSpan.FromMilliseconds(150);
         var deadline = DateTime.UtcNow + timeout;
-
-        do
-        {
-            var count = GetMonitors().Count(monitor => monitor.IsConnected);
-            if (count == expectedCount)
-            {
-                return true;
-            }
-
-            Thread.Sleep(poll);
-        }
-        while (DateTime.UtcNow < deadline);
-
+        do { if (GetMonitors().Count(m => m.IsConnected) == expectedCount) return true; Thread.Sleep(poll); } while (DateTime.UtcNow < deadline);
         return false;
     }
 
-    private static void SendPipeCommand(string command, TimeSpan timeout)
+    private static string SendPipeCommand(string command, TimeSpan timeout)
     {
-        using var pipe = new NamedPipeClientStream(
-            serverName: ".",
-            pipeName: PipeName,
-            direction: PipeDirection.InOut,
-            options: PipeOptions.None);
-
+        using var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
         pipe.Connect(ToTimeoutMilliseconds(timeout));
-        if (!pipe.IsConnected)
-        {
-            throw new IOException("Could not connect to the Virtual Display Driver named pipe.");
-        }
+        if (!pipe.IsConnected) throw new IOException("Could not connect to the Virtual Display Driver named pipe.");
 
-        // The upstream driver consumes wchar_t commands, therefore UTF-16 LE
-        // must be used. This is the same transport validated in the ALPHA POC.
+        // MttVDD uses UTF-16LE and returns an acknowledgement on the same
+        // connection. Waiting for that acknowledgement is important: closing
+        // immediately after Write/Flush can race the driver's command handler.
         var payload = Encoding.Unicode.GetBytes(command);
         pipe.Write(payload, 0, payload.Length);
         pipe.Flush();
-    }
 
-    private static int ToTimeoutMilliseconds(TimeSpan timeout)
-    {
-        if (timeout <= TimeSpan.Zero)
+        var buffer = new byte[1024];
+        using var cancellation = new CancellationTokenSource(timeout);
+        try
         {
-            return 1;
+            var read = pipe.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellation.Token).AsTask().GetAwaiter().GetResult();
+            return read > 0 ? Encoding.Unicode.GetString(buffer, 0, read).TrimEnd('\0', '\r', '\n', ' ') : string.Empty;
         }
-
-        return (int)Math.Min(int.MaxValue, Math.Ceiling(timeout.TotalMilliseconds));
-    }
-
-    private static void EnsureWindows()
-    {
-        if (!OperatingSystem.IsWindows())
+        catch (OperationCanceledException ex)
         {
-            throw new PlatformNotSupportedException("Virtual Display Driver integration is supported only on Windows.");
+            throw new TimeoutException($"Timed out waiting for VDD acknowledgement to '{command}'.", ex);
         }
     }
+
+    private static int ToTimeoutMilliseconds(TimeSpan timeout) => timeout <= TimeSpan.Zero ? 1 : (int)Math.Min(int.MaxValue, Math.Ceiling(timeout.TotalMilliseconds));
+    private static void EnsureWindows() { if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Virtual Display Driver integration is supported only on Windows."); }
 
     private static class DisplayConfigApi
     {
-        private const uint QdcAllPaths = 0x00000001;
-        private const uint DisplayConfigPathActive = 0x00000001;
-        private const uint GetSourceName = 1;
-        private const uint GetTargetName = 2;
-        private const uint GetAdapterName = 4;
-        private const uint ModeInfoTypeSource = 1;
-
+        private const uint QdcAllPaths=1, DisplayConfigPathActive=1, GetSourceName=1, GetTargetName=2, GetAdapterName=4, ModeInfoTypeSource=1;
         public static IReadOnlyList<DisplayPath> GetPaths()
         {
-            var result = GetDisplayConfigBufferSizes(QdcAllPaths, out var pathCount, out var modeCount);
-            if (result != 0)
+            var result=GetDisplayConfigBufferSizes(QdcAllPaths,out var pathCount,out var modeCount); if(result!=0) throw new InvalidOperationException($"GetDisplayConfigBufferSizes failed with Win32 error {result}.");
+            var paths=new DisplayConfigPathInfo[pathCount]; var modes=new DisplayConfigModeInfo[modeCount]; result=QueryDisplayConfig(QdcAllPaths,ref pathCount,paths,ref modeCount,modes,IntPtr.Zero); if(result!=0) throw new InvalidOperationException($"QueryDisplayConfig failed with Win32 error {result}.");
+            var snapshots=new List<DisplayPath>((int)pathCount);
+            for(var index=0;index<pathCount;index++)
             {
-                throw new InvalidOperationException($"GetDisplayConfigBufferSizes failed with Win32 error {result}.");
+                var path=paths[index]; var sourceName=ReadSourceName(path.sourceInfo.adapterId,path.sourceInfo.id); var targetName=ReadTargetName(path.targetInfo.adapterId,path.targetInfo.id); var adapterPath=ReadAdapterName(path.targetInfo.adapterId,path.targetInfo.id); var sourceMode=TryReadSourceMode(path,modes,modeCount);
+                var isVdd=(!string.IsNullOrWhiteSpace(adapterPath)&&adapterPath.IndexOf(VddAdapterToken,StringComparison.OrdinalIgnoreCase)>=0)||string.Equals(targetName,VddFriendlyName,StringComparison.OrdinalIgnoreCase);
+                snapshots.Add(new DisplayPath($"{FormatLuid(path.sourceInfo.adapterId)}/{path.sourceInfo.id}",sourceName,TryExtractPnpInstanceId(adapterPath),targetName,adapterPath,(path.flags&DisplayConfigPathActive)!=0,isVdd,sourceMode?.position.x??0,sourceMode?.position.y??0,checked((int)(sourceMode?.width??0)),checked((int)(sourceMode?.height??0))));
             }
-
-            var paths = new DisplayConfigPathInfo[pathCount];
-            var modes = new DisplayConfigModeInfo[modeCount];
-            result = QueryDisplayConfig(QdcAllPaths, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
-            if (result != 0)
-            {
-                throw new InvalidOperationException($"QueryDisplayConfig failed with Win32 error {result}.");
-            }
-
-            var snapshots = new List<DisplayPath>((int)pathCount);
-            for (var index = 0; index < pathCount; index++)
-            {
-                var path = paths[index];
-                var sourceName = ReadSourceName(path.sourceInfo.adapterId, path.sourceInfo.id);
-                var targetName = ReadTargetName(path.targetInfo.adapterId, path.targetInfo.id);
-                var adapterPath = ReadAdapterName(path.targetInfo.adapterId, path.targetInfo.id);
-
-                var sourceMode = TryReadSourceMode(path, modes, modeCount);
-                var matchesAdapterIdentity = !string.IsNullOrWhiteSpace(adapterPath) &&
-                    adapterPath.IndexOf(VddAdapterToken, StringComparison.OrdinalIgnoreCase) >= 0;
-                var matchesFriendlyIdentity = string.Equals(
-                    targetName,
-                    VddFriendlyName,
-                    StringComparison.OrdinalIgnoreCase);
-                var isVdd = matchesAdapterIdentity || matchesFriendlyIdentity;
-
-                snapshots.Add(new DisplayPath(
-                    SourceKey: $"{FormatLuid(path.sourceInfo.adapterId)}/{path.sourceInfo.id}",
-                    GdiName: sourceName,
-                    PnpInstanceId: TryExtractPnpInstanceId(adapterPath),
-                    FriendlyName: targetName,
-                    AdapterPath: adapterPath,
-                    IsActive: (path.flags & DisplayConfigPathActive) != 0,
-                    IsVdd: isVdd,
-                    X: sourceMode?.position.x ?? 0,
-                    Y: sourceMode?.position.y ?? 0,
-                    Width: checked((int)(sourceMode?.width ?? 0)),
-                    Height: checked((int)(sourceMode?.height ?? 0))));
-            }
-
             return snapshots;
         }
-
-        private static DisplayConfigSourceMode? TryReadSourceMode(DisplayConfigPathInfo path, DisplayConfigModeInfo[] modes, uint modeCount)
-        {
-            var modeIndex = path.sourceInfo.modeInfoIdx;
-            if (modeIndex >= modeCount || modes[modeIndex].infoType != ModeInfoTypeSource)
-            {
-                return null;
-            }
-
-            return modes[modeIndex].modeInfo.sourceMode;
-        }
-
-        private static string? ReadSourceName(Luid adapterId, uint id)
-        {
-            var packet = new DisplayConfigSourceDeviceName
-            {
-                header = new DisplayConfigDeviceInfoHeader
-                {
-                    type = GetSourceName,
-                    size = (uint)Marshal.SizeOf<DisplayConfigSourceDeviceName>(),
-                    adapterId = adapterId,
-                    id = id
-                }
-            };
-
-            return DisplayConfigGetDeviceInfo(ref packet) == 0 ? packet.viewGdiDeviceName : null;
-        }
-
-        private static string? ReadTargetName(Luid adapterId, uint id)
-        {
-            var packet = new DisplayConfigTargetDeviceName
-            {
-                header = new DisplayConfigDeviceInfoHeader
-                {
-                    type = GetTargetName,
-                    size = (uint)Marshal.SizeOf<DisplayConfigTargetDeviceName>(),
-                    adapterId = adapterId,
-                    id = id
-                }
-            };
-
-            return DisplayConfigGetDeviceInfo(ref packet) == 0 ? packet.monitorFriendlyDeviceName : null;
-        }
-
-        private static string? ReadAdapterName(Luid adapterId, uint id)
-        {
-            var packet = new DisplayConfigAdapterName
-            {
-                header = new DisplayConfigDeviceInfoHeader
-                {
-                    type = GetAdapterName,
-                    size = (uint)Marshal.SizeOf<DisplayConfigAdapterName>(),
-                    adapterId = adapterId,
-                    id = id
-                }
-            };
-
-            return DisplayConfigGetDeviceInfo(ref packet) == 0 ? packet.adapterDevicePath : null;
-        }
-
-        private static string? TryExtractPnpInstanceId(string? adapterPath)
-        {
-            if (string.IsNullOrWhiteSpace(adapterPath))
-            {
-                return null;
-            }
-
-            var tokenIndex = adapterPath.IndexOf(VddAdapterToken, StringComparison.OrdinalIgnoreCase);
-            if (tokenIndex < 0)
-            {
-                return null;
-            }
-
-            var end = adapterPath.IndexOf("#{", tokenIndex, StringComparison.OrdinalIgnoreCase);
-            if (end < 0)
-            {
-                end = adapterPath.Length;
-            }
-
-            var token = adapterPath[tokenIndex..end];
-            return token.Replace('#', '\\');
-        }
-
-        private static string FormatLuid(Luid value) => $"{value.HighPart:X8}:{value.LowPart:X8}";
-
-        [DllImport("user32.dll")]
-        private static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPathArrayElements, out uint numModeInfoArrayElements);
-
-        [DllImport("user32.dll")]
-        private static extern int QueryDisplayConfig(uint flags, ref uint numPathArrayElements, [Out] DisplayConfigPathInfo[] pathInfoArray, ref uint modeInfoArrayElements, [Out] DisplayConfigModeInfo[] modeInfoArray, IntPtr currentTopologyId);
-
-        [DllImport("user32.dll")]
-        private static extern int DisplayConfigGetDeviceInfo(ref DisplayConfigSourceDeviceName requestPacket);
-
-        [DllImport("user32.dll")]
-        private static extern int DisplayConfigGetDeviceInfo(ref DisplayConfigTargetDeviceName requestPacket);
-
-        [DllImport("user32.dll")]
-        private static extern int DisplayConfigGetDeviceInfo(ref DisplayConfigAdapterName requestPacket);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct Luid
-        {
-            public uint LowPart;
-            public int HighPart;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct Rational
-        {
-            public uint Numerator;
-            public uint Denominator;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct PointL
-        {
-            public int x;
-            public int y;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct DisplayConfigSourceMode
-        {
-            public uint width;
-            public uint height;
-            public uint pixelFormat;
-            public PointL position;
-        }
-
-        [StructLayout(LayoutKind.Explicit, Size = 64)]
-        private struct DisplayConfigModeInfoUnion
-        {
-            [FieldOffset(0)]
-            public DisplayConfigSourceMode sourceMode;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct DisplayConfigModeInfo
-        {
-            public uint infoType;
-            public uint id;
-            public Luid adapterId;
-            public DisplayConfigModeInfoUnion modeInfo;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct DisplayConfigPathSourceInfo
-        {
-            public Luid adapterId;
-            public uint id;
-            public uint modeInfoIdx;
-            public uint statusFlags;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct DisplayConfigPathTargetInfo
-        {
-            public Luid adapterId;
-            public uint id;
-            public uint modeInfoIdx;
-            public uint outputTechnology;
-            public uint rotation;
-            public uint scaling;
-            public Rational refreshRate;
-            public uint scanLineOrdering;
-            [MarshalAs(UnmanagedType.Bool)]
-            public bool targetAvailable;
-            public uint statusFlags;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct DisplayConfigPathInfo
-        {
-            public DisplayConfigPathSourceInfo sourceInfo;
-            public DisplayConfigPathTargetInfo targetInfo;
-            public uint flags;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct DisplayConfigDeviceInfoHeader
-        {
-            public uint type;
-            public uint size;
-            public Luid adapterId;
-            public uint id;
-        }
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct DisplayConfigSourceDeviceName
-        {
-            public DisplayConfigDeviceInfoHeader header;
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-            public string viewGdiDeviceName;
-        }
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct DisplayConfigTargetDeviceName
-        {
-            public DisplayConfigDeviceInfoHeader header;
-            public uint flags;
-            public uint outputTechnology;
-            public ushort edidManufactureId;
-            public ushort edidProductCodeId;
-            public uint connectorInstance;
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
-            public string monitorFriendlyDeviceName;
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
-            public string monitorDevicePath;
-        }
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct DisplayConfigAdapterName
-        {
-            public DisplayConfigDeviceInfoHeader header;
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
-            public string adapterDevicePath;
-        }
-
-        public sealed record DisplayPath(string SourceKey, string? GdiName, string? PnpInstanceId, string? FriendlyName, string? AdapterPath, bool IsActive, bool IsVdd, int X, int Y, int Width, int Height);
+        private static DisplayConfigSourceMode? TryReadSourceMode(DisplayConfigPathInfo path,DisplayConfigModeInfo[] modes,uint modeCount){var i=path.sourceInfo.modeInfoIdx;return i>=modeCount||modes[i].infoType!=ModeInfoTypeSource?null:modes[i].modeInfo.sourceMode;}
+        private static string? ReadSourceName(Luid a,uint id){var p=new DisplayConfigSourceDeviceName{header=new DisplayConfigDeviceInfoHeader{type=GetSourceName,size=(uint)Marshal.SizeOf<DisplayConfigSourceDeviceName>(),adapterId=a,id=id}};return DisplayConfigGetDeviceInfo(ref p)==0?p.viewGdiDeviceName:null;}
+        private static string? ReadTargetName(Luid a,uint id){var p=new DisplayConfigTargetDeviceName{header=new DisplayConfigDeviceInfoHeader{type=GetTargetName,size=(uint)Marshal.SizeOf<DisplayConfigTargetDeviceName>(),adapterId=a,id=id}};return DisplayConfigGetDeviceInfo(ref p)==0?p.monitorFriendlyDeviceName:null;}
+        private static string? ReadAdapterName(Luid a,uint id){var p=new DisplayConfigAdapterName{header=new DisplayConfigDeviceInfoHeader{type=GetAdapterName,size=(uint)Marshal.SizeOf<DisplayConfigAdapterName>(),adapterId=a,id=id}};return DisplayConfigGetDeviceInfo(ref p)==0?p.adapterDevicePath:null;}
+        private static string? TryExtractPnpInstanceId(string? p){if(string.IsNullOrWhiteSpace(p))return null;var i=p.IndexOf(VddAdapterToken,StringComparison.OrdinalIgnoreCase);if(i<0)return null;var e=p.IndexOf("#{",i,StringComparison.OrdinalIgnoreCase);if(e<0)e=p.Length;return p[i..e].Replace('#','\\');}
+        private static string FormatLuid(Luid v)=>$"{v.HighPart:X8}:{v.LowPart:X8}";
+        [DllImport("user32.dll")]private static extern int GetDisplayConfigBufferSizes(uint f,out uint p,out uint m);
+        [DllImport("user32.dll")]private static extern int QueryDisplayConfig(uint f,ref uint p,[Out]DisplayConfigPathInfo[]pa,ref uint m,[Out]DisplayConfigModeInfo[]ma,IntPtr t);
+        [DllImport("user32.dll")]private static extern int DisplayConfigGetDeviceInfo(ref DisplayConfigSourceDeviceName p);
+        [DllImport("user32.dll")]private static extern int DisplayConfigGetDeviceInfo(ref DisplayConfigTargetDeviceName p);
+        [DllImport("user32.dll")]private static extern int DisplayConfigGetDeviceInfo(ref DisplayConfigAdapterName p);
+        [StructLayout(LayoutKind.Sequential)]private struct Luid{public uint LowPart;public int HighPart;}
+        [StructLayout(LayoutKind.Sequential)]private struct Rational{public uint Numerator,Denominator;}
+        [StructLayout(LayoutKind.Sequential)]private struct PointL{public int x,y;}
+        [StructLayout(LayoutKind.Sequential)]private struct DisplayConfigSourceMode{public uint width,height,pixelFormat;public PointL position;}
+        [StructLayout(LayoutKind.Explicit,Size=64)]private struct DisplayConfigModeInfoUnion{[FieldOffset(0)]public DisplayConfigSourceMode sourceMode;}
+        [StructLayout(LayoutKind.Sequential)]private struct DisplayConfigModeInfo{public uint infoType,id;public Luid adapterId;public DisplayConfigModeInfoUnion modeInfo;}
+        [StructLayout(LayoutKind.Sequential)]private struct DisplayConfigPathSourceInfo{public Luid adapterId;public uint id,modeInfoIdx,statusFlags;}
+        [StructLayout(LayoutKind.Sequential)]private struct DisplayConfigPathTargetInfo{public Luid adapterId;public uint id,modeInfoIdx,outputTechnology,rotation,scaling;public Rational refreshRate;public uint scanLineOrdering;[MarshalAs(UnmanagedType.Bool)]public bool targetAvailable;public uint statusFlags;}
+        [StructLayout(LayoutKind.Sequential)]private struct DisplayConfigPathInfo{public DisplayConfigPathSourceInfo sourceInfo;public DisplayConfigPathTargetInfo targetInfo;public uint flags;}
+        [StructLayout(LayoutKind.Sequential)]private struct DisplayConfigDeviceInfoHeader{public uint type,size;public Luid adapterId;public uint id;}
+        [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]private struct DisplayConfigSourceDeviceName{public DisplayConfigDeviceInfoHeader header;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=32)]public string viewGdiDeviceName;}
+        [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]private struct DisplayConfigTargetDeviceName{public DisplayConfigDeviceInfoHeader header;public uint flags,outputTechnology;public ushort edidManufactureId,edidProductCodeId;public uint connectorInstance;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=64)]public string monitorFriendlyDeviceName;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=128)]public string monitorDevicePath;}
+        [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]private struct DisplayConfigAdapterName{public DisplayConfigDeviceInfoHeader header;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=128)]public string adapterDevicePath;}
+        public sealed record DisplayPath(string SourceKey,string? GdiName,string? PnpInstanceId,string? FriendlyName,string? AdapterPath,bool IsActive,bool IsVdd,int X,int Y,int Width,int Height);
     }
 }
