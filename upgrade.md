@@ -14,9 +14,18 @@ Before it uses PowerShell helper scripts, .NET, WinGet, build tooling, or projec
 4. Refuse to overwrite local tracked or staged changes.
 5. Fetch `origin/devel`.
 6. Reset the local `devel` branch to `origin/devel`.
-7. Re-enter the freshly downloaded `upgrade.cmd` using its internal `--current` entry point.
+7. Verify that the active branch is still `devel` after synchronization.
+8. Start a new `cmd.exe` process that executes the freshly downloaded `upgrade.cmd --current`.
 
 This ordering is intentional. A stale local `upgrade.cmd` must be able to update itself even when later implementation details have changed or are broken locally.
+
+## Clean process handoff
+
+The bootstrap must not re-enter the updated batch file with `CALL` inside the old command processor context. After `git reset --hard origin/devel`, it starts a fresh `cmd.exe /D /C` process and passes `--current` to the newly downloaded `upgrade.cmd`.
+
+This clean process boundary prevents stale batch parsing, arguments, labels, delayed-expansion state, and other command-processor context from leaking from the old updater into the current implementation.
+
+The bootstrap also prints the active branch after synchronization. This is both a diagnostic aid and an explicit guard against accidentally continuing from a detached or unexpected branch state.
 
 ## Bootstrap boundary
 
@@ -71,3 +80,5 @@ All VMU logs belong under `logs/`. The directory is ignored by Git. Upgrade outp
 ## Regression requirement
 
 Whenever the upgrade mechanism is modified, preserve the bootstrap boundary first. In particular, test the conceptual case where the locally executing updater is older than the version available on `origin/devel`: the old entry point must synchronize the repository before relying on any newly introduced helper or dependency.
+
+The handoff itself must be treated as a regression-sensitive feature: after synchronization, the new implementation must run in a fresh command processor rather than continuing through the stale batch execution context.
