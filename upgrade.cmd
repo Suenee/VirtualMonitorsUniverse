@@ -9,14 +9,15 @@ set "DOTNET_LEGACY_PACKAGE=Microsoft.DotNet.SDK.8"
 
 rem IMPORTANT BOOTSTRAP CONTRACT:
 rem The normal entry point must stay dependency-free except for Git/CMD.
-rem It synchronizes DEVEL first, then transfers control through a temporary
+rem It synchronizes DEVEL first, then transfers control through a local ignored
 rem launcher created BEFORE the running upgrade.cmd is replaced by Git.
 if /I "%~1"=="--current" goto :current
 if /I "%~1"=="--post-update" goto :post_update
 
 cd /d "%~dp0"
 set "REPO_ROOT=%CD%"
-set "BOOTSTRAP_LAUNCHER=%TEMP%\VMU-upgrade-handoff-%RANDOM%-%RANDOM%.cmd"
+set "BOOTSTRAP_DIR=%REPO_ROOT%\logs"
+set "BOOTSTRAP_LAUNCHER=%BOOTSTRAP_DIR%\upgrade-handoff.cmd"
 
 where git >NUL 2>&1
 if errorlevel 1 (
@@ -51,16 +52,24 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem logs is repository-local, Git-ignored, and guaranteed to survive git reset.
+if not exist "%BOOTSTRAP_DIR%" mkdir "%BOOTSTRAP_DIR%" >NUL 2>&1
+if not exist "%BOOTSTRAP_DIR%" (
+    echo ERROR: Could not create bootstrap directory: %BOOTSTRAP_DIR%
+    pause
+    exit /b 1
+)
+
 rem Build the external handoff before Git can replace this currently executing
-rem batch file. The temporary launcher is a separate batch context and therefore
-rem cannot inherit stale labels/arguments from the old updater implementation.
+rem batch file. The launcher is outside tracked repository state and therefore
+rem survives synchronization while avoiding dependency on the user's TEMP path.
 > "%BOOTSTRAP_LAUNCHER%" echo @echo off
 >> "%BOOTSTRAP_LAUNCHER%" echo call "%REPO_ROOT%\upgrade.cmd" --current
 >> "%BOOTSTRAP_LAUNCHER%" echo set "VMU_HANDOFF_RESULT=%%ERRORLEVEL%%"
 >> "%BOOTSTRAP_LAUNCHER%" echo del /Q "%%~f0" ^>NUL 2^>^&1
 >> "%BOOTSTRAP_LAUNCHER%" echo exit /b %%VMU_HANDOFF_RESULT%%
 if not exist "%BOOTSTRAP_LAUNCHER%" (
-    echo ERROR: Could not create temporary upgrade handoff launcher.
+    echo ERROR: Could not create upgrade handoff launcher: %BOOTSTRAP_LAUNCHER%
     pause
     exit /b 1
 )
