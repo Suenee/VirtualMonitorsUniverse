@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using VirtualMonitorsUniverse.Core;
 
@@ -13,13 +14,21 @@ internal static class Program
             "help" or "--help" or "-h" => ShowHelp(),
             "version" or "--version" => ShowVersion(),
             "selftest" => RunCoreSelfTest(),
+            "driver" => RunDriverCommand(args.Skip(1).ToArray()),
             _ => UnknownCommand(command)
         };
     }
 
     private static int ShowHelp()
     {
-        Console.WriteLine("Virtual Monitors Universe CLI\n\nCommands:\n  vmu help       Show this help\n  vmu version    Show CLI version\n  vmu selftest   Run automated VMU Core/VDD regression diagnostics");
+        Console.WriteLine("Virtual Monitors Universe CLI");
+        Console.WriteLine();
+        Console.WriteLine("Commands:");
+        Console.WriteLine("  vmu help             Show this help");
+        Console.WriteLine("  vmu version          Show CLI version");
+        Console.WriteLine("  vmu selftest         Run automated VMU Core/VDD regression diagnostics");
+        Console.WriteLine("  vmu driver status    Show read-only VDD dependency diagnostics");
+        Console.WriteLine("  vmu driver install   Install the pinned ALPHA-validated VDD dependency");
         return 0;
     }
 
@@ -27,6 +36,143 @@ internal static class Program
     {
         Console.WriteLine(Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown");
         return 0;
+    }
+
+    private static int RunDriverCommand(string[] args)
+    {
+        var subcommand = args.FirstOrDefault()?.ToLowerInvariant() ?? "status";
+        return subcommand switch
+        {
+            "status" => RunDriverStatus(),
+            "install" => RunDriverInstall(),
+            _ => UnknownDriverCommand(subcommand)
+        };
+    }
+
+    private static int RunDriverStatus()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.WriteLine("VDD DEVICE .............. FAIL - Windows is required");
+            Console.WriteLine("VDD PIPE ................ FAIL - Windows is required");
+            WriteFinalStatus(false);
+            return 1;
+        }
+
+        var diagnostics = new WindowsVirtualMonitorService().GetDriverDiagnostics();
+        WriteDriverDiagnosticsToConsole(diagnostics);
+        var healthy = diagnostics.DevicePresent && diagnostics.DeviceActive && diagnostics.PipeAvailable;
+        WriteFinalStatus(healthy);
+        return healthy ? 0 : 1;
+    }
+
+    private static int RunDriverInstall()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.WriteLine("VDD INSTALL ............. FAIL - Windows is required");
+            WriteFinalStatus(false);
+            return 1;
+        }
+
+        var repoRoot = Environment.GetEnvironmentVariable("VMU_REPO_ROOT") ?? Directory.GetCurrentDirectory();
+        var scriptPath = Path.Combine(repoRoot, "scripts", "Install-Vdd.ps1");
+        if (!File.Exists(scriptPath))
+        {
+            Console.WriteLine($"VDD INSTALL ............. FAIL - installer script not found: {scriptPath}");
+            WriteFinalStatus(false);
+            return 1;
+        }
+
+        Console.WriteLine("VDD INSTALL ............. RUN - deterministic ALPHA-equivalent dependency setup");
+        Console.WriteLine("                         Windows may show a UAC confirmation");
+
+        var setupLogPath = Path.Combine(
+            Path.GetTempPath(),
+            $"VMU-VDD-install-{Environment.ProcessId}-{Guid.NewGuid():N}.log");
+
+        var escapedScriptPath = EscapePowerShellSingleQuotedString(scriptPath);
+        var escapedSetupLogPath = EscapePowerShellSingleQuotedString(setupLogPath);
+        var command =
+            $"& {{ & '{escapedScriptPath}' *>&1 | Out-File -LiteralPath '{escapedSetupLogPath}' -Encoding utf8; exit $LASTEXITCODE }}";
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{command.Replace("\"", "\\\"")}\"",
+            UseShellExecute = true,
+            Verb = "runas",
+            WindowStyle = ProcessWindowStyle.Hidden,
+            WorkingDirectory = repoRoot
+        };
+
+        try
+        {
+            using var process = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("Could not start elevated VDD installer.");
+
+            RunWithSpinner("VDD INSTALL ............. RUN", () => process.WaitForExit());
+            var lines = ReadExternalDiagnostics(setupLogPath);
+            foreach (var line in lines)
+            {
+                Console.WriteLine($"  {line}");
+            }
+
+            if (process.ExitCode != 0)
+            {
+                var detail = GetLastMeaningfulLine(lines);
+                Console.WriteLine(
+                    string.IsNullOrWhiteSpace(detail)
+                        ? $"VDD INSTALL ............. FAIL - exit code {process.ExitCode}"
+                        : $"VDD INSTALL ............. FAIL - {detail}");
+                WriteFinalStatus(false);
+                return 1;
+            }
+
+            var diagnostics = new WindowsVirtualMonitorService().GetDriverDiagnostics(TimeSpan.FromSeconds(2));
+            if (!diagnostics.DevicePresent || !diagnostics.PipeAvailable)
+            {
+                Console.WriteLine("VDD INSTALL ............. FAIL - installer completed but ALPHA VDD identity/runtime is not healthy");
+                WriteDriverDiagnosticsToConsole(diagnostics);
+                WriteFinalStatus(false);
+                return 1;
+            }
+
+            Console.WriteLine("VDD INSTALL ............. PASS");
+            WriteDriverDiagnosticsToConsole(diagnostics);
+            WriteFinalStatus(true);
+            return 0;
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            Console.WriteLine("VDD INSTALL ............. FAIL - Windows UAC confirmation was cancelled");
+            WriteFinalStatus(false);
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"VDD INSTALL ............. FAIL - {ex.Message}");
+            WriteFinalStatus(false);
+            return 1;
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(setupLogPath))
+                {
+                    File.Delete(setupLogPath);
+                }
+            }
+            catch (IOException)
+            {
+                // TEMP cleanup failure must not hide the actual driver result.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // TEMP cleanup failure must not hide the actual driver result.
+            }
+        }
     }
 
     private static int RunCoreSelfTest()
@@ -57,7 +203,6 @@ internal static class Program
 
         var service = new WindowsVirtualMonitorService();
         var baselineCount = 0;
-        var requestedCount = 0;
         var displayCountChanged = false;
         var cleanupPassed = false;
         Exception? failure = null;
@@ -70,7 +215,7 @@ internal static class Program
             if (!diagnostics.PipeAvailable)
             {
                 throw new InvalidOperationException(
-                    "VDD runtime pipe is unavailable. Self-test does not mutate or repair the driver; restore the VDD dependency to a healthy ALPHA-equivalent state first.");
+                    "VDD runtime pipe is unavailable. Run 'vmu driver status' and, if ROOT\\MTTVDD is missing, 'vmu driver install'.");
             }
 
             reporter.Write("VDD DRIVER .............. PASS", ConsoleColor.Green);
@@ -88,7 +233,7 @@ internal static class Program
                     "VDD pipe is available but no active VDD display exists. The lifecycle test will not create a display because SETDISPLAYCOUNT 0 cannot safely restore this baseline.");
             }
 
-            requestedCount = checked(baselineCount + 1);
+            var requestedCount = checked(baselineCount + 1);
             var baselineIds = baselineConnected
                 .Select(monitor => monitor.Id)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -175,19 +320,38 @@ internal static class Program
     {
         if (!diagnostics.DevicePresent)
         {
-            reporter.Write("VDD DEVICE .............. FAIL - Virtual Display Driver adapter not found", ConsoleColor.Red);
+            reporter.Write("VDD DEVICE .............. FAIL - ROOT\\MTTVDD adapter not found", ConsoleColor.Red);
         }
         else
         {
-            var identity = string.IsNullOrWhiteSpace(diagnostics.PnpInstanceId)
-                ? diagnostics.GdiName ?? "unknown identity"
-                : diagnostics.PnpInstanceId;
+            var identity = diagnostics.PnpInstanceId ?? diagnostics.GdiName ?? "unknown identity";
             reporter.Write(
                 $"VDD DEVICE .............. {(diagnostics.DeviceActive ? "PASS" : "WARN")} - {identity}; flags=0x{diagnostics.StateFlags:X8}",
                 diagnostics.DeviceActive ? ConsoleColor.Green : ConsoleColor.Yellow);
         }
 
         reporter.Write(
+            diagnostics.PipeAvailable
+                ? "VDD PIPE ................ PASS - MTTVirtualDisplayPipe available"
+                : "VDD PIPE ................ FAIL - MTTVirtualDisplayPipe unavailable",
+            diagnostics.PipeAvailable ? ConsoleColor.Green : ConsoleColor.Red);
+    }
+
+    private static void WriteDriverDiagnosticsToConsole(VddDriverDiagnostics diagnostics)
+    {
+        if (!diagnostics.DevicePresent)
+        {
+            WriteColored("VDD DEVICE .............. FAIL - ROOT\\MTTVDD adapter not found", ConsoleColor.Red);
+        }
+        else
+        {
+            var identity = diagnostics.PnpInstanceId ?? diagnostics.GdiName ?? "unknown identity";
+            WriteColored(
+                $"VDD DEVICE .............. {(diagnostics.DeviceActive ? "PASS" : "WARN")} - {identity}; flags=0x{diagnostics.StateFlags:X8}",
+                diagnostics.DeviceActive ? ConsoleColor.Green : ConsoleColor.Yellow);
+        }
+
+        WriteColored(
             diagnostics.PipeAvailable
                 ? "VDD PIPE ................ PASS - MTTVirtualDisplayPipe available"
                 : "VDD PIPE ................ FAIL - MTTVirtualDisplayPipe unavailable",
@@ -234,6 +398,37 @@ internal static class Program
         }
     }
 
+    private static string EscapePowerShellSingleQuotedString(string value) =>
+        value.Replace("'", "''", StringComparison.Ordinal);
+
+    private static string[] ReadExternalDiagnostics(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return Array.Empty<string>();
+        }
+
+        try
+        {
+            return File.ReadAllLines(path)
+                .Select(line => line.TrimEnd())
+                .Where(line => !string.IsNullOrWhiteSpace(line))
+                .ToArray();
+        }
+        catch (IOException)
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    private static string? GetLastMeaningfulLine(IEnumerable<string> lines) =>
+        lines.Reverse().Select(line => line.Trim()).FirstOrDefault(line =>
+            !string.IsNullOrWhiteSpace(line) &&
+            !line.StartsWith("At ", StringComparison.OrdinalIgnoreCase) &&
+            !line.StartsWith("+ ", StringComparison.Ordinal) &&
+            !line.StartsWith("CategoryInfo", StringComparison.OrdinalIgnoreCase) &&
+            !line.StartsWith("FullyQualifiedErrorId", StringComparison.OrdinalIgnoreCase));
+
     private static int? GetWindowsDisplayNumber(string? name)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -253,8 +448,33 @@ internal static class Program
 
     private static int UnknownCommand(string command)
     {
-        Console.Error.WriteLine($"Unknown command: {command}\nRun 'vmu help' for available commands.");
+        Console.Error.WriteLine($"Unknown command: {command}");
+        Console.Error.WriteLine("Run 'vmu help' for available commands.");
         return 2;
+    }
+
+    private static int UnknownDriverCommand(string command)
+    {
+        Console.Error.WriteLine($"Unknown driver command: {command}");
+        Console.Error.WriteLine("Use 'vmu driver status' or 'vmu driver install'.");
+        return 2;
+    }
+
+    private static void WriteFinalStatus(bool ok) =>
+        WriteColored(ok ? "STATUS: OK" : "STATUS: FAILED", ok ? ConsoleColor.Green : ConsoleColor.Red);
+
+    private static void WriteColored(string message, ConsoleColor color)
+    {
+        var old = Console.ForegroundColor;
+        try
+        {
+            Console.ForegroundColor = color;
+            Console.WriteLine(message);
+        }
+        finally
+        {
+            Console.ForegroundColor = old;
+        }
     }
 
     private sealed class SelfTestReporter : IDisposable
