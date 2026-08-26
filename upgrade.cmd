@@ -7,15 +7,77 @@ set "DOTNET_REQUIRED_MAJOR=10"
 set "DOTNET_REQUIRED_PACKAGE=Microsoft.DotNet.SDK.10"
 set "DOTNET_LEGACY_PACKAGE=Microsoft.DotNet.SDK.8"
 
-if /I "%~1"=="--worker" goto :worker
+rem IMPORTANT BOOTSTRAP CONTRACT:
+rem The normal entry point must stay dependency-free except for Git/CMD.
+rem It synchronizes DEVEL first, then starts the freshly downloaded script.
+rem Do not add PowerShell, .NET, logging helpers, or build logic before this handoff.
+if /I "%~1"=="--current" goto :current
 if /I "%~1"=="--post-update" goto :post_update
 
+cd /d "%~dp0"
+set "REPO_ROOT=%CD%"
+
+where git >NUL 2>&1
+if errorlevel 1 (
+    echo ERROR: Git for Windows is not installed or git.exe is not in PATH.
+    pause
+    exit /b 1
+)
+if not exist ".git" (
+    echo ERROR: upgrade.cmd must be run from an existing VMU Git working copy.
+    pause
+    exit /b 1
+)
+
+for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD 2^>NUL') do set "CURRENT_BRANCH=%%B"
+if /I not "!CURRENT_BRANCH!"=="%DEFAULT_BRANCH%" (
+    echo ERROR: Current branch is !CURRENT_BRANCH!, expected %DEFAULT_BRANCH%.
+    echo Switch once with: git fetch origin ^&^& git switch devel
+    pause
+    exit /b 1
+)
+
+git diff --quiet
+if errorlevel 1 (
+    echo ERROR: Local tracked files contain changes. Commit or revert them first.
+    pause
+    exit /b 1
+)
+git diff --cached --quiet
+if errorlevel 1 (
+    echo ERROR: Local staged changes exist. Commit or revert them first.
+    pause
+    exit /b 1
+)
+
+git remote set-url origin "%REPO_URL%" >NUL 2>&1
+echo [BOOTSTRAP] Downloading current DEVEL source...
+git fetch origin "%DEFAULT_BRANCH%"
+if errorlevel 1 (
+    echo ERROR: Could not download DEVEL from GitHub.
+    pause
+    exit /b 1
+)
+
+echo [BOOTSTRAP] Synchronizing local DEVEL branch...
+git reset --hard "origin/%DEFAULT_BRANCH%"
+if errorlevel 1 (
+    echo ERROR: Could not synchronize the local DEVEL branch.
+    pause
+    exit /b 1
+)
+
+rem upgrade.cmd may have replaced itself above. CALL reparses it from disk and
+rem therefore hands control to the newly downloaded implementation.
+call "%REPO_ROOT%\upgrade.cmd" --current
+exit /b %ERRORLEVEL%
+
+:current
 cls
 cd /d "%~dp0"
 set "REPO_ROOT=%CD%"
 set "LOG_DIR=%REPO_ROOT%\logs"
 set "LOG_FILE=%LOG_DIR%\upgrade.log"
-set "TMP_UPDATER=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.cmd"
 set "TEE_HELPER=%REPO_ROOT%\scripts\Invoke-TeeProcess.ps1"
 
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >NUL 2>&1
@@ -58,29 +120,19 @@ echo Target branch: %DEFAULT_BRANCH%
 echo Required SDK: .NET %DOTNET_REQUIRED_MAJOR%
 echo.
 
-copy /Y "%~f0" "%TMP_UPDATER%" >NUL
-if errorlevel 1 (
-    echo ERROR: Could not create temporary updater.
-    >> "%LOG_FILE%" echo ERROR: Could not create temporary updater.
-    goto :fail
-)
-
 if not exist "%TEE_HELPER%" (
     echo ERROR: Missing upgrade stream helper: %TEE_HELPER%
     >> "%LOG_FILE%" echo ERROR: Missing upgrade stream helper: %TEE_HELPER%
-    del /Q "%TMP_UPDATER%" >NUL 2>&1
     goto :fail
 )
 
-rem Run the worker through a dedicated PowerShell process wrapper. This avoids
-rem fragile CMD-to-PowerShell pipe escaping while preserving live console output,
-rem the same complete stream in logs\upgrade.log, and the worker exit code.
+rem Run only the current post-update implementation through the tee helper.
+rem Self-update already happened before any PowerShell/helper dependency was used.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%TEE_HELPER%" ^
-    -Command "%TMP_UPDATER%" ^
-    -Arguments "--worker","%REPO_ROOT%" ^
+    -Command "%REPO_ROOT%\upgrade.cmd" ^
+    -Arguments "--post-update" ^
     -LogPath "%LOG_FILE%"
 set "ERR=%ERRORLEVEL%"
-del /Q "%TMP_UPDATER%" >NUL 2>&1
 
 if not exist "%LOG_FILE%" (
     > "%LOG_FILE%" echo ERROR: upgrade.log unexpectedly disappeared during execution.
@@ -93,55 +145,10 @@ if not "%ERR%"=="0" goto :fail_with_code
 pause
 exit /b 0
 
-:worker
-set "REPO_ROOT=%~2"
-if not defined REPO_ROOT exit /b 1
-cd /d "%REPO_ROOT%"
-
-where git >NUL 2>&1
-if errorlevel 1 (
-    echo ERROR: Git for Windows is not installed or git.exe is not in PATH.
-    exit /b 1
-)
-if not exist ".git" (
-    echo ERROR: This DEVEL bootstrap expects an existing Git working copy.
-    exit /b 1
-)
-for /f "usebackq delims=" %%B in (`git rev-parse --abbrev-ref HEAD 2^>NUL`) do set "CURRENT_BRANCH=%%B"
-if /I not "!CURRENT_BRANCH!"=="%DEFAULT_BRANCH%" (
-    echo ERROR: Current branch is !CURRENT_BRANCH!, expected %DEFAULT_BRANCH%.
-    echo Switch once with: git fetch origin ^&^& git switch devel
-    exit /b 1
-)
-git diff --quiet
-if errorlevel 1 (
-    echo ERROR: Local tracked files contain changes. Commit or revert them first.
-    exit /b 1
-)
-git diff --cached --quiet
-if errorlevel 1 (
-    echo ERROR: Local staged changes exist. Commit or revert them first.
-    exit /b 1
-)
-
-git remote set-url origin "%REPO_URL%" >NUL 2>&1
-
-echo [1/7] Downloading DEVEL source...
-git fetch origin "%DEFAULT_BRANCH%"
-if errorlevel 1 exit /b 1
-
-echo [2/7] Synchronizing local DEVEL branch...
-git reset --hard "origin/%DEFAULT_BRANCH%"
-if errorlevel 1 exit /b 1
-
-echo [3/7] Running post-update bootstrap...
-call "%REPO_ROOT%\upgrade.cmd" --post-update
-exit /b %ERRORLEVEL%
-
 :post_update
 cd /d "%~dp0"
 
-echo [4/7] Cleaning known obsolete and generated artifacts...
+echo [1/4] Cleaning known obsolete and generated artifacts...
 echo Cleaning repository-owned generated files...
 if exist ".runtime" rmdir /S /Q ".runtime"
 for /D /R "src" %%D in (bin obj) do if exist "%%D" rmdir /S /Q "%%D"
@@ -169,7 +176,7 @@ if "!HYGIENE_ERROR!"=="1" (
 )
 echo Workspace hygiene: OK
 
-echo [5/7] Ensuring .NET %DOTNET_REQUIRED_MAJOR% SDK and retiring .NET 8 SDK...
+echo [2/4] Ensuring .NET %DOTNET_REQUIRED_MAJOR% SDK and retiring .NET 8 SDK...
 where winget >NUL 2>&1
 if errorlevel 1 (
     echo ERROR: Windows Package Manager ^(winget^) is required to bootstrap the .NET SDK.
@@ -267,7 +274,7 @@ if exist ".runtime" rmdir /S /Q ".runtime"
 for /D /R "src" %%D in (bin obj) do if exist "%%D" rmdir /S /Q "%%D"
 for /D /R "tests" %%D in (bin obj) do if exist "%%D" rmdir /S /Q "%%D"
 
-echo [6/7] Restoring, building, testing and publishing with .NET 10...
+echo [3/4] Restoring, building, testing and publishing with .NET 10...
 dotnet restore "VirtualMonitorsUniverse.sln"
 if errorlevel 1 exit /b 1
 dotnet build "VirtualMonitorsUniverse.sln" -c Debug --no-restore
@@ -278,7 +285,7 @@ mkdir ".runtime\cli" >NUL 2>&1
 dotnet publish "src\Cli\Cli.csproj" -c Debug --no-restore -o ".runtime\cli"
 if errorlevel 1 exit /b 1
 
-echo [7/7] Verifying final workspace and SDK state...
+echo [4/4] Verifying final workspace and SDK state...
 set "HYGIENE_ERROR=0"
 for %%D in (tools client companion server shared) do if exist "%%D" set "HYGIENE_ERROR=1"
 for %%F in (alfatest.cmd alfatest.log multivddtest.log vmu-selftest.log upgrade.log) do if exist "%%F" set "HYGIENE_ERROR=1"
