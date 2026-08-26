@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using VirtualMonitorsUniverse.Core;
 
@@ -73,8 +74,14 @@ internal static class Program
         {
             if (!service.IsDriverAvailable())
             {
+                reporter.Write("VDD DRIVER .............. RUN - dependency is unavailable; starting deterministic setup", ConsoleColor.Cyan);
+                EnsureVddDependency(repoRoot, reporter);
+            }
+
+            if (!service.IsDriverAvailable(TimeSpan.FromSeconds(2)))
+            {
                 throw new InvalidOperationException(
-                    "The MttVDD named pipe is unavailable. The Virtual Display Driver must be installed and enabled before running the VMU self-test.");
+                    "The MttVDD named pipe is still unavailable after dependency setup.");
             }
 
             reporter.Write("VDD DRIVER .............. PASS", ConsoleColor.Green);
@@ -151,6 +158,44 @@ internal static class Program
         reporter.Write($"Log: {logPath}", ConsoleColor.DarkGray);
         reporter.Write(passed ? "STATUS: OK" : "STATUS: FAILED", passed ? ConsoleColor.Green : ConsoleColor.Red);
         return passed ? 0 : 1;
+    }
+
+    private static void EnsureVddDependency(string repoRoot, SelfTestReporter reporter)
+    {
+        var scriptPath = Path.Combine(repoRoot, "scripts", "Ensure-Vdd.ps1");
+        if (!File.Exists(scriptPath))
+        {
+            throw new FileNotFoundException("VDD dependency setup script is missing.", scriptPath);
+        }
+
+        reporter.Write("VDD SETUP ............... RUN - Windows may show a UAC confirmation", ConsoleColor.Yellow);
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
+            UseShellExecute = true,
+            Verb = "runas",
+            WorkingDirectory = repoRoot
+        };
+
+        try
+        {
+            using var process = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("Could not start elevated VDD dependency setup.");
+            process.WaitForExit();
+
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"VDD dependency setup failed with exit code {process.ExitCode}.");
+            }
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            throw new InvalidOperationException("VDD dependency setup was cancelled at the Windows UAC prompt.", ex);
+        }
+
+        reporter.Write("VDD SETUP ............... PASS", ConsoleColor.Green);
     }
 
     private static int? GetWindowsDisplayNumber(string? gdiName)
