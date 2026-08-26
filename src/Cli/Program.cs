@@ -93,6 +93,13 @@ internal static class Program
             var baselineIds = baselineConnected.Select(monitor => monitor.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             reporter.Write($"VDD BASELINE ............ PASS - {baselineCount} active VMU/VDD display(s)", ConsoleColor.Green);
+            foreach (var monitor in baselineConnected)
+            {
+                reporter.Write(
+                    $"VDD FOUND ................ {monitor.GdiName ?? monitor.Id} {monitor.Width}x{monitor.Height} at ({monitor.X},{monitor.Y})",
+                    ConsoleColor.DarkGray);
+            }
+
             reporter.Write($"CREATE VIRTUAL DISPLAY . RUN - requesting display count {requestedCount}", ConsoleColor.Cyan);
 
             service.SetDisplayCount(requestedCount);
@@ -170,13 +177,18 @@ internal static class Program
 
         reporter.Write("VDD SETUP ............... RUN - Windows may show a UAC confirmation", ConsoleColor.Yellow);
 
+        // Administrative work must run in an elevated process because Windows
+        // cannot elevate the already-running console process in place. Keep the
+        // helper window hidden so selftest remains a single visible console flow;
+        // only the standard Windows UAC prompt may become visible.
         var startInfo = new ProcessStartInfo
         {
             FileName = "powershell.exe",
-            Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
+            Arguments = $"-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{scriptPath}\"",
             UseShellExecute = true,
             Verb = "runas",
-            WorkingDirectory = repoRoot
+            WorkingDirectory = repoRoot,
+            WindowStyle = ProcessWindowStyle.Hidden
         };
 
         try
