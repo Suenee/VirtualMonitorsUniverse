@@ -57,7 +57,12 @@ function Get-InstalledSdks {
 
 function Test-SdkMajorInstalled {
     param([Parameter(Mandatory)][int]$Major)
-    return (Get-InstalledSdks | Where-Object { $_ -match "^$Major\." }).Count -gt 0
+
+    # PowerShell unwraps a single pipeline result to a scalar. Force the filtered
+    # result back to an array so Count is reliable for 0, 1, or many SDK entries
+    # even with Set-StrictMode -Version Latest enabled.
+    $matches = @(Get-InstalledSdks | Where-Object { $_ -match "^$Major\." })
+    return $matches.Count -gt 0
 }
 
 function Wait-WindowsInstallerIdle {
