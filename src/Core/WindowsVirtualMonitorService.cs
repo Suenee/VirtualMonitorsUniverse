@@ -9,11 +9,10 @@ namespace VirtualMonitorsUniverse.Core;
 /// VirtualDrivers Virtual Display Driver (MttVDD).
 /// </summary>
 /// <remarks>
-/// MttVDD lifecycle commands use the driver's local named pipe. Active display
-/// identity is resolved independently through the Windows display-adapter API
-/// and then joined to CCD (DisplayConfig) geometry by GDI display name. This is
-/// deliberately more reliable than trying to infer the PnP adapter identity
-/// from a CCD target name.
+/// Runtime display-count changes use the driver's local named pipe. Dependency
+/// diagnostics are read-only: VMU observes the Windows display-adapter state but
+/// does not enable, disable, reinstall, or otherwise repair the driver during a
+/// Core self-test.
 /// </remarks>
 public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
 {
@@ -24,7 +23,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
     {
         EnsureWindows();
 
-        var vddAdapters = DisplayAdapterApi.GetActiveVddAdapters();
+        var vddAdapters = DisplayAdapterApi.GetVddAdapters(onlyActive: true);
         if (vddAdapters.Count == 0)
         {
             return Array.Empty<VirtualMonitorInfo>();
@@ -50,6 +49,28 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
                     path.Y);
             })
             .ToArray();
+    }
+
+    public VddDriverDiagnostics GetDriverDiagnostics(TimeSpan? pipeTimeout = null)
+    {
+        EnsureWindows();
+
+        var adapters = DisplayAdapterApi.GetVddAdapters(onlyActive: false);
+        var adapter = adapters
+            .OrderByDescending(item => item.IsActive)
+            .FirstOrDefault();
+        var pipeAvailable = IsDriverAvailable(pipeTimeout ?? TimeSpan.FromMilliseconds(750));
+
+        return adapter is null
+            ? new VddDriverDiagnostics(false, false, pipeAvailable, null, null, null, 0)
+            : new VddDriverDiagnostics(
+                true,
+                adapter.IsActive,
+                pipeAvailable,
+                adapter.GdiName,
+                adapter.PnpInstanceId,
+                adapter.FriendlyName,
+                adapter.StateFlags);
     }
 
     public bool IsDriverAvailable(TimeSpan? timeout = null)
@@ -163,7 +184,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
         private const string VddPnpPrefix = "ROOT\\MTTVDD";
         private const string VddFriendlyName = "Virtual Display Driver";
 
-        public static IReadOnlyList<VddAdapter> GetActiveVddAdapters()
+        public static IReadOnlyList<VddAdapter> GetVddAdapters(bool onlyActive)
         {
             var result = new List<VddAdapter>();
             for (uint index = 0; ; index++)
@@ -180,7 +201,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
 
                 var isActive = (device.StateFlags & DisplayDeviceAttachedToDesktop) != 0 ||
                     (device.StateFlags & DisplayDeviceActive) != 0;
-                if (!isActive)
+                if (onlyActive && !isActive)
                 {
                     continue;
                 }
@@ -193,7 +214,12 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
                     continue;
                 }
 
-                result.Add(new VddAdapter(device.DeviceName, device.DeviceID));
+                result.Add(new VddAdapter(
+                    device.DeviceName,
+                    device.DeviceID,
+                    device.DeviceString,
+                    device.StateFlags,
+                    isActive));
             }
 
             return result;
@@ -227,7 +253,12 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
             public string DeviceKey;
         }
 
-        public sealed record VddAdapter(string GdiName, string? PnpInstanceId);
+        public sealed record VddAdapter(
+            string GdiName,
+            string? PnpInstanceId,
+            string? FriendlyName,
+            int StateFlags,
+            bool IsActive);
     }
 
     private static class DisplayConfigApi
