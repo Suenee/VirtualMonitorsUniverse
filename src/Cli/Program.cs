@@ -29,7 +29,7 @@ internal static class Program
         Console.WriteLine("  vmu selftest         Run automated VMU Core/VDD regression diagnostics");
         Console.WriteLine("  vmu driver status    Show read-only VDD dependency diagnostics");
         Console.WriteLine("  vmu driver install   Install the pinned ALPHA-validated VDD dependency");
-        Console.WriteLine("  vmu driver purge     Emergency: disable all VDD devices and remove virtual monitors");
+        Console.WriteLine("  vmu driver purge     Emergency: remove VDD device nodes and all virtual monitors");
         return 0;
     }
 
