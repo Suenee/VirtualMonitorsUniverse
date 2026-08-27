@@ -2,19 +2,26 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using VirtualMonitorsUniverse.Core;
 
 namespace VirtualMonitorsUniverse.Cli;
 
 /// <summary>
-/// Provides emergency Virtual Display Driver device control without PowerShell.
+/// Provides emergency Virtual Display Driver cleanup without PowerShell.
 /// </summary>
+/// <remarks>
+/// The behavior intentionally follows the validated ALPHA cleanup path:
+/// discover Display-class devices by the official friendly name, remove each
+/// device node with pnputil /remove-device, then verify that both the device
+/// nodes and active VDD display targets are gone.
+/// </remarks>
 internal static class VddEmergencyManager
 {
     private const string VddFriendlyName = "Virtual Display Driver";
     private const uint DigcfPresent = 0x00000002;
-    private const uint DigcfAllClasses = 0x00000004;
     private const uint SpdrpFriendlyName = 0x0000000C;
     private const uint SpdrpDeviceDesc = 0x00000000;
+    private static readonly Guid DisplayClassGuid = new("4D36E968-E325-11CE-BFC1-08002BE10318");
 
     public static int Purge()
     {
@@ -35,18 +42,27 @@ internal static class VddEmergencyManager
             return 1;
         }
 
+        var activeBefore = GetActiveVddMonitorCount();
+        Console.WriteLine($"VDD PURGE ............... INFO - {devices.Count} VDD device node(s), {activeBefore} active VDD monitor(s)");
+
         if (devices.Count == 0)
         {
-            Console.WriteLine("VDD PURGE ............... PASS - no Virtual Display Driver device is present");
-            return 0;
+            if (activeBefore == 0)
+            {
+                Console.WriteLine("VDD PURGE ............... PASS - no VDD device nodes or active VDD monitors remain");
+                return 0;
+            }
+
+            Console.WriteLine("VDD PURGE ............... FAIL - active VDD monitors remain although no removable VDD device node was found");
+            return 1;
         }
 
-        Console.WriteLine($"VDD PURGE ............... RUN - disabling {devices.Count} Virtual Display Driver device(s)");
+        Console.WriteLine($"VDD PURGE ............... RUN - removing {devices.Count} Virtual Display Driver device node(s)");
         Console.WriteLine("                         Windows may show a UAC confirmation");
 
         foreach (var instanceId in devices)
         {
-            var exitCode = RunElevatedPnPUtil("/disable-device", instanceId);
+            var exitCode = RunElevatedPnPUtil("/remove-device", instanceId);
             if (exitCode != 0)
             {
                 Console.WriteLine($"VDD PURGE ............... FAIL - pnputil exit code {exitCode} for {instanceId}");
@@ -54,26 +70,49 @@ internal static class VddEmergencyManager
             }
         }
 
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (DateTime.UtcNow < deadline)
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(12);
+        do
         {
-            var remaining = EnumerateVddInstanceIds(onlyEnabled: true);
-            if (remaining.Count == 0)
+            var remainingDevices = EnumerateVddInstanceIds();
+            var remainingMonitors = GetActiveVddMonitorCount();
+            if (remainingDevices.Count == 0 && remainingMonitors == 0)
             {
-                Console.WriteLine("VDD PURGE ............... PASS - all VDD devices are disabled; virtual monitors removed");
+                Console.WriteLine("VDD PURGE ............... PASS - VDD device nodes removed and no active virtual monitors remain");
                 return 0;
             }
 
             Thread.Sleep(200);
         }
+        while (DateTime.UtcNow < deadline);
 
-        Console.WriteLine("VDD PURGE ............... FAIL - one or more VDD devices remain enabled after timeout");
+        var finalDevices = EnumerateVddInstanceIds();
+        var finalMonitors = GetActiveVddMonitorCount();
+        Console.WriteLine(
+            $"VDD PURGE ............... FAIL - cleanup incomplete: {finalDevices.Count} VDD device node(s), {finalMonitors} active VDD monitor(s) remain");
         return 1;
+    }
+
+    private static int GetActiveVddMonitorCount()
+    {
+        try
+        {
+            return new WindowsVirtualMonitorService().GetMonitors().Count;
+        }
+        catch
+        {
+            // Verification must be conservative. If topology inspection itself
+            // fails, do not manufacture a false PASS by pretending the count is 0.
+            return int.MaxValue;
+        }
     }
 
     private static int RunElevatedPnPUtil(string operation, string instanceId)
     {
-        var pnputil = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "pnputil.exe");
+        var pnputil = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32",
+            "pnputil.exe");
+
         var startInfo = new ProcessStartInfo
         {
             FileName = pnputil,
@@ -96,15 +135,10 @@ internal static class VddEmergencyManager
         }
     }
 
-    private static IReadOnlyList<string> EnumerateVddInstanceIds(bool onlyEnabled = false)
+    private static IReadOnlyList<string> EnumerateVddInstanceIds()
     {
-        // A null class GUID is valid only when DIGCF_ALLCLASSES is supplied.
-        // Without it SetupDiGetClassDevs returns ERROR_INVALID_PARAMETER (87).
-        var deviceInfoSet = SetupDiGetClassDevs(
-            IntPtr.Zero,
-            null,
-            IntPtr.Zero,
-            DigcfPresent | DigcfAllClasses);
+        var classGuid = DisplayClassGuid;
+        var deviceInfoSet = SetupDiGetClassDevs(ref classGuid, null, IntPtr.Zero, DigcfPresent);
         if (deviceInfoSet == new IntPtr(-1))
         {
             throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -115,7 +149,11 @@ internal static class VddEmergencyManager
             var result = new List<string>();
             for (uint index = 0; ; index++)
             {
-                var data = new SpDevInfoData { cbSize = (uint)Marshal.SizeOf<SpDevInfoData>() };
+                var data = new SpDevInfoData
+                {
+                    cbSize = (uint)Marshal.SizeOf<SpDevInfoData>()
+                };
+
                 if (!SetupDiEnumDeviceInfo(deviceInfoSet, index, ref data))
                 {
                     var error = Marshal.GetLastWin32Error();
@@ -135,17 +173,10 @@ internal static class VddEmergencyManager
                 }
 
                 var instanceId = ReadInstanceId(deviceInfoSet, ref data);
-                if (string.IsNullOrWhiteSpace(instanceId))
+                if (!string.IsNullOrWhiteSpace(instanceId))
                 {
-                    continue;
+                    result.Add(instanceId);
                 }
-
-                if (onlyEnabled && !IsDeviceEnabled(data.DevInst))
-                {
-                    continue;
-                }
-
-                result.Add(instanceId);
             }
 
             return result;
@@ -156,23 +187,17 @@ internal static class VddEmergencyManager
         }
     }
 
-    private static bool IsDeviceEnabled(uint devInst)
-    {
-        var result = CM_Get_DevNode_Status(out var status, out var problem, devInst, 0);
-        if (result != 0)
-        {
-            return true;
-        }
-
-        const uint DnStarted = 0x00000008;
-        const uint CmProbDisabled = 22;
-        return (status & DnStarted) != 0 && problem != CmProbDisabled;
-    }
-
     private static string? ReadRegistryProperty(IntPtr set, ref SpDevInfoData data, uint property)
     {
         var buffer = new byte[1024];
-        if (!SetupDiGetDeviceRegistryProperty(set, ref data, property, out _, buffer, (uint)buffer.Length, out _))
+        if (!SetupDiGetDeviceRegistryProperty(
+                set,
+                ref data,
+                property,
+                out _,
+                buffer,
+                (uint)buffer.Length,
+                out _))
         {
             return null;
         }
@@ -183,21 +208,29 @@ internal static class VddEmergencyManager
     private static string? ReadInstanceId(IntPtr set, ref SpDevInfoData data)
     {
         var builder = new StringBuilder(512);
-        return SetupDiGetDeviceInstanceId(set, ref data, builder, builder.Capacity, out _)
+        return SetupDiGetDeviceInstanceId(
+                set,
+                ref data,
+                builder,
+                builder.Capacity,
+                out _)
             ? builder.ToString()
             : null;
     }
 
     [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr SetupDiGetClassDevs(
-        IntPtr classGuid,
+        ref Guid classGuid,
         string? enumerator,
         IntPtr hwndParent,
         uint flags);
 
     [DllImport("setupapi.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetupDiEnumDeviceInfo(IntPtr deviceInfoSet, uint memberIndex, ref SpDevInfoData deviceInfoData);
+    private static extern bool SetupDiEnumDeviceInfo(
+        IntPtr deviceInfoSet,
+        uint memberIndex,
+        ref SpDevInfoData deviceInfoData);
 
     [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -222,9 +255,6 @@ internal static class VddEmergencyManager
     [DllImport("setupapi.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
-
-    [DllImport("cfgmgr32.dll")]
-    private static extern uint CM_Get_DevNode_Status(out uint status, out uint problemNumber, uint devInst, uint flags);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SpDevInfoData
