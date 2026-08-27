@@ -8,9 +8,7 @@ namespace VirtualMonitorsUniverse.Core;
 /// <remarks>
 /// This class intentionally preserves the ALPHA Win32 contract: EnumDisplaySettings
 /// reads current/registry DEVMODE values and ChangeDisplaySettingsEx performs mode,
-/// disconnect, and reconnect operations with CDS_UPDATEREGISTRY. Active-desktop
-/// verification follows the same semantic source as ALPHA Screen.AllScreens by
-/// enumerating active monitor handles, rather than relying on EnumDisplayDevices flags.
+/// disconnect, and reconnect operations with CDS_UPDATEREGISTRY.
 /// </remarks>
 public sealed class WindowsDisplayModeService
 {
@@ -22,6 +20,7 @@ public sealed class WindowsDisplayModeService
     private const uint DmDisplayFrequency = 0x00400000;
     private const uint CdsUpdateRegistry = 0x00000001;
     private const int DispChangeSuccessful = 0;
+    private const int DisplayDeviceAttachedToDesktop = 0x00000001;
     private const string VddFriendlyName = "Virtual Display Driver";
     private const string VddPnpPrefix = "ROOT\\MTTVDD";
 
@@ -30,14 +29,14 @@ public sealed class WindowsDisplayModeService
     public IReadOnlyList<WindowsDisplayInfo> GetDisplays()
     {
         EnsureWindows();
-        var activeNames = GetActiveDesktopDisplayNames();
+        var activeScreenNames = GetActiveScreenNames();
         var result = new List<WindowsDisplayInfo>();
         for (uint index = 0; ; index++)
         {
             var device = new DisplayDevice { cb = Marshal.SizeOf<DisplayDevice>() };
             if (!EnumDisplayDevices(null, index, ref device, 0)) break;
 
-            var attached = activeNames.Contains(device.DeviceName);
+            var attached = activeScreenNames.Contains(device.DeviceName);
             DisplayModeInfo? mode = null;
             try
             {
@@ -92,7 +91,13 @@ public sealed class WindowsDisplayModeService
         var mode = current;
         mode.dmPelsWidth = 0;
         mode.dmPelsHeight = 0;
-        mode.dmFields = DmPelsWidth | DmPelsHeight;
+
+        // Preserve the ALPHA disconnect that was actually validated before the
+        // later Screen-enumeration refactor: DM_POSITION is part of dmFields when
+        // submitting the 0x0 mode. Removing it changed Windows behavior on the
+        // development machine even though ChangeDisplaySettingsEx returned success.
+        mode.dmFields = DmPosition | DmPelsWidth | DmPelsHeight;
+
         Apply(deviceName, ref mode, "disconnect");
         if (!WaitUntil(() => !IsAttached(deviceName), TimeSpan.FromSeconds(5)))
             throw new TimeoutException($"Timed out waiting for {deviceName} to disconnect.");
@@ -122,25 +127,23 @@ public sealed class WindowsDisplayModeService
     public bool IsAttached(string deviceName)
     {
         EnsureWindows();
-        return GetActiveDesktopDisplayNames().Contains(deviceName);
+        return GetActiveScreenNames().Contains(deviceName);
     }
 
-    private static HashSet<string> GetActiveDesktopDisplayNames()
+    private static HashSet<string> GetActiveScreenNames()
     {
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var ok = EnumDisplayMonitors(
-            IntPtr.Zero,
-            IntPtr.Zero,
-            (monitor, _, _, _) =>
-            {
-                var info = new MonitorInfoEx { cbSize = Marshal.SizeOf<MonitorInfoEx>() };
-                if (GetMonitorInfo(monitor, ref info) && !string.IsNullOrWhiteSpace(info.szDevice))
-                    names.Add(info.szDevice);
-                return true;
-            },
-            IntPtr.Zero);
-        if (!ok)
-            throw new InvalidOperationException($"EnumDisplayMonitors failed with Win32 error {Marshal.GetLastWin32Error()}.");
+        var callback = new MonitorEnumProc((monitor, _, _, _) =>
+        {
+            var info = new MonitorInfoEx { cbSize = Marshal.SizeOf<MonitorInfoEx>() };
+            if (GetMonitorInfo(monitor, ref info) && !string.IsNullOrWhiteSpace(info.szDevice))
+                names.Add(info.szDevice);
+            return true;
+        });
+
+        if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero))
+            throw new InvalidOperationException("Windows active display enumeration failed.");
+        GC.KeepAlive(callback);
         return names;
     }
 
@@ -200,15 +203,15 @@ public sealed class WindowsDisplayModeService
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum, ref DisplayDevice lpDisplayDevice, uint dwFlags);
 
-    [DllImport("user32.dll", SetLastError = true)]
+    private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, IntPtr lprcMonitor, IntPtr dwData);
+
+    [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clipRect, MonitorEnumProc callback, IntPtr data);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfoEx monitorInfo);
-
-    private delegate bool MonitorEnumProc(IntPtr monitor, IntPtr hdc, IntPtr monitorRect, IntPtr data);
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MonitorInfoEx lpmi);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct DevMode
