@@ -12,6 +12,7 @@ internal static class VddEmergencyManager
 {
     private const string VddFriendlyName = "Virtual Display Driver";
     private const uint DigcfPresent = 0x00000002;
+    private const uint DigcfAllClasses = 0x00000004;
     private const uint SpdrpFriendlyName = 0x0000000C;
     private const uint SpdrpDeviceDesc = 0x00000000;
 
@@ -97,7 +98,13 @@ internal static class VddEmergencyManager
 
     private static IReadOnlyList<string> EnumerateVddInstanceIds(bool onlyEnabled = false)
     {
-        var deviceInfoSet = SetupDiGetClassDevs(IntPtr.Zero, null, IntPtr.Zero, DigcfPresent);
+        // A null class GUID is valid only when DIGCF_ALLCLASSES is supplied.
+        // Without it SetupDiGetClassDevs returns ERROR_INVALID_PARAMETER (87).
+        var deviceInfoSet = SetupDiGetClassDevs(
+            IntPtr.Zero,
+            null,
+            IntPtr.Zero,
+            DigcfPresent | DigcfAllClasses);
         if (deviceInfoSet == new IntPtr(-1))
         {
             throw new Win32Exception(Marshal.GetLastWin32Error());
