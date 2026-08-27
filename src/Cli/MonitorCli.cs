@@ -73,8 +73,8 @@ internal static class MonitorCli
         {
             var service = new WindowsDisplayModeService(); var display = ResolveDisplay(service, args[0]); EnsureVirtual(display);
             if (!display.IsAttached) throw new InvalidOperationException($"{display.DeviceName} is inactive. Connect it before changing its mode.");
-            Console.WriteLine($"MONITOR MODE ........... RUN - {display.DeviceName} [final ALPHA anchor-aware reflow]");
-            new WindowsDisplayConfigTopologyService().SetModeWithAnchorReflow(display.DeviceName, width, height);
+            Console.WriteLine($"MONITOR MODE ........... RUN - {display.DeviceName} [final ALPHA reflow-v10]");
+            new WindowsAlphaReflowService().SetMode(display.DeviceName, width, height);
             var after = ResolveDisplay(service, args[0]);
             if (after.Mode is null || after.Mode.Width != width || after.Mode.Height != height)
                 throw new InvalidOperationException($"Requested {width}x{height}, but Windows reports {after.Mode?.Width ?? 0}x{after.Mode?.Height ?? 0}.");
