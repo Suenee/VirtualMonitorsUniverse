@@ -26,12 +26,19 @@ internal static class MonitorCli
             foreach (var display in displays)
             {
                 var id = GetDisplayNumber(display.DeviceName)?.ToString() ?? display.DeviceName;
-                var type = display.IsVirtual ? "VIRTUAL " : "PHYSICAL";
-                var state = display.IsAttached ? "ACTIVE  " : "INACTIVE";
-                var mode = display.Mode is null ? "mode unavailable" : $"{display.Mode.Width}x{display.Mode.Height}@{display.Mode.RefreshRate} ({display.Mode.X},{display.Mode.Y})";
-                Console.WriteLine($"{id,-3} {type} {state} {display.DeviceName,-15} {mode}");
+                Console.Write($"{id,-3} ");
+                CliConsole.WriteToken(display.IsVirtual ? "VIRTUAL" : "PHYSICAL");
+                Console.Write(display.IsVirtual ? "  " : " ");
+                CliConsole.WriteToken(display.IsAttached ? "ACTIVE" : "INACTIVE");
+                Console.Write(display.IsAttached ? "   " : " ");
+                var mode = display.Mode is null
+                    ? "mode unavailable"
+                    : $"{display.Mode.Width}x{display.Mode.Height}@{display.Mode.RefreshRate} ({display.Mode.X},{display.Mode.Y})";
+                Console.WriteLine($"{display.DeviceName,-15} {mode}");
             }
-            Console.WriteLine("\nSTATUS: OK"); return 0;
+            Console.WriteLine();
+            CliConsole.WriteFinalStatus(true);
+            return 0;
         }
         catch (Exception ex) { return Fail(ex.Message); }
     }
@@ -41,13 +48,19 @@ internal static class MonitorCli
         if (args.Length != 1) return Fail("Usage: vmu monitor connect <id>");
         try
         {
-            var service = new WindowsDisplayModeService(); var display = ResolveDisplay(service, args[0]); EnsureVirtual(display);
+            var service = new WindowsDisplayModeService();
+            var display = ResolveDisplay(service, args[0]);
+            EnsureVirtual(display);
             if (display.IsAttached) throw new InvalidOperationException($"{display.DeviceName} is already connected.");
             var topology = new WindowsDisplayConfigTopologyService();
             if (!topology.HasSavedTopology(display.DeviceName)) throw new InvalidOperationException($"No saved final-ALPHA CCD topology exists for {display.DeviceName}. Activate this virtual monitor once in Windows, then run disconnect before connect.");
-            Console.WriteLine($"MONITOR CONNECT ........ RUN - {display.DeviceName} [final ALPHA CCD]"); topology.ReconnectSaved(display.DeviceName);
-            var after = ResolveDisplay(service, args[0]); var mode = after.Mode is null ? string.Empty : $" {after.Mode.Width}x{after.Mode.Height}@{after.Mode.RefreshRate}";
-            Console.WriteLine($"MONITOR CONNECT ........ PASS - ACTIVE{mode}\nSTATUS: OK"); return 0;
+            CliConsole.WriteStatusLine("MONITOR CONNECT ........ ", "RUN", $" - {display.DeviceName} [final ALPHA CCD]");
+            topology.ReconnectSaved(display.DeviceName);
+            var after = ResolveDisplay(service, args[0]);
+            var mode = after.Mode is null ? string.Empty : $" {after.Mode.Width}x{after.Mode.Height}@{after.Mode.RefreshRate}";
+            CliConsole.WriteStatusLine("MONITOR CONNECT ........ ", "PASS", $" - ACTIVE{mode}");
+            CliConsole.WriteFinalStatus(true);
+            return 0;
         }
         catch (Exception ex) { return Fail(ex.Message); }
     }
@@ -57,10 +70,16 @@ internal static class MonitorCli
         if (args.Length != 1) return Fail("Usage: vmu monitor disconnect <id>");
         try
         {
-            var service = new WindowsDisplayModeService(); var display = ResolveDisplay(service, args[0]); EnsureVirtual(display);
+            var service = new WindowsDisplayModeService();
+            var display = ResolveDisplay(service, args[0]);
+            EnsureVirtual(display);
             if (!display.IsAttached) throw new InvalidOperationException($"{display.DeviceName} is already disconnected.");
-            Console.WriteLine($"MONITOR DISCONNECT ..... RUN - {display.DeviceName} [final ALPHA CCD]"); new WindowsDisplayConfigTopologyService().DisconnectExact(display.DeviceName);
-            var after = ResolveDisplay(service, args[0]); Console.WriteLine($"MONITOR DISCONNECT ..... PASS - {(after.IsAttached ? "ACTIVE" : "INACTIVE")}\nSTATUS: OK"); return 0;
+            CliConsole.WriteStatusLine("MONITOR DISCONNECT ..... ", "RUN", $" - {display.DeviceName} [final ALPHA CCD]");
+            new WindowsDisplayConfigTopologyService().DisconnectExact(display.DeviceName);
+            var after = ResolveDisplay(service, args[0]);
+            CliConsole.WriteStatusLine("MONITOR DISCONNECT ..... ", "PASS", $" - {(after.IsAttached ? "ACTIVE" : "INACTIVE")}");
+            CliConsole.WriteFinalStatus(true);
+            return 0;
         }
         catch (Exception ex) { return Fail(ex.Message); }
     }
@@ -71,29 +90,48 @@ internal static class MonitorCli
             return Fail("Usage: vmu monitor mode <id> <width> <height> <refresh>");
         try
         {
-            var service = new WindowsDisplayModeService(); var display = ResolveDisplay(service, args[0]); EnsureVirtual(display);
+            var service = new WindowsDisplayModeService();
+            var display = ResolveDisplay(service, args[0]);
+            EnsureVirtual(display);
             if (!display.IsAttached) throw new InvalidOperationException($"{display.DeviceName} is inactive. Connect it before changing its mode.");
-            Console.WriteLine($"MONITOR MODE ........... RUN - {display.DeviceName} [final ALPHA reflow-v10]");
+            CliConsole.WriteStatusLine("MONITOR MODE ........... ", "RUN", $" - {display.DeviceName} [final ALPHA reflow-v10]");
             new WindowsAlphaReflowService().SetMode(display.DeviceName, width, height);
             var after = ResolveDisplay(service, args[0]);
             if (after.Mode is null || after.Mode.Width != width || after.Mode.Height != height)
                 throw new InvalidOperationException($"Requested {width}x{height}, but Windows reports {after.Mode?.Width ?? 0}x{after.Mode?.Height ?? 0}.");
             if (refreshRate != 0 && Math.Abs((long)after.Mode.RefreshRate - refreshRate) > 1)
                 throw new InvalidOperationException($"Requested {refreshRate} Hz, but Windows reports {after.Mode.RefreshRate} Hz.");
-            Console.WriteLine($"MONITOR MODE ........... PASS - ACTIVE {after.Mode.Width}x{after.Mode.Height}@{after.Mode.RefreshRate} ({after.Mode.X},{after.Mode.Y})");
-            Console.WriteLine("STATUS: OK"); return 0;
+            CliConsole.WriteStatusLine("MONITOR MODE ........... ", "PASS", $" - ACTIVE {after.Mode.Width}x{after.Mode.Height}@{after.Mode.RefreshRate} ({after.Mode.X},{after.Mode.Y})");
+            CliConsole.WriteFinalStatus(true);
+            return 0;
         }
         catch (Exception ex) { return Fail(ex.Message); }
     }
 
-    private static void EnsureVirtual(WindowsDisplayInfo display) { if (!display.IsVirtual) throw new InvalidOperationException($"Refusing to modify physical display {display.DeviceName}."); }
+    private static void EnsureVirtual(WindowsDisplayInfo display)
+    {
+        if (!display.IsVirtual) throw new InvalidOperationException($"Refusing to modify physical display {display.DeviceName}.");
+    }
+
     private static WindowsDisplayInfo ResolveDisplay(WindowsDisplayModeService service, string id)
     {
-        var displays = service.GetDisplays(); WindowsDisplayInfo? display;
+        var displays = service.GetDisplays();
+        WindowsDisplayInfo? display;
         if (int.TryParse(id, out var number)) display = displays.FirstOrDefault(x => string.Equals(x.DeviceName, $"\\\\.\\DISPLAY{number}", StringComparison.OrdinalIgnoreCase));
         else display = displays.FirstOrDefault(x => string.Equals(x.DeviceName, id, StringComparison.OrdinalIgnoreCase));
         return display ?? throw new InvalidOperationException($"Monitor '{id}' was not found.");
     }
-    private static int? GetDisplayNumber(string name) { const string prefix = "\\\\.\\DISPLAY"; return name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && int.TryParse(name[prefix.Length..], out var n) ? n : null; }
-    private static int Fail(string message) { Console.WriteLine($"MONITOR .................. FAIL - {message}\nSTATUS: FAILED"); return 1; }
+
+    private static int? GetDisplayNumber(string name)
+    {
+        const string prefix = "\\\\.\\DISPLAY";
+        return name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && int.TryParse(name[prefix.Length..], out var number) ? number : null;
+    }
+
+    private static int Fail(string message)
+    {
+        CliConsole.WriteStatusLine("MONITOR .................. ", "FAIL", $" - {message}");
+        CliConsole.WriteFinalStatus(false);
+        return 1;
+    }
 }
