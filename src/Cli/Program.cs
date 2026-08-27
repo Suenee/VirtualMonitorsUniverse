@@ -29,6 +29,7 @@ internal static class Program
         Console.WriteLine("  vmu selftest         Run automated VMU Core/VDD regression diagnostics");
         Console.WriteLine("  vmu driver status    Show read-only VDD dependency diagnostics");
         Console.WriteLine("  vmu driver install   Install the pinned ALPHA-validated VDD dependency");
+        Console.WriteLine("  vmu driver purge     Emergency: disable all VDD devices and remove virtual monitors");
         return 0;
     }
 
@@ -45,8 +46,25 @@ internal static class Program
         {
             "status" => RunDriverStatus(),
             "install" => RunDriverInstall(),
+            "purge" => RunDriverPurge(),
             _ => UnknownDriverCommand(subcommand)
         };
+    }
+
+    private static int RunDriverPurge()
+    {
+        try
+        {
+            var result = VddEmergencyManager.Purge();
+            WriteFinalStatus(result == 0);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"VDD PURGE ............... FAIL - {ex.Message}");
+            WriteFinalStatus(false);
+            return 1;
+        }
     }
 
     private static int RunDriverStatus()
@@ -224,9 +242,6 @@ internal static class Program
             var baselineConnected = baseline.Where(monitor => monitor.IsConnected).ToArray();
             baselineCount = baselineConnected.Length;
 
-            // Upstream MttVDD does not support display count 0 as a reversible
-            // runtime state. A baseline of zero cannot therefore be restored
-            // safely through the same pipe API without disabling the PnP device.
             if (baselineCount == 0)
             {
                 throw new InvalidOperationException(
@@ -456,7 +471,7 @@ internal static class Program
     private static int UnknownDriverCommand(string command)
     {
         Console.Error.WriteLine($"Unknown driver command: {command}");
-        Console.Error.WriteLine("Use 'vmu driver status' or 'vmu driver install'.");
+        Console.Error.WriteLine("Use 'vmu driver status', 'vmu driver install', or 'vmu driver purge'.");
         return 2;
     }
 
