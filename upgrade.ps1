@@ -37,6 +37,21 @@ function Wait-WindowsInstallerIdle {
     do { $busy=@(Get-Process msiexec -ErrorAction SilentlyContinue); if ($busy.Count -eq 0) { Write-Host 'Windows Installer: idle'; return $true }; Start-Sleep -Seconds 2 } while ((Get-Date) -lt $deadline)
     Write-Warning "Windows Installer still appears busy after $TimeoutSeconds seconds."; return $false
 }
+function Stop-IdleDotNetBuildServers {
+    if (-not (Get-Command dotnet.exe -ErrorAction SilentlyContinue)) { return }
+    Write-Host 'Releasing idle .NET build servers...'
+    # `dotnet build-server shutdown` asks the SDK-owned build servers to stop gracefully.
+    # It does not terminate arbitrary dotnet applications, so a parallel SUB build/app is not killed.
+    & dotnet build-server shutdown
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host '.NET build servers: shutdown requested successfully'
+    }
+    else {
+        $warning=".NET build-server shutdown returned exit code $LASTEXITCODE. Other .NET work may still be using build infrastructure; no process was force-killed."
+        $Warnings.Add($warning)
+        Write-Warning $warning
+    }
+}
 function Remove-KnownGeneratedArtifacts {
     Write-Host 'Cleaning repository-owned generated files...'
     $runtime=Join-Path $RepoRoot '.runtime'; if (Test-Path $runtime) { Remove-Item -LiteralPath $runtime -Recurse -Force }
@@ -81,7 +96,7 @@ try {
     Write-Host 'Installed SDKs after SDK maintenance:'; & dotnet --list-sdks
     Write-Host '[4/5] Restoring, building, testing and publishing with .NET 10...'; Remove-KnownGeneratedArtifacts; Invoke-Native dotnet @('restore',$Solution) 'Final restore failed.'; Invoke-Native dotnet @('build',$Solution,'-c','Debug','--no-restore') 'Final build failed.'; Invoke-Native dotnet @('test',$TestProject,'-c','Debug','--no-build','--no-restore') 'Final tests failed.'; New-Item -ItemType Directory -Path $RuntimeCli -Force | Out-Null; Invoke-Native dotnet @('publish',$CliProject,'-c','Debug','--no-restore','-o',$RuntimeCli) 'CLI publish failed.'
     Write-Host '[5/5] Verifying final workspace and SDK state...'; Assert-WorkspaceHygiene; if (-not (Test-SdkMajorInstalled -Major 10)) { throw 'Final .NET 10 SDK verification failed.' }
-    Write-Host 'Final workspace hygiene: OK'; Write-Host '.NET 10 SDK: OK'; Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'; Write-Host 'Branch: devel'; Write-Host "Runtime CLI: $RuntimeCli"; Write-Host "Logs: $LogDir"; Write-Host 'Next check: vmu selftest'
+    Write-Host 'Final workspace hygiene: OK'; Write-Host '.NET 10 SDK: OK'; Stop-IdleDotNetBuildServers; Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'; Write-Host 'Branch: devel'; Write-Host "Runtime CLI: $RuntimeCli"; Write-Host "Logs: $LogDir"; Write-Host 'Next check: vmu selftest'
     if ($Warnings.Count -gt 0) { $FinalStatus='WARNING'; $FinalStatusColor='Yellow' } else { $FinalStatus='OK'; $FinalStatusColor='Green' }
     $ExitCode=0
 }
