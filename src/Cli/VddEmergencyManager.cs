@@ -20,6 +20,18 @@ internal static class VddEmergencyManager
     private const string VddFriendlyName = "Virtual Display Driver";
     private const string VddInfOriginalName = "MttVDD.inf";
 
+    /// <summary>
+    /// Returns the real PnP InstanceId values of ALPHA VDD display-class devices.
+    /// These identities correspond to Get-PnpDevice.InstanceId in the final ALPHA
+    /// acceptance test (for example ROOT\DISPLAY\0000), not the generic hardware ID
+    /// Root\MttVDD exposed by EnumDisplayDevices.
+    /// </summary>
+    public static string[] GetVddInstanceIds() => QueryDisplayDevices()
+        .Where(device => string.Equals(device.FriendlyName, VddFriendlyName, StringComparison.OrdinalIgnoreCase))
+        .Select(device => device.InstanceId)
+        .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
     public static int Purge()
     {
         if (!OperatingSystem.IsWindows())
