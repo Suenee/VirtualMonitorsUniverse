@@ -8,13 +8,10 @@ namespace VirtualMonitorsUniverse.Core;
 /// Native C# port of the display-mode lifecycle proven by the ALPHA acceptance test.
 /// </summary>
 /// <remarks>
-/// This class intentionally preserves the ALPHA Win32 contract: EnumDisplaySettings
-/// reads current/registry DEVMODE values and ChangeDisplaySettingsEx performs mode,
-/// disconnect, and reconnect operations with CDS_UPDATEREGISTRY.
-///
-/// ALPHA kept the pre-disconnect DEVMODE in process memory. VMU CLI commands run in
-/// separate processes, so the same DEVMODE is persisted briefly between disconnect
-/// and reconnect and removed after a successful reconnect.
+/// The implementation deliberately follows the validated ALPHA behavior: top-level
+/// EnumDisplayDevices enumeration, ALPHA virtual-display identity based on the device
+/// string, EnumDisplaySettings for mode capture, and ChangeDisplaySettingsEx with
+/// CDS_UPDATEREGISTRY for mode/disconnect/reconnect operations.
 /// </remarks>
 public sealed class WindowsDisplayModeService
 {
@@ -26,7 +23,6 @@ public sealed class WindowsDisplayModeService
     private const uint DmDisplayFrequency = 0x00400000;
     private const uint CdsUpdateRegistry = 0x00000001;
     private const int DispChangeSuccessful = 0;
-    private const string VddFriendlyName = "Virtual Display Driver";
     private const string VddPnpPrefix = "ROOT\\MTTVDD";
 
     public IReadOnlyList<WindowsDisplayInfo> GetDisplays()
@@ -34,10 +30,14 @@ public sealed class WindowsDisplayModeService
         EnsureWindows();
         var activeScreenNames = GetActiveScreenNames();
         var result = new List<WindowsDisplayInfo>();
+
         for (uint index = 0; ; index++)
         {
             var device = new DisplayDevice { cb = Marshal.SizeOf<DisplayDevice>() };
-            if (!EnumDisplayDevices(null, index, ref device, 0)) break;
+            if (!EnumDisplayDevices(null, index, ref device, 0))
+            {
+                break;
+            }
 
             var attached = activeScreenNames.Contains(device.DeviceName);
             DisplayModeInfo? mode = null;
@@ -50,7 +50,10 @@ public sealed class WindowsDisplayModeService
                 // ALPHA treated display enumeration and mode inspection separately.
             }
 
-            var isVirtual = string.Equals(device.DeviceString, VddFriendlyName, StringComparison.OrdinalIgnoreCase) ||
+            // Keep ALPHA's proven identification rule. It matched DeviceString against
+            // Virtual|MTT|VDD. The PnP prefix is retained only as a strict additional
+            // signal when Windows exposes it on the top-level display entry.
+            var isVirtual = IsAlphaVirtualIdentity(device.DeviceString) ||
                             (!string.IsNullOrWhiteSpace(device.DeviceID) &&
                              device.DeviceID.StartsWith(VddPnpPrefix, StringComparison.OrdinalIgnoreCase));
 
@@ -83,50 +86,78 @@ public sealed class WindowsDisplayModeService
         mode.dmFields = DmPelsWidth | DmPelsHeight | DmDisplayFrequency;
         Apply(deviceName, ref mode, $"{width}x{height}@{refreshRate}");
         if (!WaitUntil(() => TestMode(deviceName, width, height), TimeSpan.FromSeconds(5)))
+        {
             throw new TimeoutException($"Timed out waiting for {width}x{height} on {deviceName}.");
+        }
     }
 
     public void Disconnect(string deviceName)
     {
         EnsureWindows();
-        var current = ReadMode(deviceName, EnumCurrentSettings);
+        if (!IsAttached(deviceName))
+        {
+            throw new InvalidOperationException($"{deviceName} is already disconnected; refusing to overwrite the saved ALPHA mode snapshot.");
+        }
 
-        // ALPHA kept this exact DEVMODE in $SavedModes. Persist the same structure
-        // because the CLI disconnect and connect commands execute in separate processes.
+        var current = ReadMode(deviceName, EnumCurrentSettings);
+        if (current.dmPelsWidth == 0 || current.dmPelsHeight == 0)
+        {
+            throw new InvalidOperationException($"{deviceName} returned an invalid active mode; refusing to disconnect.");
+        }
+
+        // ALPHA kept the exact current DEVMODE in memory. CLI commands are separate
+        // processes, therefore persist the same structure before changing the mode.
         SaveModeSnapshot(deviceName, current);
 
         var mode = current;
         mode.dmPelsWidth = 0;
         mode.dmPelsHeight = 0;
         mode.dmFields = DmPosition | DmPelsWidth | DmPelsHeight;
-
         Apply(deviceName, ref mode, "disconnect");
+
         if (!WaitUntil(() => !IsAttached(deviceName), TimeSpan.FromSeconds(5)))
+        {
             throw new TimeoutException($"Timed out waiting for {deviceName} to disconnect.");
+        }
     }
 
     public void Reconnect(string deviceName)
     {
         EnsureWindows();
-
-        // First choice is the exact mode captured before disconnect, matching ALPHA.
-        // The registry path remains only as a recovery fallback for a pre-existing
-        // disconnected display where VMU has no saved snapshot.
-        var mode = TryLoadModeSnapshot(deviceName, out var saved)
-            ? saved
-            : ReadMode(deviceName, EnumRegistrySettings);
-
-        if (mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0)
+        if (IsAttached(deviceName))
         {
-            mode.dmPelsWidth = 1920;
-            mode.dmPelsHeight = 1080;
-            mode.dmDisplayFrequency = 60;
+            throw new InvalidOperationException($"{deviceName} is already connected.");
+        }
+
+        DevMode mode;
+        var hasSnapshot = TryLoadModeSnapshot(deviceName, out var saved);
+        if (hasSnapshot)
+        {
+            mode = saved;
+            if (mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0)
+            {
+                throw new InvalidDataException($"Saved ALPHA mode for {deviceName} is 0x0 and cannot be used for reconnect.");
+            }
+        }
+        else
+        {
+            // ALPHA fallback for a pre-existing disconnected display.
+            mode = ReadMode(deviceName, EnumRegistrySettings);
+            if (mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0)
+            {
+                mode.dmPelsWidth = 1920;
+                mode.dmPelsHeight = 1080;
+                mode.dmDisplayFrequency = 60;
+            }
         }
 
         mode.dmFields = DmPosition | DmPelsWidth | DmPelsHeight | DmDisplayFrequency;
         Apply(deviceName, ref mode, "reconnect");
+
         if (!WaitUntil(() => IsAttached(deviceName), TimeSpan.FromSeconds(5)))
+        {
             throw new TimeoutException($"Timed out waiting for {deviceName} to reconnect.");
+        }
 
         DeleteModeSnapshot(deviceName);
     }
@@ -137,6 +168,18 @@ public sealed class WindowsDisplayModeService
         return GetActiveScreenNames().Contains(deviceName);
     }
 
+    private static bool IsAlphaVirtualIdentity(string? deviceString)
+    {
+        if (string.IsNullOrWhiteSpace(deviceString))
+        {
+            return false;
+        }
+
+        return deviceString.Contains("Virtual", StringComparison.OrdinalIgnoreCase) ||
+               deviceString.Contains("MTT", StringComparison.OrdinalIgnoreCase) ||
+               deviceString.Contains("VDD", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static HashSet<string> GetActiveScreenNames()
     {
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -144,12 +187,17 @@ public sealed class WindowsDisplayModeService
         {
             var info = new MonitorInfoEx { cbSize = Marshal.SizeOf<MonitorInfoEx>() };
             if (GetMonitorInfo(monitor, ref info) && !string.IsNullOrWhiteSpace(info.szDevice))
+            {
                 names.Add(info.szDevice);
+            }
             return true;
         });
 
         if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero))
+        {
             throw new InvalidOperationException("Windows active display enumeration failed.");
+        }
+
         GC.KeepAlive(callback);
         return names;
     }
@@ -161,14 +209,19 @@ public sealed class WindowsDisplayModeService
             var mode = ReadMode(deviceName, EnumCurrentSettings);
             return mode.dmPelsWidth == width && mode.dmPelsHeight == height;
         }
-        catch { return false; }
+        catch
+        {
+            return false;
+        }
     }
 
     private static DevMode ReadMode(string deviceName, int modeIndex)
     {
         var mode = new DevMode { dmSize = checked((ushort)Marshal.SizeOf<DevMode>()) };
         if (!EnumDisplaySettings(deviceName, modeIndex, ref mode))
+        {
             throw new InvalidOperationException($"Cannot read display mode for {deviceName}.");
+        }
         return mode;
     }
 
@@ -176,15 +229,16 @@ public sealed class WindowsDisplayModeService
     {
         var result = ChangeDisplaySettingsEx(deviceName, ref mode, IntPtr.Zero, CdsUpdateRegistry, IntPtr.Zero);
         if (result != DispChangeSuccessful)
+        {
             throw new InvalidOperationException($"Windows rejected {description} on {deviceName} (result {result}).");
+        }
     }
 
     private static void SaveModeSnapshot(string deviceName, DevMode mode)
     {
         var path = GetModeSnapshotPath(deviceName);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var bytes = StructureToBytes(mode);
-        File.WriteAllBytes(path, bytes);
+        File.WriteAllBytes(path, StructureToBytes(mode));
     }
 
     private static bool TryLoadModeSnapshot(string deviceName, out DevMode mode)
@@ -212,15 +266,18 @@ public sealed class WindowsDisplayModeService
         var path = GetModeSnapshotPath(deviceName);
         try
         {
-            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
         }
         catch (IOException)
         {
-            // A stale snapshot is safer than hiding a successful reconnect.
+            // Do not hide an otherwise successful reconnect.
         }
         catch (UnauthorizedAccessException)
         {
-            // A stale snapshot is safer than hiding a successful reconnect.
+            // Do not hide an otherwise successful reconnect.
         }
     }
 
@@ -266,23 +323,34 @@ public sealed class WindowsDisplayModeService
     }
 
     private static DisplayModeInfo ToInfo(DevMode mode) => new(
-        mode.dmPositionX, mode.dmPositionY, mode.dmPelsWidth, mode.dmPelsHeight, mode.dmDisplayFrequency);
+        mode.dmPositionX,
+        mode.dmPositionY,
+        mode.dmPelsWidth,
+        mode.dmPelsHeight,
+        mode.dmDisplayFrequency);
 
     private static bool WaitUntil(Func<bool> condition, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
         do
         {
-            if (condition()) return true;
+            if (condition())
+            {
+                return true;
+            }
             Thread.Sleep(100);
-        } while (DateTime.UtcNow < deadline);
+        }
+        while (DateTime.UtcNow < deadline);
+
         return condition();
     }
 
     private static void EnsureWindows()
     {
         if (!OperatingSystem.IsWindows())
+        {
             throw new PlatformNotSupportedException("Display mode management is supported only on Windows.");
+        }
     }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
