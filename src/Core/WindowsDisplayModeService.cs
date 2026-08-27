@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace VirtualMonitorsUniverse.Core;
 
@@ -9,6 +11,10 @@ namespace VirtualMonitorsUniverse.Core;
 /// This class intentionally preserves the ALPHA Win32 contract: EnumDisplaySettings
 /// reads current/registry DEVMODE values and ChangeDisplaySettingsEx performs mode,
 /// disconnect, and reconnect operations with CDS_UPDATEREGISTRY.
+///
+/// ALPHA kept the pre-disconnect DEVMODE in process memory. VMU CLI commands run in
+/// separate processes, so the same DEVMODE is persisted briefly between disconnect
+/// and reconnect and removed after a successful reconnect.
 /// </remarks>
 public sealed class WindowsDisplayModeService
 {
@@ -20,11 +26,8 @@ public sealed class WindowsDisplayModeService
     private const uint DmDisplayFrequency = 0x00400000;
     private const uint CdsUpdateRegistry = 0x00000001;
     private const int DispChangeSuccessful = 0;
-    private const int DisplayDeviceAttachedToDesktop = 0x00000001;
     private const string VddFriendlyName = "Virtual Display Driver";
     private const string VddPnpPrefix = "ROOT\\MTTVDD";
-
-    private readonly Dictionary<string, DevMode> savedModes = new(StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<WindowsDisplayInfo> GetDisplays()
     {
@@ -87,15 +90,14 @@ public sealed class WindowsDisplayModeService
     {
         EnsureWindows();
         var current = ReadMode(deviceName, EnumCurrentSettings);
-        savedModes[deviceName] = current;
+
+        // ALPHA kept this exact DEVMODE in $SavedModes. Persist the same structure
+        // because the CLI disconnect and connect commands execute in separate processes.
+        SaveModeSnapshot(deviceName, current);
+
         var mode = current;
         mode.dmPelsWidth = 0;
         mode.dmPelsHeight = 0;
-
-        // Preserve the ALPHA disconnect that was actually validated before the
-        // later Screen-enumeration refactor: DM_POSITION is part of dmFields when
-        // submitting the 0x0 mode. Removing it changed Windows behavior on the
-        // development machine even though ChangeDisplaySettingsEx returned success.
         mode.dmFields = DmPosition | DmPelsWidth | DmPelsHeight;
 
         Apply(deviceName, ref mode, "disconnect");
@@ -106,22 +108,27 @@ public sealed class WindowsDisplayModeService
     public void Reconnect(string deviceName)
     {
         EnsureWindows();
-        DevMode mode;
-        if (!savedModes.TryGetValue(deviceName, out mode))
+
+        // First choice is the exact mode captured before disconnect, matching ALPHA.
+        // The registry path remains only as a recovery fallback for a pre-existing
+        // disconnected display where VMU has no saved snapshot.
+        var mode = TryLoadModeSnapshot(deviceName, out var saved)
+            ? saved
+            : ReadMode(deviceName, EnumRegistrySettings);
+
+        if (mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0)
         {
-            mode = ReadMode(deviceName, EnumRegistrySettings);
-            if (mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0)
-            {
-                mode.dmPelsWidth = 1920;
-                mode.dmPelsHeight = 1080;
-                mode.dmDisplayFrequency = 60;
-            }
+            mode.dmPelsWidth = 1920;
+            mode.dmPelsHeight = 1080;
+            mode.dmDisplayFrequency = 60;
         }
 
         mode.dmFields = DmPosition | DmPelsWidth | DmPelsHeight | DmDisplayFrequency;
         Apply(deviceName, ref mode, "reconnect");
         if (!WaitUntil(() => IsAttached(deviceName), TimeSpan.FromSeconds(5)))
             throw new TimeoutException($"Timed out waiting for {deviceName} to reconnect.");
+
+        DeleteModeSnapshot(deviceName);
     }
 
     public bool IsAttached(string deviceName)
@@ -170,6 +177,92 @@ public sealed class WindowsDisplayModeService
         var result = ChangeDisplaySettingsEx(deviceName, ref mode, IntPtr.Zero, CdsUpdateRegistry, IntPtr.Zero);
         if (result != DispChangeSuccessful)
             throw new InvalidOperationException($"Windows rejected {description} on {deviceName} (result {result}).");
+    }
+
+    private static void SaveModeSnapshot(string deviceName, DevMode mode)
+    {
+        var path = GetModeSnapshotPath(deviceName);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var bytes = StructureToBytes(mode);
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static bool TryLoadModeSnapshot(string deviceName, out DevMode mode)
+    {
+        var path = GetModeSnapshotPath(deviceName);
+        if (!File.Exists(path))
+        {
+            mode = default;
+            return false;
+        }
+
+        var bytes = File.ReadAllBytes(path);
+        var expectedSize = Marshal.SizeOf<DevMode>();
+        if (bytes.Length != expectedSize)
+        {
+            throw new InvalidDataException($"Saved display mode for {deviceName} has an invalid size.");
+        }
+
+        mode = BytesToStructure<DevMode>(bytes);
+        return true;
+    }
+
+    private static void DeleteModeSnapshot(string deviceName)
+    {
+        var path = GetModeSnapshotPath(deviceName);
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (IOException)
+        {
+            // A stale snapshot is safer than hiding a successful reconnect.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // A stale snapshot is safer than hiding a successful reconnect.
+        }
+    }
+
+    private static string GetModeSnapshotPath(string deviceName)
+    {
+        var root = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "VirtualMonitorsUniverse",
+            "state");
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(deviceName)));
+        return Path.Combine(root, $"display-mode-{hash}.bin");
+    }
+
+    private static byte[] StructureToBytes<T>(T value) where T : struct
+    {
+        var size = Marshal.SizeOf<T>();
+        var pointer = Marshal.AllocHGlobal(size);
+        try
+        {
+            Marshal.StructureToPtr(value, pointer, false);
+            var bytes = new byte[size];
+            Marshal.Copy(pointer, bytes, 0, size);
+            return bytes;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
+    private static T BytesToStructure<T>(byte[] bytes) where T : struct
+    {
+        var pointer = Marshal.AllocHGlobal(bytes.Length);
+        try
+        {
+            Marshal.Copy(bytes, 0, pointer, bytes.Length);
+            return Marshal.PtrToStructure<T>(pointer);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
     }
 
     private static DisplayModeInfo ToInfo(DevMode mode) => new(
