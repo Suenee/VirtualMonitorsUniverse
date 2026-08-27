@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 
 namespace VirtualMonitorsUniverse.Core;
@@ -8,36 +9,33 @@ namespace VirtualMonitorsUniverse.Core;
 /// <remarks>
 /// The validated ALPHA implementation used QueryDisplayConfig/SetDisplayConfig to
 /// deactivate exactly one display path, preserved the complete PATH[] + MODE[]
-/// topology, then restored that same topology for reconnect. VMU CLI commands run
-/// in separate processes, so the saved topology is persisted between commands.
+/// topology, then restored that same topology for reconnect. Its reflow helper also
+/// applied source position and size through DisplayConfig rather than allowing Windows
+/// to silently normalize monitor geometry. VMU CLI commands run in separate processes,
+/// so the saved topology is persisted between commands.
 /// </remarks>
 public sealed class WindowsDisplayConfigTopologyService
 {
     private const uint QdcAllPaths = 1;
     private const uint QdcOnlyActivePaths = 2;
     private const uint DisplayConfigPathActive = 1;
+    private const uint DisplayConfigModeInfoTypeSource = 1;
     private const uint DisplayConfigDeviceInfoGetSourceName = 1;
     private const uint SdcUseSuppliedDisplayConfig = 0x20;
+    private const uint SdcValidate = 0x40;
     private const uint SdcApply = 0x80;
     private const uint SdcSaveToDatabase = 0x200;
     private const uint SdcAllowChanges = 0x400;
-    private const uint SetFlags = SdcUseSuppliedDisplayConfig | SdcApply | SdcSaveToDatabase | SdcAllowChanges;
+    private const uint LifecycleSetFlags = SdcUseSuppliedDisplayConfig | SdcApply | SdcSaveToDatabase | SdcAllowChanges;
+    private const uint GeometryValidateFlags = SdcUseSuppliedDisplayConfig | SdcValidate;
+    private const uint GeometryApplyFlags = SdcUseSuppliedDisplayConfig | SdcApply | SdcSaveToDatabase;
 
     public void DisconnectExact(string deviceName)
     {
         EnsureWindows();
         Query(QdcOnlyActivePaths, out var paths, out var modes);
 
-        var matchingIndexes = new List<int>();
-        for (var i = 0; i < paths.Length; i++)
-        {
-            var sourceName = GetSourceName(paths[i]);
-            if (string.Equals(sourceName, deviceName, StringComparison.OrdinalIgnoreCase))
-            {
-                matchingIndexes.Add(i);
-            }
-        }
-
+        var matchingIndexes = FindSourcePathIndexes(paths, deviceName);
         if (matchingIndexes.Count != 1)
         {
             throw new InvalidOperationException(
@@ -46,6 +44,7 @@ public sealed class WindowsDisplayConfigTopologyService
 
         var restorePaths = ClonePaths(paths);
         var restoreModes = CloneModes(modes);
+        var expectedLayout = CaptureSourceLayout(restorePaths, restoreModes);
         SaveTopology(deviceName, restorePaths, restoreModes);
 
         paths[matchingIndexes[0]].flags &= ~DisplayConfigPathActive;
@@ -54,7 +53,7 @@ public sealed class WindowsDisplayConfigTopologyService
             paths,
             checked((uint)modes.Length),
             modes,
-            SetFlags);
+            LifecycleSetFlags);
         if (result != 0)
         {
             throw new InvalidOperationException($"SetDisplayConfig disconnect failed with result {result}.");
@@ -64,18 +63,29 @@ public sealed class WindowsDisplayConfigTopologyService
         {
             throw new TimeoutException($"Timed out waiting for {deviceName} CCD path to become inactive.");
         }
+
+        // Windows may normalize the remaining desktop after a path disappears.
+        // The final ALPHA reflow code explicitly reapplied source coordinates and
+        // dimensions through SetDisplayConfig. Do the same here, excluding the
+        // disconnected source because it is no longer part of the active topology.
+        var remainingLayout = expectedLayout
+            .Where(item => !string.Equals(item.DeviceName, deviceName, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        EnsureSourceGeometry(remainingLayout, "disconnect");
     }
 
     public void ReconnectSaved(string deviceName)
     {
         EnsureWindows();
         var snapshot = LoadTopology(deviceName);
+        var expectedLayout = CaptureSourceLayout(snapshot.Paths, snapshot.Modes);
+
         var result = SetDisplayConfig(
             checked((uint)snapshot.Paths.Length),
             snapshot.Paths,
             checked((uint)snapshot.Modes.Length),
             snapshot.Modes,
-            SetFlags);
+            LifecycleSetFlags);
         if (result != 0)
         {
             throw new InvalidOperationException($"SetDisplayConfig reconnect failed with result {result}.");
@@ -86,6 +96,10 @@ public sealed class WindowsDisplayConfigTopologyService
             throw new TimeoutException($"Timed out waiting for {deviceName} CCD path to become active.");
         }
 
+        // Reassert the exact source geometry captured before disconnect. This is the
+        // same primitive used by the final ALPHA anchor-aware reflow implementation:
+        // validate first, then apply and save the supplied DisplayConfig source modes.
+        EnsureSourceGeometry(expectedLayout, "reconnect");
         DeleteTopology(deviceName);
     }
 
@@ -111,6 +125,202 @@ public sealed class WindowsDisplayConfigTopologyService
 
         return activeMatches == 1;
     }
+
+    private static void EnsureSourceGeometry(SourceLayout[] expectedLayout, string operation)
+    {
+        if (expectedLayout.Length == 0)
+        {
+            return;
+        }
+
+        if (SourceGeometryMatches(expectedLayout))
+        {
+            return;
+        }
+
+        ApplySourceGeometry(expectedLayout);
+
+        if (!WaitUntil(() => SourceGeometryMatches(expectedLayout), TimeSpan.FromSeconds(3)))
+        {
+            var differences = DescribeGeometryDifferences(expectedLayout);
+            throw new InvalidOperationException(
+                $"Windows changed monitor geometry during {operation} and VMU could not restore the final-ALPHA layout: {differences}");
+        }
+    }
+
+    private static bool SourceGeometryMatches(SourceLayout[] expectedLayout)
+    {
+        var current = CaptureCurrentSourceLayout();
+        var currentByKey = current.ToDictionary(item => item.SourceKey, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var expected in expectedLayout)
+        {
+            if (!currentByKey.TryGetValue(expected.SourceKey, out var actual) ||
+                actual.X != expected.X ||
+                actual.Y != expected.Y ||
+                actual.Width != expected.Width ||
+                actual.Height != expected.Height)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string DescribeGeometryDifferences(SourceLayout[] expectedLayout)
+    {
+        var current = CaptureCurrentSourceLayout();
+        var currentByKey = current.ToDictionary(item => item.SourceKey, StringComparer.OrdinalIgnoreCase);
+        var differences = new List<string>();
+
+        foreach (var expected in expectedLayout)
+        {
+            if (!currentByKey.TryGetValue(expected.SourceKey, out var actual))
+            {
+                differences.Add($"{expected.DeviceName} missing");
+                continue;
+            }
+
+            if (actual.X != expected.X || actual.Y != expected.Y ||
+                actual.Width != expected.Width || actual.Height != expected.Height)
+            {
+                differences.Add(
+                    $"{expected.DeviceName} expected ({expected.X},{expected.Y}) {expected.Width}x{expected.Height}, " +
+                    $"actual ({actual.X},{actual.Y}) {actual.Width}x{actual.Height}");
+            }
+        }
+
+        return differences.Count == 0 ? "unknown mismatch" : string.Join("; ", differences);
+    }
+
+    private static void ApplySourceGeometry(SourceLayout[] expectedLayout)
+    {
+        Query(QdcOnlyActivePaths, out var paths, out var modes);
+        var expectedByKey = expectedLayout.ToDictionary(item => item.SourceKey, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var path in paths)
+        {
+            var sourceKey = GetSourceKey(path.sourceInfo.adapterId, path.sourceInfo.id);
+            if (!expectedByKey.TryGetValue(sourceKey, out var expected))
+            {
+                continue;
+            }
+
+            var modeIndex = path.sourceInfo.modeInfoIdx;
+            if (modeIndex >= modes.Length || modes[modeIndex].infoType != DisplayConfigModeInfoTypeSource)
+            {
+                throw new InvalidOperationException($"Active CCD source {sourceKey} has no source mode.");
+            }
+
+            SetSourceModeGeometry(ref modes[modeIndex], expected);
+        }
+
+        var validateResult = SetDisplayConfig(
+            checked((uint)paths.Length),
+            paths,
+            checked((uint)modes.Length),
+            modes,
+            GeometryValidateFlags);
+        if (validateResult != 0)
+        {
+            throw new InvalidOperationException($"SetDisplayConfig geometry validation failed with result {validateResult}.");
+        }
+
+        var applyResult = SetDisplayConfig(
+            checked((uint)paths.Length),
+            paths,
+            checked((uint)modes.Length),
+            modes,
+            GeometryApplyFlags);
+        if (applyResult != 0)
+        {
+            throw new InvalidOperationException($"SetDisplayConfig geometry restore failed with result {applyResult}.");
+        }
+    }
+
+    private static SourceLayout[] CaptureCurrentSourceLayout()
+    {
+        Query(QdcOnlyActivePaths, out var paths, out var modes);
+        return CaptureSourceLayout(paths, modes);
+    }
+
+    private static SourceLayout[] CaptureSourceLayout(
+        DisplayConfigPathInfo[] paths,
+        DisplayConfigModeInfo[] modes)
+    {
+        var result = new List<SourceLayout>();
+        foreach (var path in paths)
+        {
+            if ((path.flags & DisplayConfigPathActive) == 0)
+            {
+                continue;
+            }
+
+            var modeIndex = path.sourceInfo.modeInfoIdx;
+            if (modeIndex >= modes.Length || modes[modeIndex].infoType != DisplayConfigModeInfoTypeSource)
+            {
+                continue;
+            }
+
+            var geometry = ReadSourceModeGeometry(modes[modeIndex]);
+            result.Add(new SourceLayout(
+                GetSourceKey(path.sourceInfo.adapterId, path.sourceInfo.id),
+                GetSourceName(path),
+                geometry.X,
+                geometry.Y,
+                geometry.Width,
+                geometry.Height));
+        }
+
+        return result.ToArray();
+    }
+
+    private static SourceGeometry ReadSourceModeGeometry(DisplayConfigModeInfo mode)
+    {
+        var data = mode.data ?? throw new InvalidOperationException("CCD source mode payload is missing.");
+        if (data.Length < 20)
+        {
+            throw new InvalidOperationException("CCD source mode payload is too small.");
+        }
+
+        return new SourceGeometry(
+            BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(12, 4)),
+            BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(16, 4)),
+            BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(0, 4)),
+            BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(4, 4)));
+    }
+
+    private static void SetSourceModeGeometry(ref DisplayConfigModeInfo mode, SourceLayout expected)
+    {
+        mode.data ??= new byte[64];
+        if (mode.data.Length < 20)
+        {
+            throw new InvalidOperationException("CCD source mode payload is too small.");
+        }
+
+        BinaryPrimitives.WriteUInt32LittleEndian(mode.data.AsSpan(0, 4), expected.Width);
+        BinaryPrimitives.WriteUInt32LittleEndian(mode.data.AsSpan(4, 4), expected.Height);
+        BinaryPrimitives.WriteInt32LittleEndian(mode.data.AsSpan(12, 4), expected.X);
+        BinaryPrimitives.WriteInt32LittleEndian(mode.data.AsSpan(16, 4), expected.Y);
+    }
+
+    private static List<int> FindSourcePathIndexes(DisplayConfigPathInfo[] paths, string deviceName)
+    {
+        var matchingIndexes = new List<int>();
+        for (var i = 0; i < paths.Length; i++)
+        {
+            if (string.Equals(GetSourceName(paths[i]), deviceName, StringComparison.OrdinalIgnoreCase))
+            {
+                matchingIndexes.Add(i);
+            }
+        }
+
+        return matchingIndexes;
+    }
+
+    private static string GetSourceKey(Luid adapterId, uint sourceId) =>
+        $"{adapterId.HighPart:X8}:{adapterId.LowPart:X8}/{sourceId}";
 
     private static void Query(uint flags, out DisplayConfigPathInfo[] paths, out DisplayConfigModeInfo[] modes)
     {
@@ -193,7 +403,7 @@ public sealed class WindowsDisplayConfigTopologyService
         if (!File.Exists(path))
         {
             throw new InvalidOperationException(
-                $"No saved ALPHA CCD topology exists for {deviceName}. Activate the virtual monitor once, then run disconnect before connect.");
+                $"No saved final-ALPHA CCD topology exists for {deviceName}. Activate this virtual monitor once in Windows, then run disconnect before connect.");
         }
 
         using var stream = File.OpenRead(path);
@@ -331,6 +541,8 @@ public sealed class WindowsDisplayConfigTopologyService
     }
 
     private sealed record SavedTopology(DisplayConfigPathInfo[] Paths, DisplayConfigModeInfo[] Modes);
+    private sealed record SourceLayout(string SourceKey, string DeviceName, int X, int Y, uint Width, uint Height);
+    private readonly record struct SourceGeometry(int X, int Y, uint Width, uint Height);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Luid
