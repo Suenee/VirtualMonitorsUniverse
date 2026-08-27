@@ -16,7 +16,7 @@ public sealed class WindowsDisplayConfigTopologyService
     private const uint QdcAllPaths = 1;
     private const uint QdcOnlyActivePaths = 2;
     private const uint DisplayConfigPathActive = 1;
-    private const uint GetSourceName = 1;
+    private const uint DisplayConfigDeviceInfoGetSourceName = 1;
     private const uint SdcUseSuppliedDisplayConfig = 0x20;
     private const uint SdcApply = 0x80;
     private const uint SdcSaveToDatabase = 0x200;
@@ -138,7 +138,7 @@ public sealed class WindowsDisplayConfigTopologyService
         {
             header = new DisplayConfigDeviceInfoHeader
             {
-                type = GetSourceName,
+                type = DisplayConfigDeviceInfoGetSourceName,
                 size = checked((uint)Marshal.SizeOf<DisplayConfigSourceDeviceName>()),
                 adapterId = path.sourceInfo.adapterId,
                 id = path.sourceInfo.id
