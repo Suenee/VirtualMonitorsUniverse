@@ -47,25 +47,73 @@ internal static class MonitorCli
 
     private static int Connect(string[] args)
     {
-        if (args.Length != 1) return Fail("Usage: vmu monitor connect <id>");
-
-        return RunOnVirtualDisplay(args[0], "CONNECT", service =>
+        if (args.Length != 1)
         {
-            var display = ResolveDisplay(service, args[0]);
-            if (display.IsAttached)
-                throw new InvalidOperationException($"{display.DeviceName} is already connected.");
+            return Fail("Usage: vmu monitor connect <id>");
+        }
 
-            // Use the original ALPHA acceptance-test reconnect literally:
-            // ENUM_REGISTRY_SETTINGS -> 1920x1080@60 fallback for 0x0 ->
-            // DM_POSITION|WIDTH|HEIGHT|FREQUENCY -> CDS_UPDATEREGISTRY.
-            new WindowsAlphaReconnectService().Reconnect(display.DeviceName);
-        });
+        try
+        {
+            var displayService = new WindowsDisplayModeService();
+            var display = ResolveDisplay(displayService, args[0]);
+            EnsureVirtual(display);
+            if (display.IsAttached)
+            {
+                throw new InvalidOperationException($"{display.DeviceName} is already connected.");
+            }
+
+            var topology = new WindowsDisplayConfigTopologyService();
+            if (!topology.HasSavedTopology(display.DeviceName))
+            {
+                throw new InvalidOperationException(
+                    $"No saved final-ALPHA CCD topology exists for {display.DeviceName}. " +
+                    "Activate this virtual monitor once in Windows, then run disconnect before connect.");
+            }
+
+            Console.WriteLine($"MONITOR CONNECT ........ RUN - {display.DeviceName} [final ALPHA CCD]");
+            topology.ReconnectSaved(display.DeviceName);
+            var after = ResolveDisplay(displayService, args[0]);
+            var mode = after.Mode is null
+                ? string.Empty
+                : $" {after.Mode.Width}x{after.Mode.Height}@{after.Mode.RefreshRate}";
+            Console.WriteLine($"MONITOR CONNECT ........ PASS - ACTIVE{mode}");
+            Console.WriteLine("STATUS: OK");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            return Fail(ex.Message);
+        }
     }
 
     private static int Disconnect(string[] args)
     {
-        if (args.Length != 1) return Fail("Usage: vmu monitor disconnect <id>");
-        return RunOnVirtualDisplay(args[0], "DISCONNECT", service => service.Disconnect(ResolveDisplay(service, args[0]).DeviceName));
+        if (args.Length != 1)
+        {
+            return Fail("Usage: vmu monitor disconnect <id>");
+        }
+
+        try
+        {
+            var displayService = new WindowsDisplayModeService();
+            var display = ResolveDisplay(displayService, args[0]);
+            EnsureVirtual(display);
+            if (!display.IsAttached)
+            {
+                throw new InvalidOperationException($"{display.DeviceName} is already disconnected.");
+            }
+
+            Console.WriteLine($"MONITOR DISCONNECT ..... RUN - {display.DeviceName} [final ALPHA CCD]");
+            new WindowsDisplayConfigTopologyService().DisconnectExact(display.DeviceName);
+            var after = ResolveDisplay(displayService, args[0]);
+            Console.WriteLine($"MONITOR DISCONNECT ..... PASS - {(after.IsAttached ? "ACTIVE" : "INACTIVE")}");
+            Console.WriteLine("STATUS: OK");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            return Fail(ex.Message);
+        }
     }
 
     private static int SetMode(string[] args)
@@ -82,7 +130,10 @@ internal static class MonitorCli
         {
             var display = ResolveDisplay(service, args[0]);
             if (!display.IsAttached)
+            {
                 throw new InvalidOperationException($"{display.DeviceName} is inactive. Connect it before changing its mode.");
+            }
+
             service.SetMode(display.DeviceName, width, height, refreshRate);
         });
     }
@@ -93,8 +144,7 @@ internal static class MonitorCli
         {
             var service = new WindowsDisplayModeService();
             var display = ResolveDisplay(service, id);
-            if (!display.IsVirtual)
-                throw new InvalidOperationException($"Refusing to modify physical display {display.DeviceName}.");
+            EnsureVirtual(display);
 
             Console.WriteLine($"MONITOR {operation} ........ RUN - {display.DeviceName}");
             action(service);
@@ -108,6 +158,14 @@ internal static class MonitorCli
         catch (Exception ex)
         {
             return Fail(ex.Message);
+        }
+    }
+
+    private static void EnsureVirtual(WindowsDisplayInfo display)
+    {
+        if (!display.IsVirtual)
+        {
+            throw new InvalidOperationException($"Refusing to modify physical display {display.DeviceName}.");
         }
     }
 
