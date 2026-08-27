@@ -10,7 +10,7 @@ $DriverSha256 = 'e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3
 $NefConVersion = '1.14.0'
 $NefConUrl = 'https://github.com/nefarius/nefcon/releases/download/v1.14.0/nefcon_v1.14.0.zip'
 $NefConSha256 = 'a15557da24a9efca203158de3b43b0eaf982db231f0194031f1ed428bc13e669'
-$VddPnpPrefix = 'ROOT\MTTVDD'
+$VddFriendlyName = 'Virtual Display Driver'
 $PipeName = 'MTTVirtualDisplayPipe'
 
 function Test-IsAdministrator {
@@ -20,12 +20,13 @@ function Test-IsAdministrator {
 }
 
 function Get-VddDevices {
+    # Keep post-install discovery equivalent to the ALPHA test that was
+    # validated on the development machine. Root\MttVDD is the hardware ID
+    # supplied to NefCon; the installed display device is discovered through
+    # the Display class and its official friendly name.
     return @(
-        Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.PNPDeviceID -and
-                $_.PNPDeviceID.ToUpperInvariant().StartsWith($VddPnpPrefix)
-            }
+        Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
+            Where-Object { $_.FriendlyName -eq $VddFriendlyName }
     )
 }
 
@@ -81,12 +82,12 @@ if (-not (Test-IsAdministrator)) { throw 'Virtual Display Driver installation re
 
 $existing = @(Get-VddDevices)
 if ($existing.Count -gt 0) {
-    Write-Host "VDD INSTALL: ALPHA identity already present: $($existing[0].PNPDeviceID)"
+    Write-Host "VDD INSTALL: ALPHA device already present: $($existing[0].InstanceId) [$($existing[0].Status)]"
     if (Test-VddPipe) {
         Write-Host 'VDD INSTALL: runtime pipe already available.'
         exit 0
     }
-    throw 'ROOT\MTTVDD device already exists but MTTVirtualDisplayPipe is unavailable. Refusing to mutate an unknown unhealthy state; use a dedicated repair procedure.'
+    throw 'Virtual Display Driver device already exists but MTTVirtualDisplayPipe is unavailable. Refusing to mutate an unknown unhealthy state; use a dedicated repair procedure.'
 }
 
 $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('VMU-VDD-' + [Guid]::NewGuid().ToString('N'))
@@ -125,21 +126,29 @@ try {
         Import-Certificate -FilePath $certPath -CertStoreLocation 'Cert:\LocalMachine\TrustedPublisher' | Out-Null
     }
 
-    Write-Host 'VDD INSTALL: creating exactly one root-enumerated ROOT\MTTVDD device...'
-    # Keep this invocation byte-for-byte equivalent in semantics to the validated ALPHA path:
-    # Start-Process, explicit quoted INF argument, wait, exit-code validation, no extra console window.
+    Write-Host 'VDD INSTALL: creating exactly one root-enumerated Root\MttVDD device...'
+    # This is intentionally equivalent to the validated ALPHA invocation.
     Invoke-NativeProcess -FilePath $nefconExe -Arguments @('install', ('"{0}"' -f $infPath), 'Root\MttVDD') | Out-Null
 
-    if (-not (Wait-Until -Description 'ROOT\MTTVDD device detected' -Condition { @(Get-VddDevices).Count -eq 1 })) {
-        throw "Expected exactly one ROOT\MTTVDD device after installation, found $(@(Get-VddDevices).Count)."
-    }
-    if (-not (Wait-Until -Description 'MTTVirtualDisplayPipe available' -Condition { Test-VddPipe })) {
-        throw 'ROOT\MTTVDD was installed, but MTTVirtualDisplayPipe did not become available.'
+    if (-not (Wait-Until -Description 'one Virtual Display Driver device detected' -Condition { @(Get-VddDevices).Count -eq 1 })) {
+        throw "Expected exactly one Virtual Display Driver device after NefCon exit code 0, found $(@(Get-VddDevices).Count)."
     }
 
     $installed = @(Get-VddDevices)
-    Write-Host "VDD INSTALL: PASS - $($installed[0].PNPDeviceID)"
+    Write-Host "VDD INSTALL: device detected: $($installed[0].InstanceId) [$($installed[0].Status)]"
+
+    if (-not (Wait-Until -Description 'MTTVirtualDisplayPipe available' -Condition { Test-VddPipe })) {
+        throw 'Virtual Display Driver was detected after installation, but MTTVirtualDisplayPipe did not become available.'
+    }
+
+    Write-Host "VDD INSTALL: PASS - $($installed[0].InstanceId)"
     exit 0
+}
+catch {
+    # Emit one stable, non-wrapped diagnostic marker. The C# CLI can use this
+    # instead of mistaking a wrapped command/path fragment for the error cause.
+    Write-Host ("VDD INSTALL ERROR: {0}" -f $_.Exception.Message)
+    exit 1
 }
 finally {
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
