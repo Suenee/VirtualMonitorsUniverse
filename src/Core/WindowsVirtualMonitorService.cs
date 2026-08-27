@@ -36,7 +36,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
                 (!string.IsNullOrWhiteSpace(path.GdiName) && adapterByGdiName.ContainsKey(path.GdiName)))
             .Select(path =>
             {
-                VddAdapter? adapter = null;
+                DisplayAdapterApi.VddAdapter? adapter = null;
                 if (!string.IsNullOrWhiteSpace(path.GdiName))
                 {
                     adapterByGdiName.TryGetValue(path.GdiName, out adapter);
