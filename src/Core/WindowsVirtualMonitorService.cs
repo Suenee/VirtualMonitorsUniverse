@@ -17,31 +17,35 @@ namespace VirtualMonitorsUniverse.Core;
 public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
 {
     private const string PipeName = "MTTVirtualDisplayPipe";
+    private const string VddMonitorFriendlyName = "VDD by MTT";
     private static readonly TimeSpan DefaultPipeTimeout = TimeSpan.FromSeconds(5);
 
     public IReadOnlyList<VirtualMonitorInfo> GetMonitors()
     {
         EnsureWindows();
 
+        var activePaths = DisplayConfigApi.GetActivePaths();
         var vddAdapters = DisplayAdapterApi.GetVddAdapters(onlyActive: true);
-        if (vddAdapters.Count == 0)
-        {
-            return Array.Empty<VirtualMonitorInfo>();
-        }
-
         var adapterByGdiName = vddAdapters
             .Where(adapter => !string.IsNullOrWhiteSpace(adapter.GdiName))
             .ToDictionary(adapter => adapter.GdiName, StringComparer.OrdinalIgnoreCase);
 
-        return DisplayConfigApi.GetActivePaths()
-            .Where(path => path.GdiName is not null && adapterByGdiName.ContainsKey(path.GdiName))
+        return activePaths
+            .Where(path =>
+                string.Equals(path.TargetFriendlyName, VddMonitorFriendlyName, StringComparison.OrdinalIgnoreCase) ||
+                (!string.IsNullOrWhiteSpace(path.GdiName) && adapterByGdiName.ContainsKey(path.GdiName)))
             .Select(path =>
             {
-                var adapter = adapterByGdiName[path.GdiName!];
+                VddAdapter? adapter = null;
+                if (!string.IsNullOrWhiteSpace(path.GdiName))
+                {
+                    adapterByGdiName.TryGetValue(path.GdiName, out adapter);
+                }
+
                 return new VirtualMonitorInfo(
                     path.SourceKey,
                     path.GdiName,
-                    adapter.PnpInstanceId,
+                    adapter?.PnpInstanceId ?? path.MonitorDevicePath,
                     true,
                     path.Width,
                     path.Height,
@@ -265,6 +269,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
     {
         private const uint QdcOnlyActivePaths = 0x00000002;
         private const uint GetSourceName = 1;
+        private const uint GetTargetName = 2;
         private const uint ModeInfoTypeSource = 1;
 
         public static IReadOnlyList<DisplayPath> GetActivePaths()
@@ -299,6 +304,7 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
             {
                 var path = paths[index];
                 var sourceName = ReadSourceName(path.sourceInfo.adapterId, path.sourceInfo.id);
+                var targetName = ReadTargetName(path.targetInfo.adapterId, path.targetInfo.id);
                 var sourceMode = TryReadSourceMode(path, modes, modeCount);
                 if (sourceMode is null)
                 {
@@ -308,6 +314,8 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
                 snapshots.Add(new DisplayPath(
                     $"{FormatLuid(path.sourceInfo.adapterId)}/{path.sourceInfo.id}",
                     sourceName,
+                    targetName?.FriendlyName,
+                    targetName?.MonitorDevicePath,
                     sourceMode.Value.position.x,
                     sourceMode.Value.position.y,
                     checked((int)sourceMode.Value.width),
@@ -341,9 +349,30 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
                 }
             };
 
-            return DisplayConfigGetDeviceInfo(ref packet) == 0
+            return DisplayConfigGetSourceDeviceInfo(ref packet) == 0
                 ? packet.viewGdiDeviceName
                 : null;
+        }
+
+        private static TargetIdentity? ReadTargetName(Luid adapterId, uint id)
+        {
+            var packet = new DisplayConfigTargetDeviceName
+            {
+                header = new DisplayConfigDeviceInfoHeader
+                {
+                    type = GetTargetName,
+                    size = (uint)Marshal.SizeOf<DisplayConfigTargetDeviceName>(),
+                    adapterId = adapterId,
+                    id = id
+                }
+            };
+
+            if (DisplayConfigGetTargetDeviceInfo(ref packet) != 0)
+            {
+                return null;
+            }
+
+            return new TargetIdentity(packet.monitorFriendlyDeviceName, packet.monitorDevicePath);
         }
 
         private static string FormatLuid(Luid value) =>
@@ -364,9 +393,13 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
             [Out] DisplayConfigModeInfo[] modeInfoArray,
             IntPtr currentTopologyId);
 
-        [DllImport("user32.dll")]
-        private static extern int DisplayConfigGetDeviceInfo(
+        [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
+        private static extern int DisplayConfigGetSourceDeviceInfo(
             ref DisplayConfigSourceDeviceName requestPacket);
+
+        [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
+        private static extern int DisplayConfigGetTargetDeviceInfo(
+            ref DisplayConfigTargetDeviceName requestPacket);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct Luid
@@ -467,9 +500,30 @@ public sealed class WindowsVirtualMonitorService : IVirtualMonitorService
             public string viewGdiDeviceName;
         }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct DisplayConfigTargetDeviceName
+        {
+            public DisplayConfigDeviceInfoHeader header;
+            public uint flags;
+            public uint outputTechnology;
+            public ushort edidManufactureId;
+            public ushort edidProductCodeId;
+            public uint connectorInstance;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+            public string monitorFriendlyDeviceName;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string monitorDevicePath;
+        }
+
+        private sealed record TargetIdentity(string? FriendlyName, string? MonitorDevicePath);
+
         public sealed record DisplayPath(
             string SourceKey,
             string? GdiName,
+            string? TargetFriendlyName,
+            string? MonitorDevicePath,
             int X,
             int Y,
             int Width,
