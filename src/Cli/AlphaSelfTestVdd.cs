@@ -5,13 +5,12 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
-using VirtualMonitorsUniverse.Core;
 
 namespace VirtualMonitorsUniverse.Cli;
 
 /// <summary>
-/// Creates the two clean-baseline VDD device nodes required by the final ALPHA
-/// multi-VDD acceptance scenario. This fixture is used only by <c>vmu selftest</c>.
+/// Creates and removes the two clean-baseline VDD device nodes required by the
+/// final ALPHA multi-VDD acceptance scenario. Used only by <c>vmu selftest</c>.
 /// </summary>
 internal static class AlphaSelfTestVdd
 {
@@ -51,9 +50,13 @@ internal static class AlphaSelfTestVdd
         }
     }
 
-    public static void InstallOne(PreparedPayload payload)
+    public static void InstallOne(PreparedPayload payload) =>
+        RunElevated(payload.NefConPath, $"install \"{payload.InfPath}\" Root\\MttVDD", "NefCon");
+
+    public static void RemoveOne(string instanceId)
     {
-        RunElevated(payload.NefConPath, $"install \"{payload.InfPath}\" Root\\MttVDD");
+        var pnputil = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "pnputil.exe");
+        RunElevated(pnputil, $"/remove-device \"{instanceId}\"", "pnputil");
     }
 
     private static void Download(string url, string destination)
@@ -81,13 +84,11 @@ internal static class AlphaSelfTestVdd
         using var store = new X509Store(StoreName.TrustedPublisher, StoreLocation.LocalMachine);
         store.Open(OpenFlags.ReadWrite);
         foreach (var certificate in signedCms.Certificates)
-        {
             if (store.Certificates.Find(X509FindType.FindByThumbprint, certificate.Thumbprint, false).Count == 0)
                 store.Add(certificate);
-        }
     }
 
-    private static void RunElevated(string fileName, string arguments)
+    private static void RunElevated(string fileName, string arguments, string label)
     {
         var info = new ProcessStartInfo
         {
@@ -101,7 +102,7 @@ internal static class AlphaSelfTestVdd
         {
             using var process = Process.Start(info) ?? throw new InvalidOperationException($"Could not start {fileName}.");
             process.WaitForExit();
-            if (process.ExitCode != 0) throw new InvalidOperationException($"NefCon failed with exit code {process.ExitCode}.");
+            if (process.ExitCode != 0) throw new InvalidOperationException($"{label} failed with exit code {process.ExitCode}.");
         }
         catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
         {
