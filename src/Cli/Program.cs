@@ -14,6 +14,7 @@ internal static class Program
             "version" or "--version" => ShowVersion(),
             "selftest" => RunCoreSelfTest(),
             "driver" => RunDriverCommand(args.Skip(1).ToArray()),
+            "monitor" => MonitorCli.Run(args.Skip(1).ToArray()),
             _ => UnknownCommand(command)
         };
     }
@@ -23,12 +24,16 @@ internal static class Program
         Console.WriteLine("Virtual Monitors Universe CLI");
         Console.WriteLine();
         Console.WriteLine("Commands:");
-        Console.WriteLine("  vmu help             Show this help");
-        Console.WriteLine("  vmu version          Show CLI version");
-        Console.WriteLine("  vmu selftest         Run automated VMU Core/VDD regression diagnostics");
-        Console.WriteLine("  vmu driver status    Show read-only VDD dependency diagnostics");
-        Console.WriteLine("  vmu driver install   Install the pinned ALPHA-validated VDD dependency");
-        Console.WriteLine("  vmu driver purge     Emergency: remove VDD device nodes and all virtual monitors");
+        Console.WriteLine("  vmu help                         Show this help");
+        Console.WriteLine("  vmu version                      Show CLI version");
+        Console.WriteLine("  vmu selftest                     Run automated VMU Core/VDD regression diagnostics");
+        Console.WriteLine("  vmu driver status                Show read-only VDD dependency diagnostics");
+        Console.WriteLine("  vmu driver install               Install the pinned ALPHA-validated VDD dependency");
+        Console.WriteLine("  vmu driver purge                 Emergency: remove VDD device nodes and all virtual monitors");
+        Console.WriteLine("  vmu monitor list                 List physical and virtual Windows displays");
+        Console.WriteLine("  vmu monitor connect <id>         Connect a virtual display to the desktop");
+        Console.WriteLine("  vmu monitor disconnect <id>      Disconnect a virtual display from the desktop");
+        Console.WriteLine("  vmu monitor mode <id> W H Hz     Change virtual display mode");
         return 0;
     }
 
