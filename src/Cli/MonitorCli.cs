@@ -48,7 +48,18 @@ internal static class MonitorCli
     private static int Connect(string[] args)
     {
         if (args.Length != 1) return Fail("Usage: vmu monitor connect <id>");
-        return RunOnVirtualDisplay(args[0], "CONNECT", service => service.Reconnect(ResolveDisplay(service, args[0]).DeviceName));
+
+        return RunOnVirtualDisplay(args[0], "CONNECT", service =>
+        {
+            var display = ResolveDisplay(service, args[0]);
+            if (display.IsAttached)
+                throw new InvalidOperationException($"{display.DeviceName} is already connected.");
+
+            // Use the original ALPHA acceptance-test reconnect literally:
+            // ENUM_REGISTRY_SETTINGS -> 1920x1080@60 fallback for 0x0 ->
+            // DM_POSITION|WIDTH|HEIGHT|FREQUENCY -> CDS_UPDATEREGISTRY.
+            new WindowsAlphaReconnectService().Reconnect(display.DeviceName);
+        });
     }
 
     private static int Disconnect(string[] args)
