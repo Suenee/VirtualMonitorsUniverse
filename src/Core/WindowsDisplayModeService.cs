@@ -20,8 +20,47 @@ public sealed class WindowsDisplayModeService
     private const uint DmDisplayFrequency = 0x00400000;
     private const uint CdsUpdateRegistry = 0x00000001;
     private const int DispChangeSuccessful = 0;
+    private const int DisplayDeviceAttachedToDesktop = 0x00000001;
+    private const string VddFriendlyName = "Virtual Display Driver";
+    private const string VddPnpPrefix = "ROOT\\MTTVDD";
 
     private readonly Dictionary<string, DevMode> savedModes = new(StringComparer.OrdinalIgnoreCase);
+
+    public IReadOnlyList<WindowsDisplayInfo> GetDisplays()
+    {
+        EnsureWindows();
+        var result = new List<WindowsDisplayInfo>();
+        for (uint index = 0; ; index++)
+        {
+            var device = new DisplayDevice { cb = Marshal.SizeOf<DisplayDevice>() };
+            if (!EnumDisplayDevices(null, index, ref device, 0)) break;
+
+            var attached = (device.StateFlags & DisplayDeviceAttachedToDesktop) != 0;
+            DisplayModeInfo? mode = null;
+            try
+            {
+                mode = GetMode(device.DeviceName, registry: !attached);
+            }
+            catch
+            {
+                // ALPHA treated display enumeration and mode inspection separately.
+            }
+
+            var isVirtual = string.Equals(device.DeviceString, VddFriendlyName, StringComparison.OrdinalIgnoreCase) ||
+                            (!string.IsNullOrWhiteSpace(device.DeviceID) &&
+                             device.DeviceID.StartsWith(VddPnpPrefix, StringComparison.OrdinalIgnoreCase));
+
+            result.Add(new WindowsDisplayInfo(
+                device.DeviceName,
+                device.DeviceString,
+                device.DeviceID,
+                attached,
+                isVirtual,
+                mode));
+        }
+
+        return result;
+    }
 
     public DisplayModeInfo GetMode(string deviceName, bool registry = false)
     {
@@ -85,7 +124,7 @@ public sealed class WindowsDisplayModeService
         for (uint index = 0; EnumDisplayDevices(null, index, ref device, 0); index++)
         {
             if (string.Equals(device.DeviceName, deviceName, StringComparison.OrdinalIgnoreCase))
-                return (device.StateFlags & 0x00000001) != 0;
+                return (device.StateFlags & DisplayDeviceAttachedToDesktop) != 0;
             device = new DisplayDevice { cb = Marshal.SizeOf<DisplayDevice>() };
         }
         return false;
@@ -195,3 +234,10 @@ public sealed class WindowsDisplayModeService
 }
 
 public sealed record DisplayModeInfo(int X, int Y, uint Width, uint Height, uint RefreshRate);
+public sealed record WindowsDisplayInfo(
+    string DeviceName,
+    string FriendlyName,
+    string DeviceId,
+    bool IsAttached,
+    bool IsVirtual,
+    DisplayModeInfo? Mode);
