@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
-using System.Text;
+using System.Text.RegularExpressions;
 using VirtualMonitorsUniverse.Core;
 
 namespace VirtualMonitorsUniverse.Cli;
@@ -10,18 +9,16 @@ namespace VirtualMonitorsUniverse.Cli;
 /// Provides emergency Virtual Display Driver cleanup without PowerShell.
 /// </summary>
 /// <remarks>
-/// The behavior intentionally follows the validated ALPHA cleanup path:
-/// discover Display-class devices by the official friendly name, remove each
-/// device node with pnputil /remove-device, then verify that both the device
-/// nodes and active VDD display targets are gone.
+/// The normal path is a direct C# port of the validated ALPHA cleanup contract:
+/// discover Display-class devices by FriendlyName, remember their driver INF,
+/// remove device nodes, wait for their disappearance, then uninstall the driver
+/// packages. The recovery path additionally handles an interrupted/older cleanup
+/// where the device node is already gone but the MttVDD driver package remains.
 /// </remarks>
 internal static class VddEmergencyManager
 {
     private const string VddFriendlyName = "Virtual Display Driver";
-    private const uint DigcfPresent = 0x00000002;
-    private const uint SpdrpFriendlyName = 0x0000000C;
-    private const uint SpdrpDeviceDesc = 0x00000000;
-    private static readonly Guid DisplayClassGuid = new("4D36E968-E325-11CE-BFC1-08002BE10318");
+    private const string VddInfOriginalName = "MttVDD.inf";
 
     public static int Purge()
     {
@@ -31,92 +28,183 @@ internal static class VddEmergencyManager
             return 1;
         }
 
-        IReadOnlyList<string> devices;
         try
         {
-            devices = EnumerateVddInstanceIds();
+            Console.WriteLine("VDD PURGE ............... RUN - ALPHA-equivalent cleanup");
+            Console.WriteLine("                         Windows may show a UAC confirmation");
+
+            var snapshot = QueryDisplayDevices();
+            var devices = snapshot
+                .Where(device => string.Equals(device.FriendlyName, VddFriendlyName, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+
+            var infNames = devices
+                .Select(device => device.DriverInf)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Cast<string>()
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            Console.WriteLine($"VDD PURGE ............... INFO - {devices.Length} ALPHA VDD device node(s)");
+
+            foreach (var device in devices)
+            {
+                Console.WriteLine($"  Removing VDD device node: {device.InstanceId} [{device.Status ?? "unknown"}]");
+                RunElevatedPnPUtil($"/remove-device \"{device.InstanceId}\"");
+            }
+
+            if (!WaitUntil(
+                    () => QueryDisplayDevices().All(device =>
+                        !string.Equals(device.FriendlyName, VddFriendlyName, StringComparison.OrdinalIgnoreCase)),
+                    TimeSpan.FromSeconds(5)))
+            {
+                Console.WriteLine("VDD PURGE ............... FAIL - ALPHA VDD device node(s) did not disappear");
+                return 1;
+            }
+
+            // Crisis recovery: an earlier incomplete purge may already have removed
+            // the device node and therefore lost DEVPKEY_Device_DriverInfPath. In
+            // that state recover only packages whose Original Name is exactly the
+            // pinned ALPHA VDD INF. This deliberately does not broaden matching to
+            // unrelated display drivers.
+            foreach (var package in QueryDriverPackages()
+                         .Where(package => string.Equals(package.OriginalName, VddInfOriginalName, StringComparison.OrdinalIgnoreCase)))
+            {
+                if (!infNames.Contains(package.PublishedName, StringComparer.OrdinalIgnoreCase))
+                {
+                    infNames.Add(package.PublishedName);
+                    Console.WriteLine($"  Recovery: orphaned ALPHA VDD package found: {package.PublishedName} ({package.OriginalName})");
+                }
+            }
+
+            foreach (var inf in infNames)
+            {
+                Console.WriteLine($"  Removing VDD driver package: {inf}");
+                RunElevatedPnPUtil($"/delete-driver \"{inf}\" /uninstall /force");
+            }
+
+            var remainingDevices = QueryDisplayDevices()
+                .Count(device => string.Equals(device.FriendlyName, VddFriendlyName, StringComparison.OrdinalIgnoreCase));
+            var remainingPackages = QueryDriverPackages()
+                .Count(package => string.Equals(package.OriginalName, VddInfOriginalName, StringComparison.OrdinalIgnoreCase));
+
+            // Keep topology inspection as an additional diagnostic only. ALPHA's
+            // authoritative cleanup identity is the PnP device + its INF package.
+            var activeMonitors = TryGetActiveVddMonitorCount();
+            Console.WriteLine(
+                $"VDD PURGE ............... INFO - remaining: {remainingDevices} device node(s), {remainingPackages} MttVDD package(s), " +
+                (activeMonitors is null ? "topology unavailable" : $"{activeMonitors} active VDD monitor(s)"));
+
+            if (remainingDevices != 0 || remainingPackages != 0 || activeMonitors is > 0)
+            {
+                Console.WriteLine("VDD PURGE ............... FAIL - cleanup verification did not reach a clean baseline");
+                return 1;
+            }
+
+            Console.WriteLine("VDD PURGE ............... PASS - ALPHA VDD device and driver package are absent");
+            return 0;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"VDD PURGE ............... FAIL - device enumeration failed: {ex.Message}");
+            Console.WriteLine($"VDD PURGE ............... FAIL - {ex.Message}");
             return 1;
-        }
-
-        var activeBefore = GetActiveVddMonitorCount();
-        Console.WriteLine($"VDD PURGE ............... INFO - {devices.Count} VDD device node(s), {activeBefore} active VDD monitor(s)");
-
-        if (devices.Count == 0)
-        {
-            if (activeBefore == 0)
-            {
-                Console.WriteLine("VDD PURGE ............... PASS - no VDD device nodes or active VDD monitors remain");
-                return 0;
-            }
-
-            Console.WriteLine("VDD PURGE ............... FAIL - active VDD monitors remain although no removable VDD device node was found");
-            return 1;
-        }
-
-        Console.WriteLine($"VDD PURGE ............... RUN - removing {devices.Count} Virtual Display Driver device node(s)");
-        Console.WriteLine("                         Windows may show a UAC confirmation");
-
-        foreach (var instanceId in devices)
-        {
-            var exitCode = RunElevatedPnPUtil("/remove-device", instanceId);
-            if (exitCode != 0)
-            {
-                Console.WriteLine($"VDD PURGE ............... FAIL - pnputil exit code {exitCode} for {instanceId}");
-                return 1;
-            }
-        }
-
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(12);
-        do
-        {
-            var remainingDevices = EnumerateVddInstanceIds();
-            var remainingMonitors = GetActiveVddMonitorCount();
-            if (remainingDevices.Count == 0 && remainingMonitors == 0)
-            {
-                Console.WriteLine("VDD PURGE ............... PASS - VDD device nodes removed and no active virtual monitors remain");
-                return 0;
-            }
-
-            Thread.Sleep(200);
-        }
-        while (DateTime.UtcNow < deadline);
-
-        var finalDevices = EnumerateVddInstanceIds();
-        var finalMonitors = GetActiveVddMonitorCount();
-        Console.WriteLine(
-            $"VDD PURGE ............... FAIL - cleanup incomplete: {finalDevices.Count} VDD device node(s), {finalMonitors} active VDD monitor(s) remain");
-        return 1;
-    }
-
-    private static int GetActiveVddMonitorCount()
-    {
-        try
-        {
-            return new WindowsVirtualMonitorService().GetMonitors().Count;
-        }
-        catch
-        {
-            // Verification must be conservative. If topology inspection itself
-            // fails, do not manufacture a false PASS by pretending the count is 0.
-            return int.MaxValue;
         }
     }
 
-    private static int RunElevatedPnPUtil(string operation, string instanceId)
+    private static IReadOnlyList<PnpDisplayDevice> QueryDisplayDevices()
     {
-        var pnputil = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-            "System32",
-            "pnputil.exe");
+        var output = RunPnPUtilCapture("/enum-devices /class Display /properties");
+        var blocks = Regex.Split(output, @"(?:\r?\n){2,}");
+        var result = new List<PnpDisplayDevice>();
 
+        foreach (var block in blocks)
+        {
+            var instanceId = ReadPnPField(block, "Instance ID");
+            var description = ReadPnPField(block, "Device Description");
+            if (string.IsNullOrWhiteSpace(instanceId) || string.IsNullOrWhiteSpace(description))
+            {
+                continue;
+            }
+
+            result.Add(new PnpDisplayDevice(
+                instanceId,
+                description,
+                ReadPnPField(block, "Status"),
+                ReadPropertyValue(block, "DEVPKEY_Device_DriverInfPath")));
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyList<DriverPackage> QueryDriverPackages()
+    {
+        var output = RunPnPUtilCapture("/enum-drivers");
+        var blocks = Regex.Split(output, @"(?:\r?\n){2,}");
+        var result = new List<DriverPackage>();
+
+        foreach (var block in blocks)
+        {
+            var published = ReadPnPField(block, "Published Name");
+            var original = ReadPnPField(block, "Original Name");
+            if (!string.IsNullOrWhiteSpace(published) && !string.IsNullOrWhiteSpace(original))
+            {
+                result.Add(new DriverPackage(published, original));
+            }
+        }
+
+        return result;
+    }
+
+    private static string? ReadPnPField(string block, string field)
+    {
+        var match = Regex.Match(
+            block,
+            $@"(?im)^\s*{Regex.Escape(field)}\s*:\s*(.+?)\s*$",
+            RegexOptions.CultureInvariant);
+        return match.Success ? match.Groups[1].Value.Trim() : null;
+    }
+
+    private static string? ReadPropertyValue(string block, string propertyName)
+    {
+        var match = Regex.Match(
+            block,
+            $@"(?ims)^\s*{Regex.Escape(propertyName)}[^\r\n]*\r?\n\s*Value\s*:\s*(.+?)\s*$",
+            RegexOptions.CultureInvariant);
+        return match.Success ? match.Groups[1].Value.Trim().Trim('"') : null;
+    }
+
+    private static string RunPnPUtilCapture(string arguments)
+    {
         var startInfo = new ProcessStartInfo
         {
-            FileName = pnputil,
-            Arguments = $"{operation} \"{instanceId}\"",
+            FileName = GetPnPUtilPath(),
+            Arguments = arguments,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start pnputil.exe.");
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"pnputil.exe {arguments} failed with exit code {process.ExitCode}: {stderr.Trim()}");
+        }
+
+        return stdout;
+    }
+
+    private static void RunElevatedPnPUtil(string arguments)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = GetPnPUtilPath(),
+            Arguments = arguments,
             UseShellExecute = true,
             Verb = "runas",
             WindowStyle = ProcessWindowStyle.Hidden
@@ -125,9 +213,12 @@ internal static class VddEmergencyManager
         try
         {
             using var process = Process.Start(startInfo)
-                ?? throw new InvalidOperationException("Could not start pnputil.exe.");
+                ?? throw new InvalidOperationException("Could not start elevated pnputil.exe.");
             process.WaitForExit();
-            return process.ExitCode;
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"pnputil.exe {arguments} failed with exit code {process.ExitCode}.");
+            }
         }
         catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
         {
@@ -135,133 +226,38 @@ internal static class VddEmergencyManager
         }
     }
 
-    private static IReadOnlyList<string> EnumerateVddInstanceIds()
+    private static string GetPnPUtilPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+        "System32",
+        "pnputil.exe");
+
+    private static bool WaitUntil(Func<bool> condition, TimeSpan timeout)
     {
-        var classGuid = DisplayClassGuid;
-        var deviceInfoSet = SetupDiGetClassDevs(ref classGuid, null, IntPtr.Zero, DigcfPresent);
-        if (deviceInfoSet == new IntPtr(-1))
+        var deadline = DateTime.UtcNow + timeout;
+        do
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error());
-        }
-
-        try
-        {
-            var result = new List<string>();
-            for (uint index = 0; ; index++)
+            if (condition())
             {
-                var data = new SpDevInfoData
-                {
-                    cbSize = (uint)Marshal.SizeOf<SpDevInfoData>()
-                };
-
-                if (!SetupDiEnumDeviceInfo(deviceInfoSet, index, ref data))
-                {
-                    var error = Marshal.GetLastWin32Error();
-                    if (error == 259) // ERROR_NO_MORE_ITEMS
-                    {
-                        break;
-                    }
-
-                    throw new Win32Exception(error);
-                }
-
-                var name = ReadRegistryProperty(deviceInfoSet, ref data, SpdrpFriendlyName)
-                    ?? ReadRegistryProperty(deviceInfoSet, ref data, SpdrpDeviceDesc);
-                if (!string.Equals(name, VddFriendlyName, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                var instanceId = ReadInstanceId(deviceInfoSet, ref data);
-                if (!string.IsNullOrWhiteSpace(instanceId))
-                {
-                    result.Add(instanceId);
-                }
+                return true;
             }
-
-            return result;
+            Thread.Sleep(100);
         }
-        finally
-        {
-            SetupDiDestroyDeviceInfoList(deviceInfoSet);
-        }
+        while (DateTime.UtcNow < deadline);
+        return condition();
     }
 
-    private static string? ReadRegistryProperty(IntPtr set, ref SpDevInfoData data, uint property)
+    private static int? TryGetActiveVddMonitorCount()
     {
-        var buffer = new byte[1024];
-        if (!SetupDiGetDeviceRegistryProperty(
-                set,
-                ref data,
-                property,
-                out _,
-                buffer,
-                (uint)buffer.Length,
-                out _))
+        try
+        {
+            return new WindowsVirtualMonitorService().GetMonitors().Count;
+        }
+        catch
         {
             return null;
         }
-
-        return Encoding.Unicode.GetString(buffer).TrimEnd('\0');
     }
 
-    private static string? ReadInstanceId(IntPtr set, ref SpDevInfoData data)
-    {
-        var builder = new StringBuilder(512);
-        return SetupDiGetDeviceInstanceId(
-                set,
-                ref data,
-                builder,
-                builder.Capacity,
-                out _)
-            ? builder.ToString()
-            : null;
-    }
-
-    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr SetupDiGetClassDevs(
-        ref Guid classGuid,
-        string? enumerator,
-        IntPtr hwndParent,
-        uint flags);
-
-    [DllImport("setupapi.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetupDiEnumDeviceInfo(
-        IntPtr deviceInfoSet,
-        uint memberIndex,
-        ref SpDevInfoData deviceInfoData);
-
-    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetupDiGetDeviceRegistryProperty(
-        IntPtr deviceInfoSet,
-        ref SpDevInfoData deviceInfoData,
-        uint property,
-        out uint propertyRegDataType,
-        [Out] byte[] propertyBuffer,
-        uint propertyBufferSize,
-        out uint requiredSize);
-
-    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetupDiGetDeviceInstanceId(
-        IntPtr deviceInfoSet,
-        ref SpDevInfoData deviceInfoData,
-        StringBuilder deviceInstanceId,
-        int deviceInstanceIdSize,
-        out int requiredSize);
-
-    [DllImport("setupapi.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SpDevInfoData
-    {
-        public uint cbSize;
-        public Guid ClassGuid;
-        public uint DevInst;
-        public IntPtr Reserved;
-    }
+    private sealed record PnpDisplayDevice(string InstanceId, string FriendlyName, string? Status, string? DriverInf);
+    private sealed record DriverPackage(string PublishedName, string OriginalName);
 }
