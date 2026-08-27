@@ -4,7 +4,9 @@ using System.IO.Compression;
 using System.IO.Pipes;
 using System.Net.Http;
 using System.Security.Cryptography;
+using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
+using VirtualMonitorsUniverse.Core;
 
 namespace VirtualMonitorsUniverse.Cli;
 
@@ -73,7 +75,7 @@ internal static class VddInstaller
                 }
             }
 
-            ImportCatalogCertificates(catPath, workRoot);
+            ImportCatalogCertificates(catPath);
 
             Console.WriteLine("  VDD INSTALL: creating exactly one root-enumerated Root\\MttVDD device...");
             RunElevated(nefconExe, $"install \"{infPath}\" Root\\MttVDD");
@@ -123,13 +125,17 @@ internal static class VddInstaller
         }
     }
 
-    private static void ImportCatalogCertificates(string catalogPath, string workRoot)
+    private static void ImportCatalogCertificates(string catalogPath)
     {
-        var certificates = new X509Certificate2Collection();
-        certificates.Import(File.ReadAllBytes(catalogPath));
+        // Windows catalog files are PKCS#7 SignedData. This replaces the obsolete
+        // X509Certificate2Collection.Import(byte[]) while preserving the ALPHA
+        // behavior of importing every catalog certificate into TrustedPublisher.
+        var signedCms = new SignedCms();
+        signedCms.Decode(File.ReadAllBytes(catalogPath));
+
         using var store = new X509Store(StoreName.TrustedPublisher, StoreLocation.LocalMachine);
         store.Open(OpenFlags.ReadWrite);
-        foreach (var certificate in certificates)
+        foreach (var certificate in signedCms.Certificates)
         {
             var existing = store.Certificates.Find(X509FindType.FindByThumbprint, certificate.Thumbprint, false);
             if (existing.Count == 0)
