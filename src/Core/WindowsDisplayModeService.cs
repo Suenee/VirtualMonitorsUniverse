@@ -8,7 +8,9 @@ namespace VirtualMonitorsUniverse.Core;
 /// <remarks>
 /// This class intentionally preserves the ALPHA Win32 contract: EnumDisplaySettings
 /// reads current/registry DEVMODE values and ChangeDisplaySettingsEx performs mode,
-/// disconnect, and reconnect operations with CDS_UPDATEREGISTRY.
+/// disconnect, and reconnect operations with CDS_UPDATEREGISTRY. Active-desktop
+/// verification follows the same semantic source as ALPHA Screen.AllScreens by
+/// enumerating active monitor handles, rather than relying on EnumDisplayDevices flags.
 /// </remarks>
 public sealed class WindowsDisplayModeService
 {
@@ -20,7 +22,6 @@ public sealed class WindowsDisplayModeService
     private const uint DmDisplayFrequency = 0x00400000;
     private const uint CdsUpdateRegistry = 0x00000001;
     private const int DispChangeSuccessful = 0;
-    private const int DisplayDeviceAttachedToDesktop = 0x00000001;
     private const string VddFriendlyName = "Virtual Display Driver";
     private const string VddPnpPrefix = "ROOT\\MTTVDD";
 
@@ -29,13 +30,14 @@ public sealed class WindowsDisplayModeService
     public IReadOnlyList<WindowsDisplayInfo> GetDisplays()
     {
         EnsureWindows();
+        var activeNames = GetActiveDesktopDisplayNames();
         var result = new List<WindowsDisplayInfo>();
         for (uint index = 0; ; index++)
         {
             var device = new DisplayDevice { cb = Marshal.SizeOf<DisplayDevice>() };
             if (!EnumDisplayDevices(null, index, ref device, 0)) break;
 
-            var attached = (device.StateFlags & DisplayDeviceAttachedToDesktop) != 0;
+            var attached = activeNames.Contains(device.DeviceName);
             DisplayModeInfo? mode = null;
             try
             {
@@ -120,14 +122,26 @@ public sealed class WindowsDisplayModeService
     public bool IsAttached(string deviceName)
     {
         EnsureWindows();
-        var device = new DisplayDevice { cb = Marshal.SizeOf<DisplayDevice>() };
-        for (uint index = 0; EnumDisplayDevices(null, index, ref device, 0); index++)
-        {
-            if (string.Equals(device.DeviceName, deviceName, StringComparison.OrdinalIgnoreCase))
-                return (device.StateFlags & DisplayDeviceAttachedToDesktop) != 0;
-            device = new DisplayDevice { cb = Marshal.SizeOf<DisplayDevice>() };
-        }
-        return false;
+        return GetActiveDesktopDisplayNames().Contains(deviceName);
+    }
+
+    private static HashSet<string> GetActiveDesktopDisplayNames()
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var ok = EnumDisplayMonitors(
+            IntPtr.Zero,
+            IntPtr.Zero,
+            (monitor, _, _, _) =>
+            {
+                var info = new MonitorInfoEx { cbSize = Marshal.SizeOf<MonitorInfoEx>() };
+                if (GetMonitorInfo(monitor, ref info) && !string.IsNullOrWhiteSpace(info.szDevice))
+                    names.Add(info.szDevice);
+                return true;
+            },
+            IntPtr.Zero);
+        if (!ok)
+            throw new InvalidOperationException($"EnumDisplayMonitors failed with Win32 error {Marshal.GetLastWin32Error()}.");
+        return names;
     }
 
     private bool TestMode(string deviceName, uint width, uint height)
@@ -186,6 +200,16 @@ public sealed class WindowsDisplayModeService
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum, ref DisplayDevice lpDisplayDevice, uint dwFlags);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clipRect, MonitorEnumProc callback, IntPtr data);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfoEx monitorInfo);
+
+    private delegate bool MonitorEnumProc(IntPtr monitor, IntPtr hdc, IntPtr monitorRect, IntPtr data);
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct DevMode
     {
@@ -230,6 +254,25 @@ public sealed class WindowsDisplayModeService
         public int StateFlags;
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceID;
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MonitorInfoEx
+    {
+        public int cbSize;
+        public Rect rcMonitor;
+        public Rect rcWork;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szDevice;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
     }
 }
 
