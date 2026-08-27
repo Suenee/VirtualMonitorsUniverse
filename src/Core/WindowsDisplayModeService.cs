@@ -50,9 +50,6 @@ public sealed class WindowsDisplayModeService
                 // ALPHA treated display enumeration and mode inspection separately.
             }
 
-            // Keep ALPHA's proven identification rule. It matched DeviceString against
-            // Virtual|MTT|VDD. The PnP prefix is retained only as a strict additional
-            // signal when Windows exposes it on the top-level display entry.
             var isVirtual = IsAlphaVirtualIdentity(device.DeviceString) ||
                             (!string.IsNullOrWhiteSpace(device.DeviceID) &&
                              device.DeviceID.StartsWith(VddPnpPrefix, StringComparison.OrdinalIgnoreCase));
@@ -129,19 +126,29 @@ public sealed class WindowsDisplayModeService
             throw new InvalidOperationException($"{deviceName} is already connected.");
         }
 
-        DevMode mode;
         var hasSnapshot = TryLoadModeSnapshot(deviceName, out var saved);
+        DevMode mode;
+
         if (hasSnapshot)
         {
-            mode = saved;
-            if (mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0)
+            if (saved.dmPelsWidth == 0 || saved.dmPelsHeight == 0)
             {
                 throw new InvalidDataException($"Saved ALPHA mode for {deviceName} is 0x0 and cannot be used for reconnect.");
             }
+
+            // ALPHA reconnects with the values captured before disconnect. Across two
+            // CLI processes, rebuild those values onto a fresh native DEVMODE returned
+            // by Windows for the disconnected display. This preserves ALPHA's semantic
+            // state while avoiding stale marshalled fields from a previous process.
+            mode = ReadMode(deviceName, EnumRegistrySettings);
+            mode.dmPositionX = saved.dmPositionX;
+            mode.dmPositionY = saved.dmPositionY;
+            mode.dmPelsWidth = saved.dmPelsWidth;
+            mode.dmPelsHeight = saved.dmPelsHeight;
+            mode.dmDisplayFrequency = saved.dmDisplayFrequency;
         }
         else
         {
-            // ALPHA fallback for a pre-existing disconnected display.
             mode = ReadMode(deviceName, EnumRegistrySettings);
             if (mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0)
             {
@@ -151,8 +158,9 @@ public sealed class WindowsDisplayModeService
             }
         }
 
+        mode.dmSize = checked((ushort)Marshal.SizeOf<DevMode>());
         mode.dmFields = DmPosition | DmPelsWidth | DmPelsHeight | DmDisplayFrequency;
-        Apply(deviceName, ref mode, "reconnect");
+        ApplyReconnect(deviceName, ref mode, hasSnapshot ? "saved ALPHA snapshot" : "registry fallback");
 
         if (!WaitUntil(() => IsAttached(deviceName), TimeSpan.FromSeconds(5)))
         {
@@ -231,6 +239,18 @@ public sealed class WindowsDisplayModeService
         if (result != DispChangeSuccessful)
         {
             throw new InvalidOperationException($"Windows rejected {description} on {deviceName} (result {result}).");
+        }
+    }
+
+    private static void ApplyReconnect(string deviceName, ref DevMode mode, string source)
+    {
+        var result = ChangeDisplaySettingsEx(deviceName, ref mode, IntPtr.Zero, CdsUpdateRegistry, IntPtr.Zero);
+        if (result != DispChangeSuccessful)
+        {
+            throw new InvalidOperationException(
+                $"Windows rejected reconnect on {deviceName} (result {result}; source={source}; " +
+                $"position={mode.dmPositionX},{mode.dmPositionY}; mode={mode.dmPelsWidth}x{mode.dmPelsHeight}@{mode.dmDisplayFrequency}; " +
+                $"dmFields=0x{mode.dmFields:X8}).");
         }
     }
 
