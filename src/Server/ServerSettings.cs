@@ -20,10 +20,18 @@ internal sealed class ServerSettings
             if (File.Exists(path))
             {
                 var loaded = JsonSerializer.Deserialize<ServerSettings>(File.ReadAllText(path), JsonOptions);
-                if (loaded is not null) { loaded.Normalize(); return loaded; }
+                if (loaded is not null)
+                {
+                    loaded.Normalize();
+                    return loaded;
+                }
             }
         }
-        catch { }
+        catch
+        {
+            // Invalid settings must not prevent the tray application from starting.
+        }
+
         return new ServerSettings();
     }
 
@@ -42,7 +50,9 @@ internal sealed class ServerSettings
         Logging ??= new LoggingSettings();
         Exit ??= new ExitSettings();
         ServiceState ??= new ServiceStateSettings();
-        Vmu.Normalize(8180); Web.Normalize(8181); Socket.Normalize(8182);
+        Vmu.Normalize(8180);
+        Web.Normalize(8181);
+        Socket.Normalize(8182);
         Logging.RetentionMinutes = Math.Max(1, Logging.RetentionMinutes);
         if (!Enum.IsDefined(Exit.MonitorAction)) Exit.MonitorAction = MonitorExitAction.Disconnect;
     }
@@ -52,6 +62,7 @@ internal sealed class ServiceEndpointSettings
 {
     public string Interface { get; set; } = "localhost";
     public int Port { get; set; }
+
     public void Normalize(int defaultPort)
     {
         if (!Interface.Equals("any", StringComparison.OrdinalIgnoreCase) && !Interface.Equals("localhost", StringComparison.OrdinalIgnoreCase)) Interface = "localhost";
@@ -59,9 +70,17 @@ internal sealed class ServiceEndpointSettings
     }
 }
 
-internal sealed class LoggingSettings { public int RetentionMinutes { get; set; } = 10080; }
+internal sealed class LoggingSettings
+{
+    public int RetentionMinutes { get; set; } = 10080;
+}
 
-internal enum MonitorExitAction { Disconnect, Uninstall, Keep }
+internal enum MonitorExitAction
+{
+    Disconnect,
+    Keep,
+    Uninstall,
+}
 
 internal sealed class ExitSettings
 {
