@@ -8,17 +8,35 @@ namespace VirtualMonitorsUniverse.Server;
 internal sealed class LogForm : Form
 {
     private readonly LogStore _store;
-    private readonly DataGridView _grid = new() { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, AllowUserToResizeRows = false, RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, MultiSelect = false, AutoGenerateColumns = false };
+    private readonly Icon _icon;
+    private readonly DataGridView _grid = new()
+    {
+        Dock = DockStyle.Fill,
+        ReadOnly = true,
+        AllowUserToAddRows = false,
+        AllowUserToDeleteRows = false,
+        AllowUserToResizeRows = false,
+        AllowUserToResizeColumns = true,
+        RowHeadersVisible = false,
+        SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+        MultiSelect = false,
+        AutoGenerateColumns = false,
+        ColumnHeadersHeight = 24,
+        ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+    };
     private readonly TextBox _search = new() { Width = 230, PlaceholderText = "Search..." };
     private readonly Button _clearSearch = new() { Text = "×", Width = 22, Height = 23, Margin = new Padding(2, 0, 0, 0), TabStop = false, Enabled = false };
     private readonly CheckBox _tail = new() { Text = "Always at end", Checked = true, AutoSize = true };
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 750 };
     private SplitContainer? _split;
+    private FlowLayoutPanel? _tailHost;
+    private LogDetailForm? _detailForm;
     private long _lastId = -1;
 
     public LogForm(LogStore store, Icon icon)
     {
         _store = store;
+        _icon = icon;
         Text = "Log";
         Icon = icon;
         Width = 1250;
@@ -31,9 +49,11 @@ internal sealed class LogForm : Form
         _search.TextChanged += (_, _) => { _clearSearch.Enabled = _search.TextLength > 0; Render(force: true); };
         _clearSearch.Click += (_, _) => _search.Clear();
         _tail.CheckedChanged += (_, _) => { if (_tail.Checked) ScrollToEnd(); };
+        _grid.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0) OpenDetail(); };
+        _grid.SelectionChanged += (_, _) => UpdateOpenDetail();
         _timer.Tick += (_, _) => Render(force: false);
         _timer.Start();
-        FormClosed += (_, _) => _timer.Stop();
+        FormClosed += (_, _) => { _timer.Stop(); _detailForm?.Close(); };
         Shown += (_, _) => BeginInvoke((Action)(() => { ApplyInitialSplitterDistance(); Render(force: true); }));
     }
 
@@ -55,6 +75,7 @@ internal sealed class LogForm : Form
         root.Controls.Add(top, 0, 0);
 
         _split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1 };
+        _split.SplitterMoved += (_, _) => AlignBottomControls();
         var left = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = new Padding(0) };
         left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -67,7 +88,9 @@ internal sealed class LogForm : Form
         var bottom = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        bottom.Controls.Add(_tail, 0, 0);
+        _tailHost = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        _tailHost.Controls.Add(_tail);
+        bottom.Controls.Add(_tailHost, 0, 0);
         var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, Margin = new Padding(0) };
         var clear = new Button { Text = "Clear", AutoSize = true };
         var close = new Button { Text = "Close", AutoSize = true };
@@ -95,6 +118,13 @@ internal sealed class LogForm : Form
         _split.Panel2MinSize = panel2Minimum;
         var maximum = width - panel2Minimum - splitterWidth;
         _split.SplitterDistance = Math.Clamp((int)Math.Round(width * 0.18), panel1Minimum, maximum);
+        AlignBottomControls();
+    }
+
+    private void AlignBottomControls()
+    {
+        if (_split is null || _tailHost is null) return;
+        _tailHost.Padding = new Padding(_split.SplitterDistance + _split.SplitterWidth, 0, 0, 0);
     }
 
     private void ConfigureGrid()
@@ -119,6 +149,7 @@ internal sealed class LogForm : Form
     {
         try
         {
+            var selectedId = SelectedEntry()?.Id;
             var entries = _store.ReadAll(_search.Text);
             var newest = entries.Count == 0 ? 0 : entries[^1].Id;
             if (!force && newest == _lastId) return;
@@ -126,14 +157,44 @@ internal sealed class LogForm : Form
             _grid.Rows.Clear();
             foreach (var entry in entries)
             {
-                _grid.Rows.Add(entry.Timestamp, entry.Level, entry.Service, entry.MonitorId ?? string.Empty, entry.Event, entry.Message);
+                var index = _grid.Rows.Add(entry.Timestamp, entry.Level, entry.Service, entry.MonitorId ?? string.Empty, entry.Event, entry.Message);
+                _grid.Rows[index].Tag = entry;
+                if (selectedId == entry.Id) _grid.Rows[index].Selected = true;
             }
             if (_tail.Checked) ScrollToEnd();
+            UpdateOpenDetail();
         }
         catch
         {
             // The viewer must not terminate the tray application if a read temporarily fails.
         }
+    }
+
+    private LogEntry? SelectedEntry()
+    {
+        if (_grid.SelectedRows.Count == 0) return null;
+        return _grid.SelectedRows[0].Tag as LogEntry;
+    }
+
+    private void OpenDetail()
+    {
+        var entry = SelectedEntry();
+        if (entry is null) return;
+        if (_detailForm is null || _detailForm.IsDisposed)
+        {
+            _detailForm = new LogDetailForm(_icon);
+            _detailForm.FormClosed += (_, _) => _detailForm = null;
+            _detailForm.Show(this);
+        }
+        _detailForm.ShowEntry(entry);
+        _detailForm.Activate();
+    }
+
+    private void UpdateOpenDetail()
+    {
+        if (_detailForm is null || _detailForm.IsDisposed) return;
+        var entry = SelectedEntry();
+        if (entry is not null) _detailForm.ShowEntry(entry);
     }
 
     private void ScrollToEnd()
