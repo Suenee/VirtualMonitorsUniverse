@@ -47,17 +47,24 @@ internal sealed class LogStore
             command.Parameters.AddWithValue("$q", $"%{search.Trim()}%");
         }
 
-        if (services is { Count: > 0 })
+        if (services is not null)
         {
             var names = services.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            var parameters = new List<string>(names.Length);
-            for (var i = 0; i < names.Length; i++)
+            if (names.Length == 0)
             {
-                var parameter = $"$service{i}";
-                parameters.Add(parameter);
-                command.Parameters.AddWithValue(parameter, names[i]);
+                where.Add("1 = 0");
             }
-            where.Add($"service IN ({string.Join(',', parameters)})");
+            else
+            {
+                var parameters = new List<string>(names.Length);
+                for (var i = 0; i < names.Length; i++)
+                {
+                    var parameter = $"$service{i}";
+                    parameters.Add(parameter);
+                    command.Parameters.AddWithValue(parameter, names[i]);
+                }
+                where.Add($"service IN ({string.Join(',', parameters)})");
+            }
         }
 
         command.CommandText = $"SELECT id,timestamp_utc,level,service,monitor_id,event,message,details_json FROM log_entries WHERE {string.Join(" AND ", where)} ORDER BY id";
