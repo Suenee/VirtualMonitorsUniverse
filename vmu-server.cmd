@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
-
+set "VMU_REPO_ROOT=%CD%"
 set "VMU_SERVER=%~dp0.runtime\server\VirtualMonitorsUniverse.Server.exe"
 
 if not exist "%VMU_SERVER%" (
