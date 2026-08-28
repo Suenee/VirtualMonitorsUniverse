@@ -1,10 +1,27 @@
-var builder = WebApplication.CreateBuilder(args);
-var app = builder.Build();
+using System.Threading;
+using System.Windows.Forms;
 
-app.MapGet("/api/health", () => Results.Ok(new
+namespace VirtualMonitorsUniverse.Server;
+
+internal static class Program
 {
-    service = "Virtual Monitors Universe",
-    status = "ok"
-}));
+    private const string SingleInstanceMutexName = @"Local\VirtualMonitorsUniverse.Server";
 
-app.Run();
+    [STAThread]
+    private static void Main()
+    {
+        ApplicationConfiguration.Initialize();
+
+        using var singleInstanceMutex = new Mutex(
+            initiallyOwned: true,
+            SingleInstanceMutexName,
+            out var isFirstInstance);
+
+        if (!isFirstInstance)
+        {
+            return;
+        }
+
+        Application.Run(new TrayApplicationContext());
+    }
+}
