@@ -2,8 +2,9 @@
 **/bin/
 **/obj/
 
-# Local runtime and logs
+# Local runtime, persistent data, and logs
 .runtime/
+data/
 logs/
 
 # IDE/user state
