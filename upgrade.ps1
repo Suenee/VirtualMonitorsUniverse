@@ -9,7 +9,9 @@ $LogFile = Join-Path $LogDir 'upgrade.log'
 $Solution = Join-Path $RepoRoot 'VirtualMonitorsUniverse.sln'
 $TestProject = Join-Path $RepoRoot 'tests\Core.Tests\Core.Tests.csproj'
 $CliProject = Join-Path $RepoRoot 'src\Cli\Cli.csproj'
+$ServerProject = Join-Path $RepoRoot 'src\Server\Server.csproj'
 $RuntimeCli = Join-Path $RepoRoot '.runtime\cli'
+$RuntimeServer = Join-Path $RepoRoot '.runtime\server'
 $RequiredBranch = 'devel'
 $RequiredSdkMajor = 10
 $RequiredSdkPackage = 'Microsoft.DotNet.SDK.10'
@@ -94,9 +96,9 @@ try {
         if ($uninstalled) { Write-Host '.NET 8 SDK uninstall command completed.' } else { $warning='.NET 8 SDK uninstall did not complete after two attempts. No .NET runtime was removed. VMU will continue because .NET 10 validation passed.'; $Warnings.Add($warning); Write-Warning $warning }
     }
     Write-Host 'Installed SDKs after SDK maintenance:'; & dotnet --list-sdks
-    Write-Host '[4/5] Restoring, building, testing and publishing with .NET 10...'; Remove-KnownGeneratedArtifacts; Invoke-Native dotnet @('restore',$Solution) 'Final restore failed.'; Invoke-Native dotnet @('build',$Solution,'-c','Debug','--no-restore') 'Final build failed.'; Invoke-Native dotnet @('test',$TestProject,'-c','Debug','--no-build','--no-restore') 'Final tests failed.'; New-Item -ItemType Directory -Path $RuntimeCli -Force | Out-Null; Invoke-Native dotnet @('publish',$CliProject,'-c','Debug','--no-restore','-o',$RuntimeCli) 'CLI publish failed.'
-    Write-Host '[5/5] Verifying final workspace and SDK state...'; Assert-WorkspaceHygiene; if (-not (Test-SdkMajorInstalled -Major 10)) { throw 'Final .NET 10 SDK verification failed.' }
-    Write-Host 'Final workspace hygiene: OK'; Write-Host '.NET 10 SDK: OK'; Stop-IdleDotNetBuildServers; Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'; Write-Host 'Branch: devel'; Write-Host "Runtime CLI: $RuntimeCli"; Write-Host "Logs: $LogDir"; Write-Host 'Next check: vmu selftest'
+    Write-Host '[4/5] Restoring, building, testing and publishing with .NET 10...'; Remove-KnownGeneratedArtifacts; Invoke-Native dotnet @('restore',$Solution) 'Final restore failed.'; Invoke-Native dotnet @('build',$Solution,'-c','Debug','--no-restore') 'Final build failed.'; Invoke-Native dotnet @('test',$TestProject,'-c','Debug','--no-build','--no-restore') 'Final tests failed.'; New-Item -ItemType Directory -Path $RuntimeCli -Force | Out-Null; Invoke-Native dotnet @('publish',$CliProject,'-c','Debug','--no-restore','-o',$RuntimeCli) 'CLI publish failed.'; New-Item -ItemType Directory -Path $RuntimeServer -Force | Out-Null; Invoke-Native dotnet @('publish',$ServerProject,'-c','Debug','--no-restore','-o',$RuntimeServer) 'Server publish failed.'
+    Write-Host '[5/5] Verifying final workspace and SDK state...'; Assert-WorkspaceHygiene; if (-not (Test-SdkMajorInstalled -Major 10)) { throw 'Final .NET 10 SDK verification failed.' }; if (-not (Test-Path (Join-Path $RuntimeServer 'VirtualMonitorsUniverse.Server.exe'))) { throw 'Published VMU Server executable was not found.' }
+    Write-Host 'Final workspace hygiene: OK'; Write-Host '.NET 10 SDK: OK'; Stop-IdleDotNetBuildServers; Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'; Write-Host 'Branch: devel'; Write-Host "Runtime CLI: $RuntimeCli"; Write-Host "Runtime Server: $RuntimeServer"; Write-Host "Logs: $LogDir"; Write-Host 'Next check: vmu selftest'; Write-Host 'Tray server: vmu-server.cmd'
     if ($Warnings.Count -gt 0) { $FinalStatus='WARNING'; $FinalStatusColor='Yellow' } else { $FinalStatus='OK'; $FinalStatusColor='Green' }
     $ExitCode=0
 }
