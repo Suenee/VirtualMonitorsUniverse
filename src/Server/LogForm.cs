@@ -13,6 +13,7 @@ internal sealed class LogForm : Form
     private readonly Button _clearSearch = new() { Text = "×", Width = 22, Height = 23, Margin = new Padding(2, 0, 0, 0), TabStop = false, Enabled = false };
     private readonly CheckBox _tail = new() { Text = "Always at end", Checked = true, AutoSize = true };
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 750 };
+    private SplitContainer? _split;
     private long _lastId = -1;
 
     public LogForm(LogStore store, Icon icon)
@@ -33,7 +34,7 @@ internal sealed class LogForm : Form
         _timer.Tick += (_, _) => Render(force: false);
         _timer.Start();
         FormClosed += (_, _) => _timer.Stop();
-        Shown += (_, _) => Render(force: true);
+        Shown += (_, _) => BeginInvoke((Action)(() => { ApplyInitialSplitterDistance(); Render(force: true); }));
     }
 
     private void BuildUi()
@@ -53,15 +54,15 @@ internal sealed class LogForm : Form
         top.Controls.Add(searchPanel, 1, 0);
         root.Controls.Add(top, 0, 0);
 
-        var split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1, SplitterDistance = 200, Panel1MinSize = 120, Panel2MinSize = 300 };
+        _split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1 };
         var left = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = new Padding(0) };
         left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         left.Controls.Add(new Label { Text = "Monitor filters", AutoSize = true, Padding = new Padding(0, 5, 0, 5), Margin = new Padding(0), BackColor = Color.Gainsboro, Dock = DockStyle.Fill }, 0, 0);
         left.Controls.Add(new Label { Text = "No monitors", AutoSize = true, Padding = new Padding(8), ForeColor = Color.DimGray }, 0, 1);
-        split.Panel1.Controls.Add(left);
-        split.Panel2.Controls.Add(_grid);
-        root.Controls.Add(split, 0, 1);
+        _split.Panel1.Controls.Add(left);
+        _split.Panel2.Controls.Add(_grid);
+        root.Controls.Add(_split, 0, 1);
 
         var bottom = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -77,6 +78,23 @@ internal sealed class LogForm : Form
         bottom.Controls.Add(buttons, 1, 0);
         root.Controls.Add(bottom, 0, 2);
         Controls.Add(root);
+    }
+
+    private void ApplyInitialSplitterDistance()
+    {
+        if (_split is null || _split.IsDisposed) return;
+        var width = _split.ClientSize.Width;
+        if (width <= 0) return;
+
+        const int panel1Minimum = 120;
+        const int panel2Minimum = 300;
+        var splitterWidth = Math.Max(1, _split.SplitterWidth);
+        if (width < panel1Minimum + panel2Minimum + splitterWidth) return;
+
+        _split.Panel1MinSize = panel1Minimum;
+        _split.Panel2MinSize = panel2Minimum;
+        var maximum = width - panel2Minimum - splitterWidth;
+        _split.SplitterDistance = Math.Clamp((int)Math.Round(width * 0.18), panel1Minimum, maximum);
     }
 
     private void ConfigureGrid()
