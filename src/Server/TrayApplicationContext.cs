@@ -29,7 +29,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         ApplyLogRetention();
         _logStore.Write("INFO", "SERVER", "APPLICATION_START", "Virtual Monitors Universe Server started");
 
-        _icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
+        _icon = TrayIconFactory.Create(Application.ExecutablePath);
         _menu = BuildMenu();
         _notifyIcon = new NotifyIcon
         {
