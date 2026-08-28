@@ -7,6 +7,7 @@ $RepoRoot = [System.IO.Path]::GetFullPath($RepoRoot)
 $LogDir = Join-Path $RepoRoot 'logs'
 $LogFile = Join-Path $LogDir 'upgrade.log'
 $Solution = Join-Path $RepoRoot 'VirtualMonitorsUniverse.sln'
+$BuildProps = Join-Path $RepoRoot 'Directory.Build.props'
 $TestProject = Join-Path $RepoRoot 'tests\Core.Tests\Core.Tests.csproj'
 $CliProject = Join-Path $RepoRoot 'src\Cli\Cli.csproj'
 $ServerProject = Join-Path $RepoRoot 'src\Server\Server.csproj'
@@ -23,6 +24,7 @@ $FinalStatusColor = 'Red'
 $ExitCode = 1
 $Warnings = [System.Collections.Generic.List[string]]::new()
 $ServerWasRunning = $false
+$BuildVersion = 'unknown'
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 Start-Transcript -Path $LogFile -Force | Out-Null
@@ -36,6 +38,13 @@ function Invoke-Native {
 }
 function Get-InstalledSdks { $output=& dotnet --list-sdks 2>$null; if ($LASTEXITCODE -ne 0) { return @() }; return @($output) }
 function Test-SdkMajorInstalled { param([Parameter(Mandatory)][int]$Major); $matches=@(Get-InstalledSdks | Where-Object { $_ -match "^$Major\." }); return $matches.Count -gt 0 }
+function Get-VmuVersion {
+    if (-not (Test-Path -LiteralPath $BuildProps)) { throw "Version source was not found: $BuildProps" }
+    [xml]$props = Get-Content -LiteralPath $BuildProps -Raw
+    $value = @($props.Project.PropertyGroup | ForEach-Object { $_.Version } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($value)) { throw 'Directory.Build.props does not define <Version>.' }
+    return [string]$value
+}
 function Wait-WindowsInstallerIdle {
     param([int]$TimeoutSeconds=180)
     $deadline=(Get-Date).AddSeconds($TimeoutSeconds)
@@ -114,7 +123,10 @@ try {
     Write-Host '[1/5] Synchronizing current DEVEL source...'
     Invoke-Native git @('remote','set-url','origin','https://github.com/Suenee/VirtualMonitorsUniverse.git') 'Could not set the origin URL.'
     Invoke-Native git @('reset','--hard','origin/devel') 'Could not synchronize the local DEVEL branch.'
-    $branchAfterReset=(& git rev-parse --abbrev-ref HEAD 2>$null).Trim(); if ($branchAfterReset -ne $RequiredBranch) { throw "Repository is not on '$RequiredBranch' after synchronization." }; Write-Host "Active branch after synchronization: $branchAfterReset"
+    $branchAfterReset=(& git rev-parse --abbrev-ref HEAD 2>$null).Trim(); if ($branchAfterReset -ne $RequiredBranch) { throw "Repository is not on '$RequiredBranch' after synchronization." }
+    $BuildVersion = Get-VmuVersion
+    Write-Host "Active branch after synchronization: $branchAfterReset"
+    Write-Host "VMU version to build: $BuildVersion"
     Write-Host '[2/5] Cleaning known obsolete and generated artifacts...'; Remove-KnownGeneratedArtifacts; Assert-WorkspaceHygiene
     Write-Host '[3/5] Ensuring .NET 10 SDK and retiring .NET 8 SDK...'
     if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) { throw 'Windows Package Manager (winget) is required to bootstrap the .NET SDK.' }
@@ -134,7 +146,7 @@ try {
     Write-Host '[5/5] Verifying final workspace and SDK state...'; Assert-WorkspaceHygiene; if (-not (Test-SdkMajorInstalled -Major 10)) { throw 'Final .NET 10 SDK verification failed.' }; if (-not (Test-Path $ServerExe)) { throw 'Published VMU Server executable was not found.' }
     Write-Host 'Final workspace hygiene: OK'; Write-Host '.NET 10 SDK: OK'; Stop-IdleDotNetBuildServers
     if ($ServerWasRunning) { Start-VmuServerAfterUpgrade | Out-Null } else { Write-Host 'VMU Server restart: skipped because it was not running before upgrade.' }
-    Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'; Write-Host 'Branch: devel'; Write-Host "Runtime CLI: $RuntimeCli"; Write-Host "Runtime Server: $RuntimeServer"; Write-Host "Upgrade log: $LogFile"; Write-Host 'Next check: vmu selftest'; Write-Host 'Tray server: vmu-server.cmd'
+    Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'; Write-Host 'Branch: devel'; Write-Host "Runtime CLI: $RuntimeCli"; Write-Host "Runtime Server: $RuntimeServer"; Write-Host "Upgrade log: $LogFile"; Write-Host 'Next check: vmu selftest'; Write-Host 'Tray server: vmu-server.cmd'; Write-Host "Version: $BuildVersion"
     if ($Warnings.Count -gt 0) { $FinalStatus='WARNING'; $FinalStatusColor='Yellow' } else { $FinalStatus='OK'; $FinalStatusColor='Green' }
     $ExitCode=0
 }
