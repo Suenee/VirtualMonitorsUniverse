@@ -71,6 +71,7 @@ internal sealed class ExitSettings
 
 internal sealed class ServiceStateSettings
 {
+    public bool VmuServerRunning { get; set; }
     public bool WebRunning { get; set; }
     public bool SocketRunning { get; set; }
 }
