@@ -12,6 +12,8 @@ $CliProject = Join-Path $RepoRoot 'src\Cli\Cli.csproj'
 $ServerProject = Join-Path $RepoRoot 'src\Server\Server.csproj'
 $RuntimeCli = Join-Path $RepoRoot '.runtime\cli'
 $RuntimeServer = Join-Path $RepoRoot '.runtime\server'
+$ServerExe = Join-Path $RuntimeServer 'VirtualMonitorsUniverse.Server.exe'
+$ServerProcessName = 'VirtualMonitorsUniverse.Server'
 $RequiredBranch = 'devel'
 $RequiredSdkMajor = 10
 $RequiredSdkPackage = 'Microsoft.DotNet.SDK.10'
@@ -20,6 +22,7 @@ $FinalStatus = 'FAILED'
 $FinalStatusColor = 'Red'
 $ExitCode = 1
 $Warnings = [System.Collections.Generic.List[string]]::new()
+$ServerWasRunning = $false
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 Start-Transcript -Path $LogFile -Force | Out-Null
@@ -42,16 +45,46 @@ function Wait-WindowsInstallerIdle {
 function Stop-IdleDotNetBuildServers {
     if (-not (Get-Command dotnet.exe -ErrorAction SilentlyContinue)) { return }
     Write-Host 'Releasing idle .NET build servers...'
-    # `dotnet build-server shutdown` asks the SDK-owned build servers to stop gracefully.
-    # It does not terminate arbitrary dotnet applications, so a parallel SUB build/app is not killed.
     & dotnet build-server shutdown
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host '.NET build servers: shutdown requested successfully'
+    if ($LASTEXITCODE -eq 0) { Write-Host '.NET build servers: shutdown requested successfully' }
+    else { $warning=".NET build-server shutdown returned exit code $LASTEXITCODE. Other .NET work may still be using build infrastructure; no process was force-killed."; $Warnings.Add($warning); Write-Warning $warning }
+}
+function Stop-RunningVmuServer {
+    $processes=@(Get-Process -Name $ServerProcessName -ErrorAction SilentlyContinue)
+    if ($processes.Count -eq 0) { Write-Host 'VMU Server before upgrade: not running'; return $false }
+    Write-Host ("VMU Server before upgrade: running ({0} process(es)); stopping before build..." -f $processes.Count)
+    foreach ($process in $processes) {
+        Write-Host ("Stopping VMU Server PID {0}..." -f $process.Id)
+        $closed=$false
+        try { $closed=$process.CloseMainWindow() } catch { Write-Warning ("Could not request graceful shutdown for PID {0}: {1}" -f $process.Id,$_.Exception.Message) }
+        if ($closed) { try { $process.WaitForExit(5000) | Out-Null } catch { } }
+        try { $process.Refresh() } catch { }
+        if (-not $process.HasExited) {
+            Write-Warning ("VMU Server PID {0} did not exit gracefully; terminating it." -f $process.Id)
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            try { $process.WaitForExit(5000) | Out-Null } catch { }
+        }
+        Write-Host ("VMU Server PID {0}: stopped" -f $process.Id)
     }
-    else {
-        $warning=".NET build-server shutdown returned exit code $LASTEXITCODE. Other .NET work may still be using build infrastructure; no process was force-killed."
+    return $true
+}
+function Start-VmuServerAfterUpgrade {
+    if (-not (Test-Path -LiteralPath $ServerExe)) { throw "Cannot restart VMU Server because the published executable is missing: $ServerExe" }
+    Write-Host 'VMU Server was running before upgrade; starting the newly published server...'
+    try {
+        $process=Start-Process -FilePath $ServerExe -WorkingDirectory $RepoRoot -ArgumentList @('--repo-root',$RepoRoot) -PassThru
+        Write-Host ("VMU Server restart requested; PID {0}." -f $process.Id)
+        Start-Sleep -Seconds 2
+        $process.Refresh()
+        if ($process.HasExited) { throw "VMU Server exited during startup with exit code $($process.ExitCode)." }
+        Write-Host ("VMU Server restart: OK (PID {0})" -f $process.Id)
+        return $true
+    }
+    catch {
+        $warning="Upgrade succeeded, but VMU Server restart failed: $($_.Exception.Message)"
         $Warnings.Add($warning)
         Write-Warning $warning
+        return $false
     }
 }
 function Remove-KnownGeneratedArtifacts {
@@ -72,6 +105,7 @@ try {
     Write-Section 'Virtual Monitors Universe - DEVEL upgrade'
     Write-Host ("[{0}] Virtual Monitors Universe - DEVEL upgrade" -f (Get-Date -Format 'dd.MM.yyyy HH:mm:ss'))
     Write-Host "Repository: $RepoRoot"; Write-Host "Target branch: $RequiredBranch"; Write-Host "Required SDK: .NET $RequiredSdkMajor"; Write-Host ''
+    $ServerWasRunning=Stop-RunningVmuServer
     if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) { throw 'Git for Windows is not installed or git.exe is not in PATH.' }
     $inside=& git rev-parse --is-inside-work-tree 2>$null; if ($LASTEXITCODE -ne 0 -or $inside -ne 'true') { throw 'This folder is not a Git working tree.' }
     $branch=(& git rev-parse --abbrev-ref HEAD 2>$null).Trim(); if ($LASTEXITCODE -ne 0 -or $branch -ne $RequiredBranch) { throw "Current branch is '$branch', expected '$RequiredBranch'." }
@@ -97,8 +131,10 @@ try {
     }
     Write-Host 'Installed SDKs after SDK maintenance:'; & dotnet --list-sdks
     Write-Host '[4/5] Restoring, building, testing and publishing with .NET 10...'; Remove-KnownGeneratedArtifacts; Invoke-Native dotnet @('restore',$Solution) 'Final restore failed.'; Invoke-Native dotnet @('build',$Solution,'-c','Debug','--no-restore') 'Final build failed.'; Invoke-Native dotnet @('test',$TestProject,'-c','Debug','--no-build','--no-restore') 'Final tests failed.'; New-Item -ItemType Directory -Path $RuntimeCli -Force | Out-Null; Invoke-Native dotnet @('publish',$CliProject,'-c','Debug','--no-restore','-o',$RuntimeCli) 'CLI publish failed.'; New-Item -ItemType Directory -Path $RuntimeServer -Force | Out-Null; Invoke-Native dotnet @('publish',$ServerProject,'-c','Debug','--no-restore','-o',$RuntimeServer) 'Server publish failed.'
-    Write-Host '[5/5] Verifying final workspace and SDK state...'; Assert-WorkspaceHygiene; if (-not (Test-SdkMajorInstalled -Major 10)) { throw 'Final .NET 10 SDK verification failed.' }; if (-not (Test-Path (Join-Path $RuntimeServer 'VirtualMonitorsUniverse.Server.exe'))) { throw 'Published VMU Server executable was not found.' }
-    Write-Host 'Final workspace hygiene: OK'; Write-Host '.NET 10 SDK: OK'; Stop-IdleDotNetBuildServers; Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'; Write-Host 'Branch: devel'; Write-Host "Runtime CLI: $RuntimeCli"; Write-Host "Runtime Server: $RuntimeServer"; Write-Host "Logs: $LogDir"; Write-Host 'Next check: vmu selftest'; Write-Host 'Tray server: vmu-server.cmd'
+    Write-Host '[5/5] Verifying final workspace and SDK state...'; Assert-WorkspaceHygiene; if (-not (Test-SdkMajorInstalled -Major 10)) { throw 'Final .NET 10 SDK verification failed.' }; if (-not (Test-Path $ServerExe)) { throw 'Published VMU Server executable was not found.' }
+    Write-Host 'Final workspace hygiene: OK'; Write-Host '.NET 10 SDK: OK'; Stop-IdleDotNetBuildServers
+    if ($ServerWasRunning) { Start-VmuServerAfterUpgrade | Out-Null } else { Write-Host 'VMU Server restart: skipped because it was not running before upgrade.' }
+    Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'; Write-Host 'Branch: devel'; Write-Host "Runtime CLI: $RuntimeCli"; Write-Host "Runtime Server: $RuntimeServer"; Write-Host "Logs: $LogDir"; Write-Host 'Next check: vmu selftest'; Write-Host 'Tray server: vmu-server.cmd'
     if ($Warnings.Count -gt 0) { $FinalStatus='WARNING'; $FinalStatusColor='Yellow' } else { $FinalStatus='OK'; $FinalStatusColor='Green' }
     $ExitCode=0
 }
