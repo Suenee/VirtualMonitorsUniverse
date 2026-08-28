@@ -14,6 +14,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _icon;
     private readonly string _settingsPath;
     private readonly LogStore _logStore;
+    private readonly System.Windows.Forms.Timer _singleClickTimer;
     private LogForm? _logForm;
     private SettingsForm? _settingsForm;
     private bool _stopLogged;
@@ -31,6 +32,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         _icon = TrayIconFactory.Create(Application.ExecutablePath);
         _menu = BuildMenu();
+        _singleClickTimer = new System.Windows.Forms.Timer { Interval = Math.Max(100, SystemInformation.DoubleClickTime) };
+        _singleClickTimer.Tick += (_, _) =>
+        {
+            _singleClickTimer.Stop();
+            _menu.Show(Cursor.Position);
+        };
+
         _notifyIcon = new NotifyIcon
         {
             Icon = _icon,
@@ -38,7 +46,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = _menu,
             Visible = true,
         };
-        _notifyIcon.MouseUp += OnNotifyIconMouseUp;
+        _notifyIcon.MouseClick += OnNotifyIconMouseClick;
+        _notifyIcon.MouseDoubleClick += OnNotifyIconMouseDoubleClick;
     }
 
     protected override void Dispose(bool disposing)
@@ -46,6 +55,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         if (disposing)
         {
             LogStopOnce();
+            _singleClickTimer.Stop();
+            _singleClickTimer.Dispose();
             _logForm?.Dispose();
             _settingsForm?.Dispose();
             _notifyIcon.Visible = false;
@@ -114,12 +125,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private static ToolStripMenuItem CreatePlaceholderItem(string text) => new(text, image: null, (_, _) => { });
 
-    private void OnNotifyIconMouseUp(object? sender, MouseEventArgs e)
+    private void OnNotifyIconMouseClick(object? sender, MouseEventArgs e)
     {
-        if (e.Button == MouseButtons.Left)
-        {
-            _menu.Show(Cursor.Position);
-        }
+        if (e.Button != MouseButtons.Left) return;
+        _singleClickTimer.Stop();
+        _singleClickTimer.Start();
+    }
+
+    private void OnNotifyIconMouseDoubleClick(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        _singleClickTimer.Stop();
+        OpenWebClient();
     }
 
     private void OpenWebClient()
