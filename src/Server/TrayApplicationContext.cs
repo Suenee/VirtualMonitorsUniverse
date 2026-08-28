@@ -6,7 +6,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly NotifyIcon _notifyIcon;
     private readonly ContextMenuStrip _menu;
-    private readonly Form _menuOwner;
     private readonly Icon _icon;
     private readonly string _settingsPath;
     private readonly LogStore _logStore;
@@ -30,7 +29,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private SettingsForm? _settingsForm;
     private AboutForm? _aboutForm;
     private bool _vmuServerRunning;
-    private bool _keepMenuOpen;
     private bool _stopLogged;
     private bool _exiting;
 
@@ -46,43 +44,53 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _logStore.Write("INFO", "VMU", "APPLICATION_START", $"{ProjectInfo.ProductName} {ProjectInfo.Version} started");
 
         _icon = TrayIconFactory.Create(Application.ExecutablePath);
-        _menu = new ContextMenuStrip { ImageScalingSize = new Size(20, 20) };
-        _menuOwner = CreateMenuOwner();
-        _menu.Closing += OnMenuClosing;
-        _menu.Closed += (_, _) => { if (_menuOwner.Visible) _menuOwner.Hide(); };
+        _menu = new ContextMenuStrip
+        {
+            ImageScalingSize = new Size(20, 20),
+            ShowImageMargin = true,
+            ShowCheckMargin = false,
+        };
+        _menu.Opening += (_, _) => RefreshServiceMenuStates();
 
         _menu.Items.Add(new ToolStripMenuItem(ProjectInfo.ProductName, _icon.ToBitmap()) { Enabled = false });
         _menu.Items.Add(new ToolStripSeparator());
 
         var vmuMenu = new ToolStripMenuItem("VMU Server", UiIcons.Create(UiIconKind.Server));
         (_vmuStateItem, _vmuStartItem, _vmuStopItem, _vmuRestartItem) = PopulateServiceMenu(vmuMenu, false, OnVmuAction);
-        ConfigureSubmenu(vmuMenu);
         _menu.Items.Add(vmuMenu);
 
         var webMenu = new ToolStripMenuItem("Web Server", UiIcons.Create(UiIconKind.Web));
         (_webStateItem, _webStartItem, _webStopItem, _webRestartItem) = PopulateServiceMenu(webMenu, true, OnWebAction);
         _webOpenItem = webMenu.DropDownItems.OfType<ToolStripMenuItem>().Last();
-        ConfigureSubmenu(webMenu);
         _menu.Items.Add(webMenu);
 
         var socketMenu = new ToolStripMenuItem("Socket Server", UiIcons.Create(UiIconKind.Socket));
         (_socketStateItem, _socketStartItem, _socketStopItem, _socketRestartItem) = PopulateServiceMenu(socketMenu, false, OnSocketAction);
-        ConfigureSubmenu(socketMenu);
         _menu.Items.Add(socketMenu);
 
         var monitors = new ToolStripMenuItem("Monitors", UiIcons.Create(UiIconKind.Monitors));
         monitors.DropDownItems.Add(new ToolStripMenuItem("(empty)") { Enabled = false });
-        ConfigureSubmenu(monitors);
         _menu.Items.Add(monitors);
-        _menu.Items.Add(new ToolStripMenuItem("Settings", UiIcons.Create(UiIconKind.Settings), (_, _) => { _menu.Close(); OpenSettings(); }));
-        _menu.Items.Add(new ToolStripMenuItem("View log...", UiIcons.Create(UiIconKind.Log), (_, _) => { _menu.Close(); OpenLog(); }));
+        _menu.Items.Add(new ToolStripMenuItem("Settings", UiIcons.Create(UiIconKind.Settings), (_, _) => OpenSettings()));
+        _menu.Items.Add(new ToolStripMenuItem("View log...", UiIcons.Create(UiIconKind.Log), (_, _) => OpenLog()));
         _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add(new ToolStripMenuItem("About", UiIcons.Create(UiIconKind.About), (_, _) => { _menu.Close(); OpenAbout(); }));
+        _menu.Items.Add(new ToolStripMenuItem("About", UiIcons.Create(UiIconKind.About), (_, _) => OpenAbout()));
         _menu.Items.Add(new ToolStripMenuItem("Exit", UiIcons.Create(UiIconKind.Exit), OnExit));
 
         _singleClickTimer = new System.Windows.Forms.Timer { Interval = Math.Max(100, SystemInformation.DoubleClickTime) };
-        _singleClickTimer.Tick += (_, _) => { _singleClickTimer.Stop(); ShowTrayMenu(); };
-        _notifyIcon = new NotifyIcon { Icon = _icon, Text = $"{ProjectInfo.ProductName} {ProjectInfo.Version}", Visible = true };
+        _singleClickTimer.Tick += (_, _) =>
+        {
+            _singleClickTimer.Stop();
+            ShowTrayMenu();
+        };
+
+        _notifyIcon = new NotifyIcon
+        {
+            Icon = _icon,
+            Text = $"{ProjectInfo.ProductName} {ProjectInfo.Version}",
+            ContextMenuStrip = _menu,
+            Visible = true,
+        };
         _notifyIcon.MouseClick += OnNotifyIconMouseClick;
         _notifyIcon.MouseDoubleClick += OnNotifyIconMouseDoubleClick;
         RefreshServiceMenuStates();
@@ -107,28 +115,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _menu.Dispose();
-            _menuOwner.Dispose();
             _icon.Dispose();
         }
         base.Dispose(disposing);
     }
 
-    private static Form CreateMenuOwner() => new()
-    {
-        FormBorderStyle = FormBorderStyle.None,
-        ShowInTaskbar = false,
-        StartPosition = FormStartPosition.Manual,
-        Size = new Size(1, 1),
-        Opacity = 0.01,
-        TopMost = true,
-    };
-
     private (ToolStripMenuItem State, ToolStripMenuItem Start, ToolStripMenuItem Stop, ToolStripMenuItem Restart) PopulateServiceMenu(ToolStripMenuItem parent, bool includeOpenClient, Action<int> action)
     {
         var state = new ToolStripMenuItem("Stopped", UiIcons.Create(UiIconKind.Stopped)) { Enabled = false };
-        var start = new ToolStripMenuItem("Start", UiIcons.Create(UiIconKind.Start), (_, _) => ExecuteKeepOpen(() => action(0)));
-        var stop = new ToolStripMenuItem("Stop", UiIcons.Create(UiIconKind.Stop), (_, _) => ExecuteKeepOpen(() => action(1)));
-        var restart = new ToolStripMenuItem("Restart", UiIcons.Create(UiIconKind.Restart), (_, _) => ExecuteKeepOpen(() => action(2)));
+        var start = new ToolStripMenuItem("Start", UiIcons.Create(UiIconKind.Start), (_, _) => action(0));
+        var stop = new ToolStripMenuItem("Stop", UiIcons.Create(UiIconKind.Stop), (_, _) => action(1));
+        var restart = new ToolStripMenuItem("Restart", UiIcons.Create(UiIconKind.Restart), (_, _) => action(2));
         parent.DropDownItems.Add(state);
         parent.DropDownItems.Add(new ToolStripSeparator());
         parent.DropDownItems.Add(start);
@@ -138,43 +135,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         if (includeOpenClient)
         {
             parent.DropDownItems.Add(new ToolStripSeparator());
-            parent.DropDownItems.Add(new ToolStripMenuItem("Open Client...", UiIcons.Create(UiIconKind.Open), (_, _) => { _menu.Close(); OpenWebClient(); }));
+            parent.DropDownItems.Add(new ToolStripMenuItem("Open Client...", UiIcons.Create(UiIconKind.Open), (_, _) => OpenWebClient()));
         }
         return (state, start, stop, restart);
-    }
-
-    private void ConfigureSubmenu(ToolStripMenuItem item)
-    {
-        item.DropDown.ItemClicked += (_, e) =>
-        {
-            if (e.ClickedItem.Text is "Start" or "Stop" or "Restart") _keepMenuOpen = true;
-        };
-        item.DropDown.Closing += OnMenuClosing;
-        item.DropDown.Opened += (_, _) => ClampDropDownToParentScreen(item);
-    }
-
-    private void OnMenuClosing(object? sender, ToolStripDropDownClosingEventArgs e)
-    {
-        if (_keepMenuOpen && e.CloseReason == ToolStripDropDownCloseReason.ItemClicked) e.Cancel = true;
-    }
-
-    private void ExecuteKeepOpen(Action action)
-    {
-        _keepMenuOpen = true;
-        try { action(); }
-        finally { _menuOwner.BeginInvoke((Action)(() => _keepMenuOpen = false)); }
-    }
-
-    private void ClampDropDownToParentScreen(ToolStripMenuItem parent)
-    {
-        var dropDown = parent.DropDown;
-        if (!dropDown.Visible || parent.Owner is null) return;
-        var anchor = parent.Owner.PointToScreen(parent.Bounds.Location);
-        var area = Screen.FromPoint(anchor).WorkingArea;
-        var bounds = dropDown.Bounds;
-        var x = Math.Clamp(bounds.X, area.Left, Math.Max(area.Left, area.Right - bounds.Width));
-        var y = Math.Clamp(bounds.Y, area.Top, Math.Max(area.Top, area.Bottom - bounds.Height));
-        if (x != bounds.X || y != bounds.Y) dropDown.Location = new Point(x, y);
     }
 
     private void OnVmuAction(int action)
@@ -256,18 +219,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _menu.Close(ToolStripDropDownCloseReason.AppClicked);
             return;
         }
-        var cursor = Cursor.Position;
-        var area = Screen.FromPoint(cursor).WorkingArea;
-        _menuOwner.Location = new Point(Math.Clamp(cursor.X, area.Left, area.Right - 1), Math.Clamp(cursor.Y, area.Top, area.Bottom - 1));
-        if (!_menuOwner.Visible) _menuOwner.Show();
-        _menuOwner.Activate();
-        _menu.Show(_menuOwner, Point.Empty);
+
+        RefreshServiceMenuStates();
+        _menu.Show(Cursor.Position);
     }
 
     private void OnNotifyIconMouseClick(object? sender, MouseEventArgs e)
     {
-        if (e.Button == MouseButtons.Right) { _singleClickTimer.Stop(); ShowTrayMenu(); return; }
-        if (e.Button == MouseButtons.Left) { _singleClickTimer.Stop(); _singleClickTimer.Start(); }
+        // Right-click is handled by NotifyIcon.ContextMenuStrip. Keeping it on the
+        // standard WinForms path lets the shell select the correct monitor and edge.
+        if (e.Button != MouseButtons.Left) return;
+        _singleClickTimer.Stop();
+        _singleClickTimer.Start();
     }
 
     private void OnNotifyIconMouseDoubleClick(object? sender, MouseEventArgs e)
@@ -350,7 +313,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             {
                 await Task.Delay(400);
                 try { await _webService.RestartAsync(proposed.Web); } catch { }
-                try { _menuOwner.BeginInvoke((Action)RefreshServiceMenuStates); } catch { }
+                try { _menu.BeginInvoke((Action)RefreshServiceMenuStates); } catch { }
             });
         }
         if (_socketService.IsRunning && EndpointChanged(current.Socket, proposed.Socket)) _ = _socketService.RestartAsync(proposed.Socket);
@@ -402,7 +365,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         try { _logForm?.Close(); } catch { }
         try { _settingsForm?.Close(); } catch { }
         try { _aboutForm?.Close(); } catch { }
-        foreach (Form form in Application.OpenForms.Cast<Form>().Where(x => x != _menuOwner).ToArray())
+        foreach (Form form in Application.OpenForms.Cast<Form>().ToArray())
         {
             try { form.Close(); } catch { }
         }
