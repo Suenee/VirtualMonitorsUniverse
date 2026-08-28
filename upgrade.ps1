@@ -134,12 +134,12 @@ try {
     Write-Host '[5/5] Verifying final workspace and SDK state...'; Assert-WorkspaceHygiene; if (-not (Test-SdkMajorInstalled -Major 10)) { throw 'Final .NET 10 SDK verification failed.' }; if (-not (Test-Path $ServerExe)) { throw 'Published VMU Server executable was not found.' }
     Write-Host 'Final workspace hygiene: OK'; Write-Host '.NET 10 SDK: OK'; Stop-IdleDotNetBuildServers
     if ($ServerWasRunning) { Start-VmuServerAfterUpgrade | Out-Null } else { Write-Host 'VMU Server restart: skipped because it was not running before upgrade.' }
-    Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'; Write-Host 'Branch: devel'; Write-Host "Runtime CLI: $RuntimeCli"; Write-Host "Runtime Server: $RuntimeServer"; Write-Host "Logs: $LogDir"; Write-Host 'Next check: vmu selftest'; Write-Host 'Tray server: vmu-server.cmd'
+    Write-Section 'UPGRADE COMPLETED SUCCESSFULLY'; Write-Host 'Branch: devel'; Write-Host "Runtime CLI: $RuntimeCli"; Write-Host "Runtime Server: $RuntimeServer"; Write-Host "Upgrade log: $LogFile"; Write-Host 'Next check: vmu selftest'; Write-Host 'Tray server: vmu-server.cmd'
     if ($Warnings.Count -gt 0) { $FinalStatus='WARNING'; $FinalStatusColor='Yellow' } else { $FinalStatus='OK'; $FinalStatusColor='Green' }
     $ExitCode=0
 }
 catch {
-    Write-Host ''; Write-Host '============================================' -ForegroundColor Red; Write-Host 'UPGRADE FAILED' -ForegroundColor Red; Write-Host '============================================' -ForegroundColor Red; Write-Host $_.Exception.Message -ForegroundColor Red; Write-Host "See logs\upgrade.log for details."; $FinalStatus='FAILED'; $FinalStatusColor='Red'; $ExitCode=1
+    Write-Host ''; Write-Host '============================================' -ForegroundColor Red; Write-Host 'UPGRADE FAILED' -ForegroundColor Red; Write-Host '============================================' -ForegroundColor Red; Write-Host $_.Exception.Message -ForegroundColor Red; Write-Host "See $LogFile for details."; $FinalStatus='FAILED'; $FinalStatusColor='Red'; $ExitCode=1
 }
 finally {
     try { Stop-Transcript | Out-Null } catch { }
