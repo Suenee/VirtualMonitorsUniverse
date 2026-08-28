@@ -4,20 +4,7 @@ namespace VirtualMonitorsUniverse.Server;
 
 internal enum UiIconKind
 {
-    Start,
-    Stop,
-    Restart,
-    Exit,
-    Settings,
-    Log,
-    Running,
-    Stopped,
-    Server,
-    Web,
-    Socket,
-    Monitors,
-    Open,
-    About,
+    Start, Stop, Restart, Exit, Settings, Log, Export, Running, Stopped, Error, Server, Web, Socket, Monitors, Open, About,
 }
 
 internal static class UiIcons
@@ -33,22 +20,14 @@ internal static class UiIcons
         switch (kind)
         {
             case UiIconKind.Start:
-                using (var brush = new SolidBrush(Color.FromArgb(40, 170, 60)))
-                    graphics.FillPolygon(brush, [Point(5, 3, scale), Point(17, 10, scale), Point(5, 17, scale)]);
+                using (var brush = new SolidBrush(Color.FromArgb(40, 170, 60))) graphics.FillPolygon(brush, [Point(5, 3, scale), Point(17, 10, scale), Point(5, 17, scale)]);
                 break;
             case UiIconKind.Stop:
-                using (var brush = new SolidBrush(Color.FromArgb(220, 45, 45)))
-                    graphics.FillRectangle(brush, 4 * scale, 4 * scale, 12 * scale, 12 * scale);
+                using (var brush = new SolidBrush(Color.FromArgb(220, 45, 45))) graphics.FillRectangle(brush, 4 * scale, 4 * scale, 12 * scale, 12 * scale);
                 break;
             case UiIconKind.Restart:
-                using (var pen = new Pen(Color.FromArgb(35, 120, 210), Math.Max(1.5f, 2.3f * scale)))
-                {
-                    pen.StartCap = LineCap.Round;
-                    pen.EndCap = LineCap.Round;
-                    graphics.DrawArc(pen, 3 * scale, 3 * scale, 14 * scale, 14 * scale, 45, 285);
-                }
-                using (var brush = new SolidBrush(Color.FromArgb(35, 120, 210)))
-                    graphics.FillPolygon(brush, [Point(15, 2, scale), Point(18, 7, scale), Point(12, 7, scale)]);
+                using (var pen = new Pen(Color.FromArgb(35, 120, 210), Math.Max(1.5f, 2.3f * scale)) { StartCap = LineCap.Round, EndCap = LineCap.Round }) graphics.DrawArc(pen, 3 * scale, 3 * scale, 14 * scale, 14 * scale, 45, 285);
+                using (var brush = new SolidBrush(Color.FromArgb(35, 120, 210))) graphics.FillPolygon(brush, [Point(15, 2, scale), Point(18, 7, scale), Point(12, 7, scale)]);
                 break;
             case UiIconKind.Exit:
                 DrawExit(graphics, scale);
@@ -59,10 +38,21 @@ internal static class UiIcons
             case UiIconKind.Log:
                 DrawLog(graphics, scale);
                 break;
+            case UiIconKind.Export:
+                using (var pen = new Pen(Color.FromArgb(45, 110, 190), Math.Max(1.2f, 1.8f * scale)))
+                {
+                    graphics.DrawRectangle(pen, 4 * scale, 9 * scale, 12 * scale, 8 * scale);
+                    graphics.DrawLine(pen, 10 * scale, 3 * scale, 10 * scale, 12 * scale);
+                }
+                using (var brush = new SolidBrush(Color.FromArgb(45, 110, 190))) graphics.FillPolygon(brush, [Point(6, 7, scale), Point(10, 3, scale), Point(14, 7, scale)]);
+                break;
             case UiIconKind.Running:
                 DrawDot(graphics, scale, Color.FromArgb(35, 170, 70));
                 break;
             case UiIconKind.Stopped:
+                DrawDot(graphics, scale, Color.FromArgb(180, 180, 180));
+                break;
+            case UiIconKind.Error:
                 DrawDot(graphics, scale, Color.FromArgb(215, 55, 55));
                 break;
             case UiIconKind.Server:
@@ -97,7 +87,6 @@ internal static class UiIcons
                 using (var brush = new SolidBrush(Color.White)) graphics.DrawString("i", font, brush, 8 * scale, 3 * scale);
                 break;
         }
-
         return bitmap;
     }
 
