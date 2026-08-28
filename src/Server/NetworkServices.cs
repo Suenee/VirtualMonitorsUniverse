@@ -60,11 +60,13 @@ internal sealed class WebServerService : NetworkService
 
     private static IResult Html(string title, string message)
     {
-        var body = $"""
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title} - VMU</title>
-<style>body{{font-family:Segoe UI,Arial,sans-serif;margin:0;color:#202124}}nav{{background:#202124;padding:12px 18px}}nav a{{color:white;text-decoration:none;margin-right:20px}}main{{max-width:1000px;margin:36px auto;padding:0 20px}}h1{{font-size:28px}}</style></head>
-<body><nav><a href="/settings">⚙ Settings</a><a href="/monitors">Monitors</a><a href="/status">Status</a><a href="/log">View Log</a></nav><main><h1>{title}</h1><p>{message}</p></main></body></html>
-""";
+        var body = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>"
+            + title
+            + " - VMU</title><style>body{font-family:Segoe UI,Arial,sans-serif;margin:0;color:#202124}nav{background:#202124;padding:12px 18px}nav a{color:white;text-decoration:none;margin-right:20px}main{max-width:1000px;margin:36px auto;padding:0 20px}h1{font-size:28px}</style></head><body><nav><a href=\"/settings\">⚙ Settings</a><a href=\"/monitors\">Monitors</a><a href=\"/status\">Status</a><a href=\"/log\">View Log</a></nav><main><h1>"
+            + title
+            + "</h1><p>"
+            + message
+            + "</p></main></body></html>";
         return Results.Content(body, "text/html; charset=utf-8");
     }
 }
