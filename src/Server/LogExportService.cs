@@ -46,10 +46,7 @@ internal static class LogExportService
     {
         using var writer = new StreamWriter(path, false, new UTF8Encoding(true));
         writer.WriteLine(string.Join(',', Headers.Select(Csv)));
-        foreach (var entry in entries)
-        {
-            writer.WriteLine(string.Join(',', Values(entry).Select(Csv)));
-        }
+        foreach (var entry in entries) writer.WriteLine(string.Join(',', Values(entry).Select(Csv)));
     }
 
     private static void WriteText(string path, IReadOnlyList<LogEntry> entries)
@@ -61,6 +58,7 @@ internal static class LogExportService
 
     private static void WriteXlsx(string path, IReadOnlyList<LogEntry> entries)
     {
+        if (File.Exists(path)) File.Delete(path);
         using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
         WriteEntry(archive, "[Content_Types].xml", """
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
