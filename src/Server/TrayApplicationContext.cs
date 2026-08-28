@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing;
 using System.Windows.Forms;
 
@@ -37,6 +38,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = _menu,
             Visible = true,
         };
+        _notifyIcon.MouseUp += OnNotifyIconMouseUp;
     }
 
     protected override void Dispose(bool disposing)
@@ -60,9 +62,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add(new ToolStripMenuItem("Virtual Monitors Universe") { Enabled = false });
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(CreateServiceMenu("Server"));
-        menu.Items.Add(CreateServiceMenu("Web Server"));
-        menu.Items.Add(CreateServiceMenu("WebSocket"));
+        menu.Items.Add(CreateServiceMenu("VMU Server", running: true));
+        menu.Items.Add(CreateServiceMenu("Web Server", running: false, includeOpenClient: true));
+        menu.Items.Add(CreateServiceMenu("Web Socket", running: false));
         menu.Items.Add(CreateMonitorsMenu());
         menu.Items.Add(new ToolStripMenuItem("Settings", image: null, (_, _) => OpenSettings()));
         menu.Items.Add(new ToolStripMenuItem("View log...", image: null, (_, _) => OpenLog()));
@@ -72,12 +74,35 @@ internal sealed class TrayApplicationContext : ApplicationContext
         return menu;
     }
 
-    private static ToolStripMenuItem CreateServiceMenu(string text)
+    private ToolStripMenuItem CreateServiceMenu(string text, bool running, bool includeOpenClient = false)
     {
         var item = new ToolStripMenuItem(text);
+        item.DropDownItems.Add(new ToolStripMenuItem(running ? "Running" : "Stopped")
+        {
+            Enabled = false,
+            Image = CreateStatusImage(running ? Color.ForestGreen : Color.Firebrick),
+        });
+        item.DropDownItems.Add(new ToolStripSeparator());
         item.DropDownItems.Add(CreatePlaceholderItem("Start"));
         item.DropDownItems.Add(CreatePlaceholderItem("Stop"));
+        item.DropDownItems.Add(new ToolStripSeparator());
+        item.DropDownItems.Add(CreatePlaceholderItem("Restart"));
+        if (includeOpenClient)
+        {
+            item.DropDownItems.Add(new ToolStripSeparator());
+            item.DropDownItems.Add(new ToolStripMenuItem("Open Client...", image: null, (_, _) => OpenWebClient()));
+        }
         return item;
+    }
+
+    private static Bitmap CreateStatusImage(Color color)
+    {
+        var bitmap = new Bitmap(12, 12);
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        using var brush = new SolidBrush(color);
+        graphics.FillEllipse(brush, 2, 2, 8, 8);
+        return bitmap;
     }
 
     private static ToolStripMenuItem CreateMonitorsMenu()
@@ -88,6 +113,28 @@ internal sealed class TrayApplicationContext : ApplicationContext
     }
 
     private static ToolStripMenuItem CreatePlaceholderItem(string text) => new(text, image: null, (_, _) => { });
+
+    private void OnNotifyIconMouseUp(object? sender, MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            _menu.Show(Cursor.Position);
+        }
+    }
+
+    private void OpenWebClient()
+    {
+        try
+        {
+            var settings = ServerSettings.Load(_settingsPath);
+            var url = $"http://127.0.0.1:{settings.Web.Port}/";
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not open the web client.\r\n\r\n{ex.Message}", "VMU Web Client", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
 
     private void OpenLog()
     {
