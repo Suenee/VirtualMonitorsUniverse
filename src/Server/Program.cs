@@ -12,16 +12,28 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
 
-        using var singleInstanceMutex = new Mutex(
-            initiallyOwned: true,
-            SingleInstanceMutexName,
-            out var isFirstInstance);
+        using var singleInstanceMutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var isFirstInstance);
+        if (!isFirstInstance) return;
 
-        if (!isFirstInstance)
+        TrayApplicationContext? context = null;
+        try
         {
-            return;
+            context = new TrayApplicationContext();
+            Application.ThreadException += (_, args) => context.LogCrash(args.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            {
+                if (args.ExceptionObject is Exception exception) context.LogCrash(exception);
+            };
+            Application.Run(context);
         }
-
-        Application.Run(new TrayApplicationContext());
+        catch (Exception ex)
+        {
+            context?.LogCrash(ex);
+            throw;
+        }
+        finally
+        {
+            context?.Dispose();
+        }
     }
 }
