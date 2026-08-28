@@ -4,9 +4,7 @@ namespace VirtualMonitorsUniverse.Server;
 
 internal sealed record LogEntry(long Id, DateTime Timestamp, string Level, string Service, string? MonitorId, string Event, string Message, string? DetailsJson);
 
-/// <summary>
-/// Persists operational VMU events in SQLite and applies the configured retention policy.
-/// </summary>
+/// <summary>Persists and queries operational VMU events in SQLite.</summary>
 internal sealed class LogStore
 {
     private readonly string _databasePath;
@@ -36,23 +34,45 @@ internal sealed class LogStore
         command.ExecuteNonQuery();
     }
 
-    public IReadOnlyList<LogEntry> ReadAll(string? search = null)
+    public IReadOnlyList<LogEntry> Read(string? search = null, IReadOnlyCollection<string>? services = null, long afterId = 0)
     {
         using var connection = Open();
         using var command = connection.CreateCommand();
-        command.CommandText = string.IsNullOrWhiteSpace(search)
-            ? "SELECT id,timestamp_utc,level,service,monitor_id,event,message,details_json FROM log_entries ORDER BY id"
-            : "SELECT id,timestamp_utc,level,service,monitor_id,event,message,details_json FROM log_entries WHERE level LIKE $q OR service LIKE $q OR COALESCE(monitor_id,'') LIKE $q OR event LIKE $q OR message LIKE $q OR COALESCE(details_json,'') LIKE $q ORDER BY id";
-        if (!string.IsNullOrWhiteSpace(search)) command.Parameters.AddWithValue("$q", $"%{search.Trim()}%");
+        var where = new List<string> { "id > $after" };
+        command.Parameters.AddWithValue("$after", afterId);
 
-        var result = new List<LogEntry>();
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        if (!string.IsNullOrWhiteSpace(search))
         {
-            var utc = DateTime.Parse(reader.GetString(1), null, System.Globalization.DateTimeStyles.RoundtripKind);
-            result.Add(new LogEntry(reader.GetInt64(0), utc.ToLocalTime(), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7)));
+            where.Add("(level LIKE $q OR service LIKE $q OR COALESCE(monitor_id,'') LIKE $q OR event LIKE $q OR message LIKE $q OR COALESCE(details_json,'') LIKE $q)");
+            command.Parameters.AddWithValue("$q", $"%{search.Trim()}%");
         }
-        return result;
+
+        if (services is { Count: > 0 })
+        {
+            var names = services.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var parameters = new List<string>(names.Length);
+            for (var i = 0; i < names.Length; i++)
+            {
+                var parameter = $"$service{i}";
+                parameters.Add(parameter);
+                command.Parameters.AddWithValue(parameter, names[i]);
+            }
+            where.Add($"service IN ({string.Join(',', parameters)})");
+        }
+
+        command.CommandText = $"SELECT id,timestamp_utc,level,service,monitor_id,event,message,details_json FROM log_entries WHERE {string.Join(" AND ", where)} ORDER BY id";
+        return ReadEntries(command);
+    }
+
+    public IReadOnlyList<LogEntry> ReadAll(string? search = null) => Read(search);
+
+    public LogEntry? ReadById(long id)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id,timestamp_utc,level,service,monitor_id,event,message,details_json FROM log_entries WHERE id=$id";
+        command.Parameters.AddWithValue("$id", id);
+        return ReadEntries(command).FirstOrDefault();
     }
 
     public void Clear()
@@ -65,12 +85,23 @@ internal sealed class LogStore
 
     public int DeleteOlderThan(int retentionMinutes)
     {
-        var safeMinutes = Math.Max(1, retentionMinutes);
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM log_entries WHERE timestamp_utc < $cutoff";
-        command.Parameters.AddWithValue("$cutoff", DateTime.UtcNow.AddMinutes(-safeMinutes).ToString("O"));
+        command.Parameters.AddWithValue("$cutoff", DateTime.UtcNow.AddMinutes(-Math.Max(1, retentionMinutes)).ToString("O"));
         return command.ExecuteNonQuery();
+    }
+
+    private static IReadOnlyList<LogEntry> ReadEntries(SqliteCommand command)
+    {
+        var result = new List<LogEntry>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var utc = DateTime.Parse(reader.GetString(1), null, System.Globalization.DateTimeStyles.RoundtripKind);
+            result.Add(new LogEntry(reader.GetInt64(0), utc.ToLocalTime(), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7)));
+        }
+        return result;
     }
 
     private SqliteConnection Open()
@@ -96,6 +127,7 @@ internal sealed class LogStore
                 details_json TEXT NULL
             );
             CREATE INDEX IF NOT EXISTS ix_log_entries_timestamp ON log_entries(timestamp_utc);
+            CREATE INDEX IF NOT EXISTS ix_log_entries_service ON log_entries(service);
             CREATE INDEX IF NOT EXISTS ix_log_entries_monitor ON log_entries(monitor_id);
             """;
         command.ExecuteNonQuery();
