@@ -25,7 +25,7 @@ internal sealed class AboutForm : Form
 
         var info = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Dock = DockStyle.Fill };
         var baseFont = SystemFonts.MessageBoxFont ?? Control.DefaultFont;
-        info.Controls.Add(new Label { Text = ProjectInfo.ProductName, AutoSize = true, Font = new Font(baseFont, 12f, FontStyle.Bold) });
+        info.Controls.Add(new Label { Text = ProjectInfo.ProductName, AutoSize = true, Font = new Font(baseFont.FontFamily, 12f, FontStyle.Bold) });
         info.Controls.Add(new Label { Text = $"Version {ProjectInfo.Version}", AutoSize = true, Margin = new Padding(0, 5, 0, 0) });
         info.Controls.Add(new Label { Text = ".NET 10 • Windows", AutoSize = true });
         info.Controls.Add(new Label { Text = "Virtual display, remote desktop and control platform.", AutoSize = true, MaximumSize = new Size(350, 0), Margin = new Padding(0, 10, 0, 0) });
