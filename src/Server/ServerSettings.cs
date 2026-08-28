@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace VirtualMonitorsUniverse.Server;
 
@@ -75,6 +76,7 @@ internal sealed class LoggingSettings
     public int RetentionMinutes { get; set; } = 10080;
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
 internal enum MonitorExitAction
 {
     Disconnect,
