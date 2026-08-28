@@ -78,7 +78,17 @@ internal sealed class LogDetailForm : Form
         layout.Controls.Add(rightValue, 3, row);
     }
 
-    private static Label CreateName(string text) => new() { Text = text + ":", AutoSize = true, Font = new Font(SystemFonts.MessageBoxFont, FontStyle.Bold), Margin = new Padding(0, 2, 8, 2) };
+    private static Label CreateName(string text)
+    {
+        var baseFont = SystemFonts.MessageBoxFont ?? Control.DefaultFont;
+        return new Label
+        {
+            Text = text + ":",
+            AutoSize = true,
+            Font = new Font(baseFont, FontStyle.Bold),
+            Margin = new Padding(0, 2, 8, 2),
+        };
+    }
 
     private static string FormatDetails(string? json)
     {
