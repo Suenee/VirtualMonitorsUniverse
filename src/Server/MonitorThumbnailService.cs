@@ -16,6 +16,8 @@ namespace VirtualMonitorsUniverse.Server;
 /// demand-driven producer per monitor. Each HTTP client keeps its own sequence
 /// cursor so a slow sender skips stale frames and receives the newest frame.
 /// Capture cadence is driven by DXGI changes, not by a fixed timer.
+/// Failed or completed live producers are never reused: a subsequent request
+/// receives a fresh DXGI Desktop Duplication session instead of a stale frame.
 /// </summary>
 internal sealed class MonitorThumbnailService
 {
@@ -36,6 +38,7 @@ internal sealed class MonitorThumbnailService
             if (_cache.TryGetValue(cacheKey, out cached) && DateTime.UtcNow - cached.CreatedUtc < _cacheLifetime) return cached.JpegBytes;
 
             if (_liveFeeds.TryGetValue(cacheKey, out var live)
+                && live.IsReusable
                 && live.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase)
                 && live.LastFrame is { Length: > 0 } liveFrame)
             {
@@ -61,39 +64,87 @@ internal sealed class MonitorThumbnailService
         CancellationToken cancellationToken)
     {
         var profile = LiveStreamProfile.Create(settings, localhost);
-        var feed = GetOrCreateLiveFeed(cacheKey, deviceName, profile);
-        feed.Touch();
 
-        var cursor = _liveClients.GetOrAdd(cancellationToken, token =>
+        for (var attempt = 0; ; attempt++)
         {
-            var created = new LiveClientCursor(feed);
-            if (token.CanBeCanceled)
+            cancellationToken.ThrowIfCancellationRequested();
+            var feed = GetOrCreateLiveFeed(cacheKey, deviceName, profile);
+            feed.Touch();
+
+            var cursor = GetOrCreateClientCursor(cancellationToken, feed);
+            if (!ReferenceEquals(cursor.Feed, feed))
             {
-                created.Registration = token.Register(() =>
-                {
-                    if (_liveClients.TryRemove(token, out var removed)) removed.Registration.Dispose();
-                });
+                RemoveClientCursor(cancellationToken);
+                continue;
             }
-            return created;
-        });
 
-        if (!ReferenceEquals(cursor.Feed, feed))
-        {
-            cursor.Registration.Dispose();
-            _liveClients.TryRemove(cancellationToken, out _);
-            return await GetLiveFrameAsync(cacheKey, deviceName, settings, localhost, cancellationToken);
+            try
+            {
+                var frame = await feed.WaitNextAsync(cursor.Sequence, cancellationToken);
+                cursor.Sequence = frame.Sequence;
+                return frame.JpegBytes;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch when (attempt < 2)
+            {
+                RemoveClientCursor(cancellationToken);
+                RemoveLiveFeed(cacheKey, feed);
+                _cache.TryRemove(cacheKey, out _);
+                await Task.Delay(100, cancellationToken);
+            }
         }
-
-        var frame = await feed.WaitNextAsync(cursor.Sequence, cancellationToken);
-        cursor.Sequence = frame.Sequence;
-        return frame.JpegBytes;
     }
 
     public void Invalidate(string cacheKey) => _cache.TryRemove(cacheKey, out _);
 
     public void InvalidateLive(string cacheKey)
     {
-        if (_liveFeeds.TryRemove(cacheKey, out var feed)) _ = feed.DisposeAsync();
+        _cache.TryRemove(cacheKey, out _);
+        if (_liveFeeds.TryRemove(cacheKey, out var feed))
+        {
+            RemoveClientCursors(feed);
+            _ = feed.DisposeAsync();
+        }
+    }
+
+    private LiveClientCursor GetOrCreateClientCursor(CancellationToken cancellationToken, LiveFrameFeed feed)
+    {
+        return _liveClients.GetOrAdd(cancellationToken, token =>
+        {
+            var created = new LiveClientCursor(feed);
+            if (token.CanBeCanceled)
+            {
+                created.Registration = token.Register(() => RemoveClientCursor(token));
+            }
+            return created;
+        });
+    }
+
+    private void RemoveClientCursor(CancellationToken token)
+    {
+        if (_liveClients.TryRemove(token, out var removed)) removed.Registration.Dispose();
+    }
+
+    private void RemoveClientCursors(LiveFrameFeed feed)
+    {
+        foreach (var pair in _liveClients)
+        {
+            if (ReferenceEquals(pair.Value.Feed, feed)) RemoveClientCursor(pair.Key);
+        }
+    }
+
+    private void RemoveLiveFeed(string cacheKey, LiveFrameFeed feed)
+    {
+        if (_liveFeeds.TryGetValue(cacheKey, out var current)
+            && ReferenceEquals(current, feed)
+            && _liveFeeds.TryRemove(cacheKey, out var removed))
+        {
+            RemoveClientCursors(removed);
+            _ = removed.DisposeAsync();
+        }
     }
 
     private LiveFrameFeed GetOrCreateLiveFeed(string cacheKey, string deviceName, LiveStreamProfile profile)
@@ -101,9 +152,14 @@ internal sealed class MonitorThumbnailService
         while (true)
         {
             var feed = _liveFeeds.GetOrAdd(cacheKey, _ => new LiveFrameFeed(deviceName, profile));
-            if (feed.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase) && feed.Profile == profile) return feed;
+            if (feed.IsReusable
+                && feed.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase)
+                && feed.Profile == profile)
+            {
+                return feed;
+            }
 
-            if (_liveFeeds.TryRemove(cacheKey, out var stale)) _ = stale.DisposeAsync();
+            RemoveLiveFeed(cacheKey, feed);
         }
     }
 
@@ -328,11 +384,19 @@ internal sealed class MonitorThumbnailService
         public string DeviceName { get; }
         public LiveStreamProfile Profile { get; }
 
+        public bool IsReusable
+        {
+            get
+            {
+                lock (_sync) return !_completed && _failure is null;
+            }
+        }
+
         public byte[]? LastFrame
         {
             get
             {
-                lock (_sync) return _lastFrame;
+                lock (_sync) return IsReusableUnsafe() ? _lastFrame : null;
             }
         }
 
@@ -346,8 +410,8 @@ internal sealed class MonitorThumbnailService
                 lock (_sync)
                 {
                     if (_failure is not null) throw new InvalidOperationException("Terminal capture producer failed.", _failure);
+                    if (_completed) throw new InvalidOperationException("Terminal capture producer stopped and must be recreated.");
                     if (_sequence > afterSequence && _lastFrame is not null) return new LiveFrame(_sequence, _lastFrame);
-                    if (_completed) throw new OperationCanceledException("Terminal capture producer stopped.");
                     waitTask = _nextFrame.Task;
                 }
                 await waitTask.WaitAsync(cancellationToken);
@@ -385,7 +449,11 @@ internal sealed class MonitorThumbnailService
             }
             catch (Exception ex)
             {
-                lock (_sync) _failure = ex;
+                lock (_sync)
+                {
+                    _lastFrame = null;
+                    _failure = ex;
+                }
             }
             finally
             {
@@ -393,6 +461,7 @@ internal sealed class MonitorThumbnailService
                 lock (_sync)
                 {
                     _completed = true;
+                    _lastFrame = null;
                     signal = _nextFrame;
                 }
                 signal.TrySetResult(true);
@@ -407,6 +476,7 @@ internal sealed class MonitorThumbnailService
             _stop.Dispose();
         }
 
+        private bool IsReusableUnsafe() => !_completed && _failure is null;
         private static TaskCompletionSource<bool> NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
