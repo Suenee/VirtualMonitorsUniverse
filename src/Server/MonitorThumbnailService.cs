@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Drawing;
 using System.Drawing.Imaging;
-using System.Runtime.CompilerServices;
 using SharpGen.Runtime;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
@@ -12,28 +11,29 @@ namespace VirtualMonitorsUniverse.Server;
 
 /// <summary>
 /// Captures exact monitor frames through DXGI Desktop Duplication.
-/// Thumbnail capture remains cached. Live Terminal capture uses one shared,
-/// demand-driven producer per monitor so slow clients never block acquisition
-/// and every viewer receives the newest available immutable JPEG frame.
+/// Thumbnail capture remains cached, while live Terminal capture reuses its
+/// D3D11/Desktop Duplication objects between frames. Live capture releases the
+/// duplicated desktop frame immediately after the GPU copy and encodes directly
+/// from the mapped staging texture to minimize latency and CPU memory traffic.
 /// </summary>
 internal sealed class MonitorThumbnailService
 {
     private static readonly FeatureLevel[] FeatureLevels = [FeatureLevel.Level_11_1, FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0];
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _thumbnailLocks = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, LiveFrameFeed> _liveFeeds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _captureLocks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, LiveCaptureSession> _liveSessions = new(StringComparer.OrdinalIgnoreCase);
     private readonly TimeSpan _cacheLifetime = TimeSpan.FromSeconds(5);
 
     public async Task<byte[]> GetThumbnailAsync(string cacheKey, string deviceName, CancellationToken cancellationToken)
     {
         if (_cache.TryGetValue(cacheKey, out var cached) && DateTime.UtcNow - cached.CreatedUtc < _cacheLifetime) return cached.JpegBytes;
-        var gate = _thumbnailLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
+        var gate = _captureLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken);
         try
         {
             if (_cache.TryGetValue(cacheKey, out cached) && DateTime.UtcNow - cached.CreatedUtc < _cacheLifetime) return cached.JpegBytes;
 
-            if (_liveFeeds.TryGetValue(cacheKey, out var live)
+            if (_liveSessions.TryGetValue(cacheKey, out var live)
                 && live.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase)
                 && live.LastFrame is { Length: > 0 } liveFrame)
             {
@@ -51,39 +51,36 @@ internal sealed class MonitorThumbnailService
         }
     }
 
-    public async IAsyncEnumerable<byte[]> StreamLiveFramesAsync(
-        string cacheKey,
-        string deviceName,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+    public async Task<byte[]> GetLiveFrameAsync(string cacheKey, string deviceName, CancellationToken cancellationToken)
     {
-        LiveFrameFeed feed;
-        while (true)
-        {
-            feed = _liveFeeds.GetOrAdd(cacheKey, _ => new LiveFrameFeed(deviceName));
-            if (feed.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase)) break;
-
-            if (_liveFeeds.TryRemove(cacheKey, out var stale)) await stale.DisposeAsync();
-        }
-
-        feed.AddViewer();
-        long sequence = 0;
+        var gate = _captureLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
         try
         {
-            while (!cancellationToken.IsCancellationRequested)
+            if (!_liveSessions.TryGetValue(cacheKey, out var session) || !session.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase))
             {
-                var next = await feed.WaitNextAsync(sequence, cancellationToken);
-                sequence = next.Sequence;
-                yield return next.JpegBytes;
+                if (session is not null)
+                {
+                    _liveSessions.TryRemove(cacheKey, out _);
+                    session.Dispose();
+                }
+                session = new LiveCaptureSession(deviceName);
+                _liveSessions[cacheKey] = session;
+            }
+
+            try
+            {
+                return await Task.Run(session.CaptureFrame, cancellationToken);
+            }
+            catch
+            {
+                if (_liveSessions.TryRemove(cacheKey, out var broken)) broken.Dispose();
+                throw;
             }
         }
         finally
         {
-            if (feed.RemoveViewer() == 0)
-            {
-                if (_liveFeeds.TryGetValue(cacheKey, out var current) && ReferenceEquals(current, feed))
-                    _liveFeeds.TryRemove(cacheKey, out _);
-                await feed.DisposeAsync();
-            }
+            gate.Release();
         }
     }
 
@@ -257,106 +254,6 @@ internal sealed class MonitorThumbnailService
     }
 
     private sealed record CacheEntry(DateTime CreatedUtc, byte[] JpegBytes);
-    private sealed record LiveFrame(long Sequence, byte[] JpegBytes);
-
-    private sealed class LiveFrameFeed : IAsyncDisposable
-    {
-        private readonly object _sync = new();
-        private readonly CancellationTokenSource _stop = new();
-        private readonly LiveCaptureSession _session;
-        private readonly Task _producer;
-        private TaskCompletionSource<bool> _nextFrame = NewSignal();
-        private byte[]? _lastFrame;
-        private Exception? _failure;
-        private long _sequence;
-        private int _viewers;
-        private bool _completed;
-
-        public LiveFrameFeed(string deviceName)
-        {
-            DeviceName = deviceName;
-            _session = new LiveCaptureSession(deviceName);
-            _producer = Task.Run(ProduceAsync);
-        }
-
-        public string DeviceName { get; }
-
-        public byte[]? LastFrame
-        {
-            get
-            {
-                lock (_sync) return _lastFrame;
-            }
-        }
-
-        public void AddViewer() => Interlocked.Increment(ref _viewers);
-        public int RemoveViewer() => Interlocked.Decrement(ref _viewers);
-
-        public async Task<LiveFrame> WaitNextAsync(long afterSequence, CancellationToken cancellationToken)
-        {
-            while (true)
-            {
-                Task waitTask;
-                lock (_sync)
-                {
-                    if (_failure is not null) throw new InvalidOperationException("Terminal capture producer failed.", _failure);
-                    if (_sequence > afterSequence && _lastFrame is not null) return new LiveFrame(_sequence, _lastFrame);
-                    if (_completed) throw new OperationCanceledException("Terminal capture producer stopped.");
-                    waitTask = _nextFrame.Task;
-                }
-                await waitTask.WaitAsync(cancellationToken);
-            }
-        }
-
-        private async Task ProduceAsync()
-        {
-            try
-            {
-                while (!_stop.IsCancellationRequested)
-                {
-                    var capture = await Task.Run(_session.CaptureFrame, _stop.Token);
-                    if (!capture.Changed) continue;
-
-                    TaskCompletionSource<bool> signal;
-                    lock (_sync)
-                    {
-                        _lastFrame = capture.JpegBytes;
-                        _sequence++;
-                        signal = _nextFrame;
-                        _nextFrame = NewSignal();
-                    }
-                    signal.TrySetResult(true);
-                }
-            }
-            catch (OperationCanceledException) when (_stop.IsCancellationRequested)
-            {
-            }
-            catch (Exception ex)
-            {
-                lock (_sync) _failure = ex;
-            }
-            finally
-            {
-                TaskCompletionSource<bool> signal;
-                lock (_sync)
-                {
-                    _completed = true;
-                    signal = _nextFrame;
-                }
-                signal.TrySetResult(true);
-            }
-        }
-
-        public async ValueTask DisposeAsync()
-        {
-            _stop.Cancel();
-            try { await _producer; } catch { }
-            _session.Dispose();
-            _stop.Dispose();
-        }
-
-        private static TaskCompletionSource<bool> NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
-    }
 
     private sealed class LiveCaptureSession : IDisposable
     {
@@ -392,13 +289,12 @@ internal sealed class MonitorThumbnailService
         }
 
         public string DeviceName { get; }
+        public byte[]? LastFrame => _lastFrame;
 
-        public (byte[] JpegBytes, bool Changed) CaptureFrame()
+        public byte[] CaptureFrame()
         {
-            var previous = _lastFrame;
-            var current = CaptureFromDuplication(DeviceName, _duplication, _context, _staging, _description, _width, _height, 1920, 68L, previous);
-            _lastFrame = current;
-            return (current, !ReferenceEquals(previous, current));
+            _lastFrame = CaptureFromDuplication(DeviceName, _duplication, _context, _staging, _description, _width, _height, 1920, 68L, _lastFrame);
+            return _lastFrame;
         }
 
         public void Dispose()
