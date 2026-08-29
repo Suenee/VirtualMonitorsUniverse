@@ -1,20 +1,55 @@
 using System.Drawing.Imaging;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 
 namespace VirtualMonitorsUniverse.Server;
 
-internal static class MonitorAvatarService
+/// <summary>
+/// Provides VMU monitor avatars. Built-in avatars are discovered from the
+/// Assets/Avatars directory, validated once, cached in memory and refreshed in
+/// the background when files change. Cosmetic avatar work must never block the
+/// capture/input paths or make the UI dependent on a malformed image file.
+/// </summary>
+internal static partial class MonitorAvatarService
 {
-    private static readonly string[] Animals = ["fox", "owl", "panda", "cat", "dog", "rabbit", "bear", "koala", "tiger", "lion", "penguin", "frog", "mouse", "cow", "pig", "monkey"];
+    public const int BuiltInWidth = 256;
+    public const int BuiltInHeight = 256;
+    public const long BuiltInMaxFileBytes = 256 * 1024;
+
+    private static readonly object CatalogSync = new();
+    private static readonly string BuiltInDirectory = ResolveBuiltInDirectory();
+    private static AvatarCatalog? _catalog;
+    private static FileSystemWatcher? _watcher;
+    private static int _reloadScheduled;
+    private static long _revision;
+
+    // Kept only as a compatibility/fallback label for old database values and
+    // places that have not yet been upgraded to image-based rendering.
     private static readonly Dictionary<string, string> Emoji = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["fox"] = "🦊", ["owl"] = "🦉", ["panda"] = "🐼", ["cat"] = "🐱", ["dog"] = "🐶", ["rabbit"] = "🐰",
-        ["bear"] = "🐻", ["koala"] = "🐨", ["tiger"] = "🐯", ["lion"] = "🦁", ["penguin"] = "🐧", ["frog"] = "🐸",
-        ["mouse"] = "🐭", ["cow"] = "🐮", ["pig"] = "🐷", ["monkey"] = "🐵",
+        ["dog"] = "🐶", ["cat"] = "🐱", ["mouse"] = "🐭", ["hamster"] = "🐹", ["rabbit"] = "🐰", ["fox"] = "🦊",
+        ["bear"] = "🐻", ["panda"] = "🐼", ["koala"] = "🐨", ["tiger"] = "🐯", ["lion"] = "🦁", ["frog"] = "🐸",
+        ["cow"] = "🐮", ["pig"] = "🐷", ["monkey"] = "🐵", ["penguin"] = "🐧"
     };
 
-    public static string RandomAnimal() => Animals[RandomNumberGenerator.GetInt32(Animals.Length)];
-    public static IReadOnlyList<string> AnimalNames => Animals;
+    public static IReadOnlyList<string> AnimalNames => GetCatalog().Ids;
+    public static long Revision => GetCatalog().Revision;
+
+    public static void WarmCache() => _ = GetCatalog();
+
+    public static string RandomAnimal()
+    {
+        var ids = GetCatalog().Ids;
+        return ids.Count == 0 ? "monitor" : ids[RandomNumberGenerator.GetInt32(ids.Count)];
+    }
+
+    public static bool BuiltInExists(string? id) => id is not null && GetCatalog().Images.ContainsKey(id);
+
+    public static byte[]? ReadBuiltIn(string? id)
+    {
+        if (id is null) return null;
+        return GetCatalog().Images.TryGetValue(id, out var bytes) ? bytes : null;
+    }
 
     public static string GetEmoji(string? avatarKind, string? avatarValue)
         => avatarKind?.Equals("animal", StringComparison.OrdinalIgnoreCase) == true && avatarValue is not null && Emoji.TryGetValue(avatarValue, out var emoji) ? emoji : "🖥️";
@@ -26,56 +61,36 @@ internal static class MonitorAvatarService
             var path = Path.Combine(dataRoot, "avatars", monitor.AvatarValue);
             if (File.Exists(path))
             {
-                try { using var source = Image.FromFile(path); return new Bitmap(source, new Size(20, 20)); }
-                catch { }
+                try
+                {
+                    using var source = Image.FromFile(path);
+                    return new Bitmap(source, new Size(20, 20));
+                }
+                catch
+                {
+                    // A broken custom avatar must never break the Tray menu.
+                }
+            }
+        }
+        else if (monitor.AvatarKind.Equals("animal", StringComparison.OrdinalIgnoreCase))
+        {
+            var bytes = ReadBuiltIn(monitor.AvatarValue);
+            if (bytes is not null)
+            {
+                try
+                {
+                    using var stream = new MemoryStream(bytes, writable: false);
+                    using var source = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: true);
+                    return new Bitmap(source, new Size(20, 20));
+                }
+                catch
+                {
+                    // The catalog already validates images; keep a defensive fallback.
+                }
             }
         }
 
-        var bitmap = new Bitmap(24, 24, PixelFormat.Format32bppArgb);
-        using var graphics = Graphics.FromImage(bitmap);
-        graphics.Clear(Color.Transparent);
-        using var font = new Font("Segoe UI Emoji", 16f, FontStyle.Regular, GraphicsUnit.Pixel);
-        var glyph = GetEmoji(monitor.AvatarKind, monitor.AvatarValue);
-
-        // Prefer the native WinForms text path because it can preserve color emoji.
-        TextRenderer.DrawText(
-            graphics,
-            glyph,
-            font,
-            new Rectangle(0, 0, bitmap.Width, bitmap.Height),
-            Color.Black,
-            Color.Transparent,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
-
-        // Some Windows/graphics combinations produce a completely transparent
-        // bitmap for color emoji. In that case use GDI+ as a deterministic visible
-        // fallback. It can be monochrome, but the selected avatar remains legible.
-        if (!HasVisiblePixels(bitmap))
-        {
-            graphics.Clear(Color.Transparent);
-            using var format = new StringFormat
-            {
-                Alignment = StringAlignment.Center,
-                LineAlignment = StringAlignment.Center,
-                FormatFlags = StringFormatFlags.NoClip
-            };
-            using var brush = new SolidBrush(Color.Black);
-            graphics.DrawString(glyph, font, brush, new RectangleF(0, 0, bitmap.Width, bitmap.Height), format);
-        }
-
-        return bitmap;
-    }
-
-    private static bool HasVisiblePixels(Bitmap bitmap)
-    {
-        for (var y = 0; y < bitmap.Height; y++)
-        {
-            for (var x = 0; x < bitmap.Width; x++)
-            {
-                if (bitmap.GetPixel(x, y).A > 8) return true;
-            }
-        }
-        return false;
+        return CreateFallbackTrayImage();
     }
 
     public static string SaveCustom(string dataRoot, string vmuId, string fileName, Stream content)
@@ -105,4 +120,143 @@ internal static class MonitorAvatarService
         var path = Path.Combine(dataRoot, "avatars", avatarValue);
         return File.Exists(path) ? File.ReadAllBytes(path) : null;
     }
+
+    private static AvatarCatalog GetCatalog()
+    {
+        lock (CatalogSync)
+        {
+            if (_catalog is not null) return _catalog;
+            _catalog = LoadCatalog();
+            EnsureWatcher();
+            return _catalog;
+        }
+    }
+
+    private static AvatarCatalog LoadCatalog()
+    {
+        var images = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+        if (Directory.Exists(BuiltInDirectory))
+        {
+            foreach (var path in Directory.EnumerateFiles(BuiltInDirectory, "*.png", SearchOption.TopDirectoryOnly).OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var info = new FileInfo(path);
+                    if (info.Length is <= 0 or > BuiltInMaxFileBytes) continue;
+                    var id = Path.GetFileNameWithoutExtension(path);
+                    if (!AvatarIdRegex().IsMatch(id)) continue;
+
+                    var bytes = File.ReadAllBytes(path);
+                    if (!ValidateBuiltInPng(bytes)) continue;
+                    images[id] = bytes;
+                }
+                catch
+                {
+                    // Invalid, locked or disappearing files are simply excluded.
+                }
+            }
+        }
+
+        var revision = Interlocked.Increment(ref _revision);
+        return new AvatarCatalog(images.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray(), images, revision);
+    }
+
+    private static bool ValidateBuiltInPng(byte[] bytes)
+    {
+        try
+        {
+            using var stream = new MemoryStream(bytes, writable: false);
+            using var source = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: true);
+            if (source.RawFormat.Guid != ImageFormat.Png.Guid || source.Width != BuiltInWidth || source.Height != BuiltInHeight) return false;
+
+            using var bitmap = new Bitmap(source);
+            // Require actual transparency somewhere in the image. This prevents
+            // opaque backgrounds from unexpectedly changing the layout's visual form.
+            for (var y = 0; y < bitmap.Height; y += 4)
+            {
+                for (var x = 0; x < bitmap.Width; x += 4)
+                {
+                    if (bitmap.GetPixel(x, y).A < 255) return true;
+                }
+            }
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void EnsureWatcher()
+    {
+        if (_watcher is not null || !Directory.Exists(BuiltInDirectory)) return;
+        try
+        {
+            _watcher = new FileSystemWatcher(BuiltInDirectory, "*.png")
+            {
+                IncludeSubdirectories = false,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
+                EnableRaisingEvents = true
+            };
+            _watcher.Created += (_, _) => ScheduleReload();
+            _watcher.Changed += (_, _) => ScheduleReload();
+            _watcher.Deleted += (_, _) => ScheduleReload();
+            _watcher.Renamed += (_, _) => ScheduleReload();
+        }
+        catch
+        {
+            _watcher?.Dispose();
+            _watcher = null;
+        }
+    }
+
+    private static void ScheduleReload()
+    {
+        if (Interlocked.Exchange(ref _reloadScheduled, 1) != 0) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(180).ConfigureAwait(false);
+                var replacement = LoadCatalog();
+                lock (CatalogSync) _catalog = replacement;
+            }
+            catch
+            {
+                // Keep the last known-good catalog on any reload failure.
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _reloadScheduled, 0);
+            }
+        });
+    }
+
+    private static string ResolveBuiltInDirectory()
+    {
+        var repoRoot = Environment.GetEnvironmentVariable("VMU_REPO_ROOT");
+        if (!string.IsNullOrWhiteSpace(repoRoot))
+        {
+            var sourceDirectory = Path.Combine(repoRoot, "src", "Server", "Assets", "Avatars");
+            if (Directory.Exists(sourceDirectory)) return sourceDirectory;
+        }
+        return Path.Combine(AppContext.BaseDirectory, "Assets", "Avatars");
+    }
+
+    private static Image CreateFallbackTrayImage()
+    {
+        var bitmap = new Bitmap(24, 24, PixelFormat.Format32bppArgb);
+        using var graphics = Graphics.FromImage(bitmap);
+        graphics.Clear(Color.Transparent);
+        using var pen = new Pen(Color.DimGray, 2f);
+        graphics.DrawRectangle(pen, 3, 4, 18, 13);
+        graphics.DrawLine(pen, 9, 20, 15, 20);
+        graphics.DrawLine(pen, 12, 17, 12, 20);
+        return bitmap;
+    }
+
+    [GeneratedRegex("^[a-z0-9][a-z0-9-]{0,63}$", RegexOptions.CultureInvariant)]
+    private static partial Regex AvatarIdRegex();
+
+    private sealed record AvatarCatalog(IReadOnlyList<string> Ids, IReadOnlyDictionary<string, byte[]> Images, long Revision);
 }
