@@ -16,7 +16,7 @@ internal sealed class SettingsForm : Form
     private readonly NumericUpDown _socketPort = CreatePortBox();
     private readonly NumericUpDown _retentionDays = new() { Minimum = 1, Maximum = 3650, Width = 90 };
     private readonly ComboBox _monitorExit = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 145 };
-    private readonly CheckBox _restoreServices = new() { AutoSize = true, CheckAlign = ContentAlignment.MiddleRight, TextAlign = ContentAlignment.MiddleLeft, Text = "Restore services" };
+    private readonly CheckBox _restoreServices = new() { AutoSize = true };
     private readonly Dictionary<NumericUpDown, Panel> _portBorders = new();
     private readonly ToolTip _tips = new();
 
@@ -59,19 +59,19 @@ internal sealed class SettingsForm : Form
         AddServiceRow(layout, "VMU Server", _vmuInterface, _vmuPort);
         AddServiceRow(layout, "Web Server", _webInterface, _webPort);
         AddServiceRow(layout, "Web Socket", _socketInterface, _socketPort);
-        AddSettingRow(layout, "Log retention", _retentionDays, new Label { Text = "days", AutoSize = true, Anchor = AnchorStyles.Left });
+        AddSettingRow(layout, "Log Retention", _retentionDays, new Label { Text = "days", AutoSize = true, Anchor = AnchorStyles.Left });
 
         var groupRow = layout.RowCount++;
-        var exitGroup = new GroupBox { Text = "On exit", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 8), Margin = new Padding(0, 10, 0, 2) };
+        var exitGroup = new GroupBox { Text = "On Exit", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 8), Margin = new Padding(0, 10, 0, 2) };
         var exitLayout = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, Dock = DockStyle.Fill };
+        exitLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
         exitLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        exitLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        exitLayout.Controls.Add(new Label { Text = "Monitors", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 16, 3) }, 0, 0);
+        exitLayout.Controls.Add(new Label { Text = "Monitors", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 12, 3) }, 0, 0);
         _monitorExit.Margin = new Padding(0, 1, 0, 3);
         exitLayout.Controls.Add(_monitorExit, 1, 0);
+        exitLayout.Controls.Add(new Label { Text = "Restore Services", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 12, 0) }, 0, 1);
         _restoreServices.Margin = new Padding(0, 3, 0, 0);
-        exitLayout.Controls.Add(_restoreServices, 0, 1);
-        exitLayout.SetColumnSpan(_restoreServices, 2);
+        exitLayout.Controls.Add(_restoreServices, 1, 1);
         exitGroup.Controls.Add(exitLayout);
         layout.Controls.Add(exitGroup, 0, groupRow);
         layout.SetColumnSpan(exitGroup, 3);
@@ -87,7 +87,9 @@ internal sealed class SettingsForm : Form
         layout.Controls.Add(buttons, 1, buttonRow);
         layout.SetColumnSpan(buttons, 2);
 
-        foreach (var port in new[] { _vmuPort, _webPort, _socketPort }) port.ValueChanged += (_, _) => ClearPortError(port);
+        foreach (var port in new[] { _vmuPort, _webPort, _socketPort })
+            port.ValueChanged += (_, _) => ValidatePorts(showDialog: false);
+
         AcceptButton = save;
         CancelButton = cancel;
         Controls.Add(layout);
@@ -141,31 +143,7 @@ internal sealed class SettingsForm : Form
 
     private void SaveSettings()
     {
-        ClearAllPortErrors();
-        var endpoints = new[] { new EndpointInput("VMU Server", _vmuPort), new EndpointInput("Web Server", _webPort), new EndpointInput("Web Socket", _socketPort) };
-        var valid = true;
-
-        foreach (var group in endpoints.GroupBy(x => x.Port).Where(x => x.Count() > 1))
-        {
-            foreach (var endpoint in group) SetPortError(endpoint.PortBox, $"Port {endpoint.Port} is also configured for another VMU service.");
-            valid = false;
-        }
-
-        var activePorts = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Select(x => x.Port).ToHashSet();
-        foreach (var endpoint in endpoints)
-        {
-            if (activePorts.Contains(endpoint.Port) && !_isOwnedListener(endpoint.Port))
-            {
-                SetPortError(endpoint.PortBox, $"Port {endpoint.Port} is already used by a TCP listener on this computer.");
-                valid = false;
-            }
-        }
-
-        if (!valid)
-        {
-            MessageBox.Show("One or more ports are unavailable. Check the highlighted fields.", "VMU Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
+        if (!ValidatePorts(showDialog: true)) return;
 
         var settings = ServerSettings.Load(_settingsPath);
         settings.Vmu.Interface = GetInterface(_vmuInterface);
@@ -182,15 +160,51 @@ internal sealed class SettingsForm : Form
         Close();
     }
 
+    private bool ValidatePorts(bool showDialog)
+    {
+        ClearAllPortErrors();
+        var endpoints = new[]
+        {
+            new EndpointInput("VMU Server", _vmuPort),
+            new EndpointInput("Web Server", _webPort),
+            new EndpointInput("Web Socket", _socketPort),
+        };
+        var errors = new List<string>();
+
+        foreach (var group in endpoints.GroupBy(x => x.Port).Where(x => x.Count() > 1))
+        {
+            var names = string.Join(" and ", group.Select(x => x.Name));
+            foreach (var endpoint in group)
+                SetPortError(endpoint.PortBox, $"Port {endpoint.Port} is configured for both {names}.");
+            errors.Add($"Port {group.Key} is configured for more than one VMU service.");
+        }
+
+        var activePorts = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Select(x => x.Port).ToHashSet();
+        foreach (var endpoint in endpoints)
+        {
+            if (!activePorts.Contains(endpoint.Port) || _isOwnedListener(endpoint.Port)) continue;
+            var message = $"{endpoint.Name} port {endpoint.Port} is already used by another TCP listener on this computer.";
+            SetPortError(endpoint.PortBox, message);
+            errors.Add(message);
+        }
+
+        if (showDialog && errors.Count > 0)
+            MessageBox.Show(string.Join(Environment.NewLine, errors.Distinct()), "VMU Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+        return errors.Count == 0;
+    }
+
     private void SetPortError(NumericUpDown port, string message)
     {
         if (_portBorders.TryGetValue(port, out var border)) border.BackColor = Color.Firebrick;
+        port.ForeColor = Color.Firebrick;
         _tips.SetToolTip(port, message);
     }
 
     private void ClearPortError(NumericUpDown port)
     {
         if (_portBorders.TryGetValue(port, out var border)) border.BackColor = SystemColors.Control;
+        port.ForeColor = SystemColors.WindowText;
         _tips.SetToolTip(port, string.Empty);
     }
 
