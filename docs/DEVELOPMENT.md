@@ -19,17 +19,35 @@ The product is split into four projects:
 
 Automated C# tests live in `tests/Core.Tests`.
 
+Windows display changes requested by a web page must pass through a reusable service in `src/Core`. The web/API layer may validate and coordinate requests, but must not grow an independent Windows display-management implementation.
+
 ## Technology baseline
 
 DEVEL targets .NET 10. `upgrade.cmd` verifies that a .NET 10 SDK is installed, restores dependencies, builds the solution, runs automated tests, publishes the CLI into `.runtime/cli`, and publishes the tray/server application into `.runtime/server`.
 
 Persistent server data is stored outside `.runtime` so an upgrade cannot remove it. Application settings are stored in `data/settings.json`; the operational log is stored in the SQLite database `data/vmu.db`. Repository-local diagnostic logs are written under `logs/`.
 
+The repository root is an explicit runtime concern. Every launcher and maintenance restart must preserve `VMU_REPO_ROOT` (or pass `--repo-root`) so a newly published process cannot silently switch to `.runtime/server/data`. User preferences and service-state restoration must survive both a normal restart and an upgrade-driven maintenance restart.
+
+## Web UI interaction baseline
+
+The built-in VMU web client is a desktop-and-tablet interface. Every feature must be usable with touch as well as mouse and keyboard. Hover, right-click, drag, and keyboard shortcuts may accelerate desktop use, but they must never be the only route to a primary action.
+
+Touch targets should be comfortably usable, layouts must reflow on tablet-sized viewports, and custom drag behavior should use Pointer Events. If dragging is the natural primary interaction, provide a tap-accessible or otherwise usable control path where appropriate. Terminal controls, monitor properties, settings, and display arrangement must remain operable without a physical keyboard.
+
+## Safe display-topology changes
+
+Interactive display arrangement follows the Windows safety model. VMU captures the original topology before applying a requested arrangement. The new arrangement remains provisional until the user confirms it. If confirmation does not arrive within the server-side timeout, VMU restores the original topology automatically. The rollback timer must live on the server, not only in browser JavaScript, so loss of the web session cannot strand the host with an unusable display layout.
+
+## Operational log retention
+
+Log retention is diagnostic infrastructure and must fail safe. Cleanup should use parsed SQLite date semantics rather than lexical timestamp ordering, record the database path and cleanup boundary, and refuse a suspicious single cleanup that would remove most of the database. Search/filter counts shown by the web client are calculated by SQLite, not inferred from the currently loaded rows.
+
 ## Versioning
 
 `Directory.Build.props` is the authoritative VMU version source. Product UI, About/status information, assemblies, and upgrade diagnostics must derive their displayed version from this source rather than maintaining unrelated hard-coded version strings.
 
-A successful `upgrade.cmd` prints the version it has just built and published in the final summary. This gives a quick visual confirmation that the local runtime matches the intended repository revision.
+A successful `upgrade.cmd` prints the version it has just built and published in the final summary. The launcher also reports which optional post-actions were requested (`--test` and `--run`) so the operator can tell at a glance whether the end-to-end self-test and final start action were part of the invocation.
 
 ## Third-party components
 
