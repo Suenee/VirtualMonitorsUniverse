@@ -4,6 +4,8 @@ namespace VirtualMonitorsUniverse.Server;
 
 internal sealed class AboutForm : Form
 {
+    private readonly Icon _aboutIcon;
+
     public AboutForm(Icon icon)
     {
         Text = $"About {ProjectInfo.ProductName}";
@@ -14,14 +16,24 @@ internal sealed class AboutForm : Form
         MinimizeBox = false;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Padding = new Padding(14);
+        Padding = new Padding(18);
+
+        _aboutIcon = new Icon(icon, new Size(96, 96));
 
         var root = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2 };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 360));
 
-        var picture = new PictureBox { Image = icon.ToBitmap(), SizeMode = PictureBoxSizeMode.Zoom, Size = new Size(56, 56), Margin = new Padding(0, 2, 12, 0) };
-        root.Controls.Add(picture, 0, 0);
+        var pictureHost = new Panel { Size = new Size(104, 92), Margin = new Padding(4, 4, 18, 0) };
+        var picture = new PictureBox
+        {
+            Image = _aboutIcon.ToBitmap(),
+            SizeMode = PictureBoxSizeMode.CenterImage,
+            Size = new Size(96, 88),
+            Location = new Point(4, 2),
+        };
+        pictureHost.Controls.Add(picture);
+        root.Controls.Add(pictureHost, 0, 0);
 
         var info = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Dock = DockStyle.Fill };
         var baseFont = SystemFonts.MessageBoxFont ?? Control.DefaultFont;
@@ -42,6 +54,7 @@ internal sealed class AboutForm : Form
         AcceptButton = close;
         CancelButton = close;
         Controls.Add(root);
+        FormClosed += (_, _) => _aboutIcon.Dispose();
     }
 
     private static LinkLabel CreateLink(string text, string url)
