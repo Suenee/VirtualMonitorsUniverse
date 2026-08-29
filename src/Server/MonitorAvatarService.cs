@@ -31,11 +31,21 @@ internal static class MonitorAvatarService
             }
         }
 
+        // GDI+ DrawString flattens Segoe UI Emoji to monochrome glyphs on many
+        // Windows builds. WinForms TextRenderer follows the native Windows text
+        // path and preserves the system's color emoji rendering where available.
         var bitmap = new Bitmap(24, 24, PixelFormat.Format32bppArgb);
         using var graphics = Graphics.FromImage(bitmap);
         graphics.Clear(Color.Transparent);
-        using var font = new Font("Segoe UI Emoji", 14f, FontStyle.Regular, GraphicsUnit.Pixel);
-        graphics.DrawString(GetEmoji(monitor.AvatarKind, monitor.AvatarValue), font, Brushes.Black, new PointF(1, 1));
+        using var font = new Font("Segoe UI Emoji", 15f, FontStyle.Regular, GraphicsUnit.Pixel);
+        TextRenderer.DrawText(
+            graphics,
+            GetEmoji(monitor.AvatarKind, monitor.AvatarValue),
+            font,
+            new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+            Color.Black,
+            Color.Transparent,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
         return bitmap;
     }
 
