@@ -258,7 +258,8 @@ internal sealed class MonitorStore
 
     public void Delete(string idOrName)
     {
-        var monitor = Get(idOrName) ?? return;
+        var monitor = Get(idOrName);
+        if (monitor is null) return;
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM monitors WHERE vmu_id=$id";
@@ -358,10 +359,13 @@ internal sealed class MonitorStore
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            _ = Enum.TryParse<RemoteAccessMode>(reader.GetString(12), true, out var remote);
-            _ = Enum.TryParse<RemoteSecurityMode>(reader.GetString(13), true, out var security);
-            result.Add(new MonitorRecord(reader.GetString(0), reader.GetString(1), reader.GetString(2), NullableString(reader, 3), NullableString(reader, 4), reader.GetInt32(5), reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8) != 0,
-                reader.GetString(9), reader.GetString(10), remote, security, NullableString(reader, 14), reader.GetInt32(15) != 0, reader.GetInt32(16) != 0, reader.GetInt32(17) != 0));
+            _ = Enum.TryParse<RemoteAccessMode>(reader.GetString(11), true, out var remote);
+            _ = Enum.TryParse<RemoteSecurityMode>(reader.GetString(12), true, out var security);
+            result.Add(new MonitorRecord(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2), NullableString(reader, 3), NullableString(reader, 4),
+                reader.GetInt32(5), reader.GetInt32(6), reader.GetInt32(7), reader.GetInt32(8) != 0,
+                reader.GetString(9), reader.GetString(10), remote, security, NullableString(reader, 13),
+                reader.GetInt32(14) != 0, reader.GetInt32(15) != 0, reader.GetInt32(16) != 0));
         }
         return result;
     }
@@ -408,30 +412,32 @@ internal sealed class MonitorStore
             var security = row.Approval ? RemoteSecurityMode.Approval : row.Api ? RemoteSecurityMode.ApiKey : row.Password ? RemoteSecurityMode.Password : RemoteSecurityMode.Public;
             using var update = connection.CreateCommand();
             update.CommandText = "UPDATE monitors SET canonical_name=COALESCE(canonical_name,$name),title=COALESCE(title,friendly_name),avatar_kind=COALESCE(avatar_kind,'animal'),avatar_value=COALESCE(avatar_value,$avatar),security_mode=COALESCE(security_mode,$security) WHERE vmu_id=$id";
-            update.Parameters.AddWithValue("$id", row.Id); update.Parameters.AddWithValue("$name", name); update.Parameters.AddWithValue("$avatar", MonitorAvatarService.RandomAnimal()); update.Parameters.AddWithValue("$security", security.ToString());
+            update.Parameters.AddWithValue("$id", row.Id);
+            update.Parameters.AddWithValue("$name", name);
+            update.Parameters.AddWithValue("$avatar", MonitorAvatarService.RandomAnimal());
+            update.Parameters.AddWithValue("$security", security.ToString());
             update.ExecuteNonQuery();
         }
 
-        using (var table = connection.CreateCommand())
-        {
-            table.CommandText = """
-                CREATE TABLE IF NOT EXISTS monitor_access_rules(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,vmu_id TEXT NOT NULL,client_id TEXT NOT NULL,ip_address TEXT NULL,mac_address TEXT NULL,computer_name TEXT NULL,user_name TEXT NULL,
-                    permission TEXT NOT NULL DEFAULT 'Deferred',last_seen_utc TEXT NULL,created_utc TEXT NOT NULL,updated_utc TEXT NOT NULL,
-                    FOREIGN KEY(vmu_id) REFERENCES monitors(vmu_id) ON DELETE CASCADE, UNIQUE(vmu_id,client_id));
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_monitors_api_key ON monitors(api_key) WHERE api_key IS NOT NULL;
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_monitors_instance_id ON monitors(instance_id) WHERE instance_id IS NOT NULL;
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_monitors_canonical_name ON monitors(canonical_name);
-                """;
-            table.ExecuteNonQuery();
-        }
+        using var table = connection.CreateCommand();
+        table.CommandText = """
+            CREATE TABLE IF NOT EXISTS monitor_access_rules(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,vmu_id TEXT NOT NULL,client_id TEXT NOT NULL,ip_address TEXT NULL,mac_address TEXT NULL,computer_name TEXT NULL,user_name TEXT NULL,
+                permission TEXT NOT NULL DEFAULT 'Deferred',last_seen_utc TEXT NULL,created_utc TEXT NOT NULL,updated_utc TEXT NOT NULL,
+                FOREIGN KEY(vmu_id) REFERENCES monitors(vmu_id) ON DELETE CASCADE, UNIQUE(vmu_id,client_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_monitors_api_key ON monitors(api_key) WHERE api_key IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_monitors_instance_id ON monitors(instance_id) WHERE instance_id IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_monitors_canonical_name ON monitors(canonical_name);
+            """;
+        table.ExecuteNonQuery();
     }
 
     private static bool NameExistsForMigration(SqliteConnection connection, string name, string exceptId)
     {
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT 1 FROM monitors WHERE canonical_name=$name AND vmu_id<>$id LIMIT 1";
-        command.Parameters.AddWithValue("$name", name); command.Parameters.AddWithValue("$id", exceptId);
+        command.Parameters.AddWithValue("$name", name);
+        command.Parameters.AddWithValue("$id", exceptId);
         return command.ExecuteScalar() is not null;
     }
 
@@ -445,7 +451,8 @@ internal sealed class MonitorStore
 
     private static bool HasColumn(SqliteConnection connection, string table, string column)
     {
-        using var command = connection.CreateCommand(); command.CommandText = $"PRAGMA table_info({table})";
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({table})";
         using var reader = command.ExecuteReader();
         while (reader.Read()) if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase)) return true;
         return false;
