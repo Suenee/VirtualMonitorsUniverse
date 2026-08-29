@@ -50,7 +50,8 @@ internal sealed class ServerSettings
         if (Vmu.Interface.Equals("any", StringComparison.OrdinalIgnoreCase)) Web.Interface = "any";
         Logging.RetentionMinutes = Math.Max(1, Logging.RetentionMinutes);
         if (!AllowedPreviewRefreshSeconds.Contains(WebUi.MonitorPreviewRefreshSeconds)) WebUi.MonitorPreviewRefreshSeconds = 60;
-        if (!Enum.IsDefined(Exit.MonitorAction)) Exit.MonitorAction = MonitorExitAction.Disconnect;
+        WebUi.ArrangementSnapTolerancePx = Math.Clamp(WebUi.ArrangementSnapTolerancePx, 5, 50);
+        if (!Enum.IsDefined(Exit.MonitorAction) || Exit.MonitorAction == MonitorExitAction.Uninstall) Exit.MonitorAction = MonitorExitAction.Disconnect;
     }
 }
 
@@ -66,7 +67,11 @@ internal sealed class ServiceEndpointSettings
 }
 
 internal sealed class LoggingSettings { public int RetentionMinutes { get; set; } = 10080; }
-internal sealed class WebUiSettings { public int MonitorPreviewRefreshSeconds { get; set; } = 60; }
+internal sealed class WebUiSettings
+{
+    public int MonitorPreviewRefreshSeconds { get; set; } = 60;
+    public int ArrangementSnapTolerancePx { get; set; } = 15;
+}
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
 internal enum MonitorExitAction { Disconnect, Keep, Uninstall }
