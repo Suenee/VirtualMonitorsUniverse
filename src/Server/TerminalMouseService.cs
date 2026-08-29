@@ -20,8 +20,15 @@ internal sealed class TerminalMouseService
     private const uint MouseeventfWheel = 0x0800;
     private readonly object _portalSync = new();
     private CancellationTokenSource? _portalCancellation;
+    private string? _portalMonitorId;
     private int? _pendingPortalLeft;
     private int? _pendingPortalTop;
+
+    public bool IsPortalActive(string monitorId)
+    {
+        lock (_portalSync)
+            return _portalCancellation is not null && string.Equals(_portalMonitorId, monitorId, StringComparison.OrdinalIgnoreCase);
+    }
 
     public void Apply(MonitorSnapshot monitor, TerminalMouseRequest request)
     {
@@ -95,6 +102,7 @@ internal sealed class TerminalMouseService
             _portalCancellation?.Dispose();
             cancellation = new CancellationTokenSource();
             _portalCancellation = cancellation;
+            _portalMonitorId = monitor.Configuration.VmuId;
         }
 
         var left = monitor.PositionX!.Value;
@@ -160,6 +168,7 @@ internal sealed class TerminalMouseService
                     {
                         _portalCancellation.Dispose();
                         _portalCancellation = null;
+                        _portalMonitorId = null;
                     }
                 }
             }
