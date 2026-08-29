@@ -5,6 +5,8 @@ namespace VirtualMonitorsUniverse.Core;
 /// <summary>
 /// Applies and restores active Windows display positions using the same documented
 /// ChangeDisplaySettingsEx family that VMU already uses for display mode lifecycle.
+/// Arrangement changes are position-only: the active display set must remain
+/// identical before and after an apply operation.
 /// </summary>
 public sealed class WindowsDisplayArrangementService
 {
@@ -46,6 +48,9 @@ public sealed class WindowsDisplayArrangementService
                 throw new InvalidOperationException($"Display '{deviceName}' is not currently active.");
         }
 
+        if (requested.Count != active.Count || active.Any(x => !requested.ContainsKey(x)))
+            throw new InvalidOperationException("Arrangement must contain exactly the currently active Windows displays.");
+
         foreach (var entry in requested.Values)
         {
             var mode = ReadMode(entry.DeviceName);
@@ -60,6 +65,22 @@ public sealed class WindowsDisplayArrangementService
         var applyResult = ChangeDisplaySettingsEx(null, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero);
         if (applyResult != DispChangeSuccessful)
             throw new InvalidOperationException($"Windows rejected the display arrangement commit (result {applyResult}).");
+
+        RestoreUnexpectedlyActivatedDisplays(active);
+        var finalActive = GetActiveScreenNames();
+        if (finalActive.Count != active.Count || active.Any(x => !finalActive.Contains(x)))
+            throw new InvalidOperationException("Windows changed the active display set while applying positions. The arrangement operation was rejected.");
+    }
+
+    private static void RestoreUnexpectedlyActivatedDisplays(HashSet<string> expectedActive)
+    {
+        var afterApply = GetActiveScreenNames();
+        var unexpected = afterApply.Where(x => !expectedActive.Contains(x)).ToArray();
+        if (unexpected.Length == 0) return;
+
+        var modes = new WindowsDisplayModeService();
+        foreach (var deviceName in unexpected)
+            modes.Disconnect(deviceName);
     }
 
     private static DevMode ReadMode(string deviceName)
