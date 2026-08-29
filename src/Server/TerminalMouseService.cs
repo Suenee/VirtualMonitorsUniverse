@@ -34,7 +34,7 @@ internal sealed class TerminalMouseService
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Terminal mouse control is supported only on Windows.");
-        if (!monitor.Connected || monitor.Health.IsError || monitor.PositionX is null || monitor.PositionY is null)
+        if (!monitor.Connected || monitor.Health.IsError || string.IsNullOrWhiteSpace(monitor.DeviceName))
             throw new InvalidOperationException("The monitor must be connected and healthy before mouse input can be applied.");
         if (!monitor.Configuration.CollaborationMouse)
             throw new InvalidOperationException("Mouse collaboration is disabled for this monitor.");
@@ -46,13 +46,20 @@ internal sealed class TerminalMouseService
             return;
         }
 
+        // Read the same native Windows topology source that powers /arrangement.
+        // This deliberately avoids trusting a previously cached/saved position so
+        // Display Settings changes are honored by the very next portal operation.
+        var bounds = WindowsArrangementService.GetActive()
+            .FirstOrDefault(x => x.DeviceName.Equals(monitor.DeviceName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException("The monitor is no longer part of the active Windows desktop arrangement.");
+
         if (request.X is not null || request.Y is not null)
         {
             if (request.X is null || request.Y is null || request.X < 0 || request.X > 1 || request.Y < 0 || request.Y > 1)
                 throw new ArgumentOutOfRangeException(nameof(request), "Mouse coordinates must be normalized values from 0 to 1.");
 
-            var x = monitor.PositionX.Value + Math.Clamp((int)Math.Round(request.X.Value * Math.Max(0, monitor.Width - 1)), 0, Math.Max(0, monitor.Width - 1));
-            var y = monitor.PositionY.Value + Math.Clamp((int)Math.Round(request.Y.Value * Math.Max(0, monitor.Height - 1)), 0, Math.Max(0, monitor.Height - 1));
+            var x = bounds.X + Math.Clamp((int)Math.Round(request.X.Value * Math.Max(0, bounds.Width - 1)), 0, Math.Max(0, bounds.Width - 1));
+            var y = bounds.Y + Math.Clamp((int)Math.Round(request.Y.Value * Math.Max(0, bounds.Height - 1)), 0, Math.Max(0, bounds.Height - 1));
             if (!SetCursorPos(x, y))
                 throw new InvalidOperationException($"Windows rejected cursor positioning at {x},{y}.");
         }
@@ -62,7 +69,7 @@ internal sealed class TerminalMouseService
             case "move":
                 return;
             case "portal":
-                StartLocalPortalWatcher(monitor, request.Button, request.Delta);
+                StartLocalPortalWatcher(monitor, bounds, request.Button, request.Delta);
                 return;
             case "down":
                 SendButton(request.Button, down: true);
@@ -87,7 +94,7 @@ internal sealed class TerminalMouseService
         }
     }
 
-    private void StartLocalPortalWatcher(MonitorSnapshot monitor, int browserRight, int browserBottom)
+    private void StartLocalPortalWatcher(MonitorSnapshot monitor, WindowsArrangementDisplay bounds, int browserRight, int browserBottom)
     {
         CancellationTokenSource cancellation;
         int browserLeft;
@@ -105,10 +112,10 @@ internal sealed class TerminalMouseService
             _portalMonitorId = monitor.Configuration.VmuId;
         }
 
-        var left = monitor.PositionX!.Value;
-        var top = monitor.PositionY!.Value;
-        var right = left + Math.Max(1, monitor.Width) - 1;
-        var bottom = top + Math.Max(1, monitor.Height) - 1;
+        var left = bounds.X;
+        var top = bounds.Y;
+        var right = left + Math.Max(1, bounds.Width) - 1;
+        var bottom = top + Math.Max(1, bounds.Height) - 1;
         _ = Task.Run(async () =>
         {
             try
