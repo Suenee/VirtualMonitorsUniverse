@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
+using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using SharpGen.Runtime;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
+using D3D11MapFlags = Vortice.Direct3D11.MapFlags;
 
 namespace VirtualMonitorsUniverse.Server;
 
@@ -110,7 +112,7 @@ internal sealed class MonitorThumbnailService
                 using var source = desktopResource.QueryInterface<ID3D11Texture2D>();
                 context.CopyResource(staging, source);
 
-                var mapped = context.Map(staging, 0, MapMode.Read, MapFlags.None);
+                var mapped = context.Map(staging, 0, MapMode.Read, D3D11MapFlags.None);
                 try
                 {
                     using var frame = CopyToBitmap(mapped.DataPointer, checked((int)mapped.RowPitch), width, height);
