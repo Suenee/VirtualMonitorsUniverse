@@ -1,44 +1,46 @@
-# Monitor Capture
+# Monitor Capture and Terminal
 
-VMU captures monitor pixels through the Windows DXGI Desktop Duplication API. The capture path is bound to the monitor's current GDI/CCD output; VMU identity remains the persistent `vmu_id` plus its PnP instance identity.
+VMU captures monitor pixels through the Windows DXGI Desktop Duplication API. Capture is bound to the monitor's current Windows output; persistent VMU identity remains `vmu_id` plus the PnP instance identity.
 
 ## Current scope
 
-Version 0.24 introduces single-frame capture for connected VMU monitors. The Web Client uses it to show a real preview inside each monitor tile.
-
-The server endpoint is:
+Version 0.26 provides two demand-driven capture surfaces for connected, healthy VMU monitors:
 
 ```text
-GET /api/monitors/{vmu_id}/thumbnail
+GET /api/monitors/{name}/thumbnail
+GET /api/monitors/{name}/live
 ```
 
-The endpoint returns a JPEG thumbnail for an installed and connected monitor. Disconnected monitors do not start capture and the Web Client displays a neutral placeholder instead.
+`thumbnail` returns a cached JPEG preview for the Monitors page. `live` is the first live Terminal transport and returns a multipart MJPEG stream. The Terminal page itself contains only the monitor image and scales it to the maximum browser viewport while preserving aspect ratio.
+
+The MJPEG transport is deliberately an ALPHA transport milestone, not the final remote-display codec. It validates continuous per-monitor DXGI capture, viewer lifecycle, full-screen browser presentation, and VMU network/resource accounting before the project introduces the planned hardware-capable H.264/WebRTC pipeline.
 
 ## Capture pipeline
 
-The current still-image path is:
-
 ```text
-vmu_id
+vmu_id / canonical name
   -> current GDI output
   -> DXGI adapter/output discovery
   -> IDXGIOutput1::DuplicateOutput
   -> D3D11 staging texture
   -> CPU readback
-  -> resize
-  -> JPEG thumbnail
+  -> thumbnail JPEG or live MJPEG frame
 ```
 
-VMU uses `Vortice.Direct3D11` 3.8.3 as the maintained .NET binding for D3D11/DXGI. No custom display-capture driver is introduced.
+VMU uses `Vortice.Direct3D11` 3.8.3 as the maintained .NET binding for D3D11/DXGI. No custom capture driver is introduced.
 
 ## Resource policy
 
-Capture is demand-driven. Opening the Monitors page causes the browser to request thumbnails only for connected monitors. The browser stops refreshing thumbnails while the page is hidden, and the server keeps a short five-second cache per monitor. Therefore a monitor that nobody is viewing does not run a continuous capture or encoding loop.
+Thumbnail capture is requested only for connected monitors and browser refresh stops while the Monitors page is hidden. Live capture exists only while a Terminal HTTP client is connected; a disconnected or unhealthy monitor cannot open a Terminal.
 
-The thumbnail implementation creates short-lived duplication resources per uncached capture. This is intentionally simple for the ALPHA proof of monitor binding. The future Terminal implementation should own a persistent capture session while at least one authorized viewer is connected.
+The current ALPHA live path creates short-lived Desktop Duplication resources per frame. The production encoder phase should replace this with one persistent capture/encode session per viewed monitor, shared by all authorized viewers. When the last viewer leaves, capture and encoding must stop.
 
-## Terminal direction
+## Planned production transport
 
-The single-frame implementation is the first validation step for the future remote-display pipeline. Once per-monitor DXGI capture is proven in production, Terminal development can reuse the same output-selection contract and replace repeated still-frame requests with a persistent capture session, hardware-capable low-latency video encoding, and a real-time transport layer.
+The target production path remains:
 
-Presentation sessions will be view-only. Collaboration sessions will additionally permit input and shared clipboard operations after authorization.
+```text
+VDD monitor -> DXGI Desktop Duplication -> hardware-capable H.264 encoder -> WebRTC -> VMUC/browser
+```
+
+Presentation sessions are view-only. Collaboration sessions additionally permit the selected mouse, keyboard, and clipboard capabilities after authorization.
