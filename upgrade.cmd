@@ -2,7 +2,7 @@
 cls
 setlocal EnableExtensions EnableDelayedExpansion
 
-set "UPGRADE_REV=2.1-post-actions"
+set "UPGRADE_REV=2.2-post-actions-report"
 set "REPO_DIR=%~dp0"
 if "!REPO_DIR:~-1!"=="\" set "REPO_DIR=!REPO_DIR:~0,-1!"
 cd /d "!REPO_DIR!"
@@ -16,6 +16,12 @@ if /I "%~1"=="--run" (set "DO_RUN=1"&shift&goto parse_args)
 echo ERROR: Unknown upgrade option: %~1
 exit /b 2
 :args_done
+
+set "TEST_LABEL=no"
+set "RUN_LABEL=no"
+if "!DO_TEST!"=="1" set "TEST_LABEL=yes"
+if "!DO_RUN!"=="1" set "RUN_LABEL=yes"
+echo Requested post actions: test=!TEST_LABEL!, run=!RUN_LABEL!
 
 if not exist "!REPO_DIR!\logs" mkdir "!REPO_DIR!\logs" >nul 2>nul
 set "BOOTSTRAP_LOG=!REPO_DIR!\logs\upgrade.log"
@@ -82,5 +88,11 @@ rem already parsed block. They run only after a completely successful upgrade.
             echo VMU Server is already running; --run skipped.
         )
     )
+
+    echo.
+    echo ============================================
+    echo Upgrade post actions complete
+    echo ============================================
+    echo Post actions: test=!TEST_LABEL!, run=!RUN_LABEL!
     exit /b 0
 )
