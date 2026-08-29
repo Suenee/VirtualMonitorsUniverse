@@ -73,12 +73,12 @@ internal sealed class RemoteActionRegistry
     public object StateSnapshot()
     {
         var monitors = _monitors.List();
-        return new
+        return new Dictionary<string, object?>
         {
-            version = ProjectInfo.Version,
-            installedMonitorCount = monitors.Count(x => x.Installed),
-            connectedMonitorCount = monitors.Count(x => x.Connected),
-            monitors = monitors.Select(StateFor).ToArray()
+            ["vmu_version"] = ProjectInfo.Version,
+            ["installed_monitor_count"] = monitors.Count(x => x.Installed),
+            ["connected_monitor_count"] = monitors.Count(x => x.Connected),
+            ["monitors"] = monitors.Select(StateFor).ToArray()
         };
     }
 
@@ -172,7 +172,7 @@ internal sealed class RemoteActionRegistry
                 throw new RemoteActionException("COMMAND_FAILED", $"Could not {(connected ? "connect" : "disconnect")} '{monitor.Configuration.Title}': {ex.Message}", ex);
             }
         }
-        return new { success = true, changed, state = StateSnapshot() };
+        return new Dictionary<string, object?> { ["success"] = true, ["changed"] = changed, ["state"] = StateSnapshot() };
     }
 
     private object OpenMonitorPage(JsonElement args, bool terminal, bool remoteAccess)
@@ -184,7 +184,7 @@ internal sealed class RemoteActionRegistry
         var url = $"http://127.0.0.1:{_webPortProvider()}{path}";
         try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
         catch (Exception ex) { throw new RemoteActionException("COMMAND_FAILED", ex.Message, ex); }
-        return new { success = true, url };
+        return new Dictionary<string, object?> { ["success"] = true, ["url"] = url };
     }
 
     private MonitorSnapshot Update(MonitorSnapshot current, int? width = null, int? height = null, int? refreshRate = null, bool? portrait = null, string? title = null)
@@ -220,31 +220,31 @@ internal sealed class RemoteActionRegistry
         return value.GetBoolean();
     }
 
-    private static object StateFor(MonitorSnapshot monitor) => new
+    private static object StateFor(MonitorSnapshot monitor) => new Dictionary<string, object?>
     {
-        monitorExists = true,
-        monitorInstalled = monitor.Installed,
-        monitorConnected = monitor.Connected,
-        monitorHealthy = !monitor.Health.IsError,
-        monitorHealthState = monitor.Health.State,
-        monitorHealthMessage = monitor.Health.Message,
-        monitorWindowsDisplay = monitor.WindowsDisplay,
-        monitorWidth = monitor.Width,
-        monitorHeight = monitor.Height,
-        monitorResolution = $"{monitor.Width}x{monitor.Height}",
-        monitorRefreshRate = monitor.RefreshRate,
-        monitorOrientation = monitor.Configuration.Portrait ? "portrait" : "landscape",
-        monitorX = monitor.PositionX,
-        monitorY = monitor.PositionY,
-        monitorMouseEnabled = monitor.Configuration.CollaborationMouse,
-        monitorClipboardEnabled = monitor.Configuration.CollaborationClipboard,
-        monitorKeyboardEnabled = monitor.Configuration.CollaborationKeyboard,
-        monitorAudioSupported = false,
-        monitorAudioEnabled = false,
-        monitorRemoteAccess = monitor.Configuration.RemoteAccess.ToString(),
-        monitorTitle = monitor.Configuration.Title,
-        monitorName = monitor.Configuration.Name,
-        vmuId = monitor.Configuration.VmuId
+        ["monitor_exists"] = true,
+        ["monitor_installed"] = monitor.Installed,
+        ["monitor_connected"] = monitor.Connected,
+        ["monitor_healthy"] = !monitor.Health.IsError,
+        ["monitor_health_state"] = monitor.Health.State,
+        ["monitor_health_message"] = monitor.Health.Message,
+        ["monitor_windows_display"] = monitor.WindowsDisplay,
+        ["monitor_width"] = monitor.Width,
+        ["monitor_height"] = monitor.Height,
+        ["monitor_resolution"] = $"{monitor.Width}x{monitor.Height}",
+        ["monitor_refresh_rate"] = monitor.RefreshRate,
+        ["monitor_orientation"] = monitor.Configuration.Portrait ? "portrait" : "landscape",
+        ["monitor_x"] = monitor.PositionX,
+        ["monitor_y"] = monitor.PositionY,
+        ["monitor_mouse_enabled"] = monitor.Configuration.CollaborationMouse,
+        ["monitor_clipboard_enabled"] = monitor.Configuration.CollaborationClipboard,
+        ["monitor_keyboard_enabled"] = monitor.Configuration.CollaborationKeyboard,
+        ["monitor_audio_supported"] = false,
+        ["monitor_audio_enabled"] = false,
+        ["monitor_remote_access"] = monitor.Configuration.RemoteAccess.ToString(),
+        ["monitor_title"] = monitor.Configuration.Title,
+        ["monitor_name"] = monitor.Configuration.Name,
+        ["vmu_id"] = monitor.Configuration.VmuId
     };
 
     private enum Capability { Clipboard, Mouse, Keyboard }
