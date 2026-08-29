@@ -1,0 +1,41 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - devel
+      - main
+  pull_request:
+    branches:
+      - devel
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test (.NET 10 / Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.400'
+
+      - name: Show .NET environment
+        run: dotnet --info
+
+      - name: Restore
+        run: dotnet restore VirtualMonitorsUniverse.sln
+
+      - name: Build
+        run: dotnet build VirtualMonitorsUniverse.sln --configuration Debug --no-restore
+
+      - name: Test
+        run: dotnet test VirtualMonitorsUniverse.sln --configuration Debug --no-build --no-restore
