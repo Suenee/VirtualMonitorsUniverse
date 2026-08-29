@@ -199,10 +199,10 @@ internal sealed class WebServerService : NetworkService
     }
 
     private IResult StatusPage() => Shell("Status", WebUiRenderer.StatusBody());
-    private IResult SettingsPage() => Shell("Settings", WebUiRenderer.SettingsBody());
+    private IResult SettingsPage() => Shell("Settings", WebUiRenderer.SettingsBody() + WebPageEnhancements.Settings);
     private IResult ArrangementPage() => Shell("Arrangement", WebUiRenderer.ArrangementBody() + ArrangementWebEnhancement.Script, "arrangementbody");
-    private IResult MonitorsPage() => Shell("Monitors", WebUiRenderer.MonitorsBody(_settingsProvider().WebUi.MonitorPreviewRefreshSeconds));
-    private IResult LogPage() => Shell("Log", WebUiRenderer.LogBody(), "logbody");
+    private IResult MonitorsPage() => Shell("Monitors", WebUiRenderer.MonitorsBody(_settingsProvider().WebUi.MonitorPreviewRefreshSeconds) + WebPageEnhancements.Monitors);
+    private IResult LogPage() => Shell("Log", WebUiRenderer.LogBody() + WebPageEnhancements.Log, "logbody");
 
     private IResult NewMonitorPage()
     {
@@ -232,7 +232,7 @@ internal sealed class WebServerService : NetworkService
 
         var vmuRunning = IsVmuServerRunning();
         var ready = monitor.Connected && !monitor.Health.IsError;
-        return Shell("Terminal " + monitor.Configuration.Title, WebUiRenderer.TerminalBody(monitor.Configuration.Name, ready, vmuRunning), "terminalbody", WebUiRenderer.FullscreenNavButton);
+        return Shell("Terminal " + monitor.Configuration.Title, WebUiRenderer.TerminalBody(monitor.Configuration.Name, ready, vmuRunning) + WebPageEnhancements.Terminal, "terminalbody", WebUiRenderer.FullscreenNavButton);
     }
 
     private object ArrangementModel()
@@ -323,7 +323,6 @@ internal sealed class WebServerService : NetworkService
                 await context.Response.Body.WriteAsync("\r\n"u8.ToArray(), context.RequestAborted);
                 await context.Response.Body.FlushAsync(context.RequestAborted);
                 _resources.AddVmuNetworkBytes(header.Length + frame.Length + 2);
-                await Task.Delay(33, context.RequestAborted);
             }
         }
         catch (OperationCanceledException)
@@ -345,8 +344,9 @@ internal sealed class WebServerService : NetworkService
                 _capture.Invalidate(monitor.Configuration.VmuId);
             return Results.File(await _capture.GetThumbnailAsync(monitor.Configuration.VmuId, monitor.DeviceName, context.RequestAborted), "image/jpeg");
         }
-        catch
+        catch (Exception ex)
         {
+            LogStore.Write("WARN", "WEB", "MONITOR_THUMBNAIL_FAILED", ex.Message, id);
             return Results.NotFound();
         }
     }
