@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "protocol": {
+    "name": "VPP",
+    "protocolVersion": 1,
+    "source": "sum",
+    "recipient": "vmu"
+  },
+  "application": {
+    "id": "virtual-monitors",
+    "name": "Virtual Monitors Universe",
+    "shortName": "VMU"
+  },
+  "actions": [
+    {
+      "id": "monitor_connect",
+      "label": "Connect Monitor",
+      "method": "monitor_connect",
+      "args": { "monitor": "string" },
+      "queue": { "policy": "replace", "keyTemplate": "monitor:{monitor}:connected" }
+    },
+    {
+      "id": "monitor_disconnect",
+      "label": "Disconnect Monitor",
+      "method": "monitor_disconnect",
+      "args": { "monitor": "string" },
+      "queue": { "policy": "replace", "keyTemplate": "monitor:{monitor}:connected" }
+    },
+    {
+      "id": "monitor_toggle",
+      "label": "Toggle Monitor",
+      "method": "monitor_toggle",
+      "args": { "monitor": "string" },
+      "queue": { "policy": "fifo" }
+    },
+    {
+      "id": "monitor_set_resolution",
+      "label": "Set Monitor Resolution",
+      "method": "monitor_set_resolution",
+      "args": { "monitor": "string", "width": "integer", "height": "integer" },
+      "queue": { "policy": "replace", "keyTemplate": "monitor:{monitor}:resolution" }
+    },
+    {
+      "id": "monitor_set_refresh_rate",
+      "label": "Set Monitor Refresh Rate",
+      "method": "monitor_set_refresh_rate",
+      "args": { "monitor": "string", "hz": "integer" },
+      "queue": { "policy": "replace", "keyTemplate": "monitor:{monitor}:refresh-rate" }
+    },
+    {
+      "id": "monitor_set_orientation",
+      "label": "Set Monitor Orientation",
+      "method": "monitor_set_orientation",
+      "args": { "monitor": "string", "orientation": ["landscape", "portrait"] },
+      "queue": { "policy": "replace", "keyTemplate": "monitor:{monitor}:orientation" }
+    },
+    {
+      "id": "monitor_set_position",
+      "label": "Set Monitor Position",
+      "method": "monitor_set_position",
+      "args": { "monitor": "string", "x": "integer", "y": "integer" },
+      "queue": { "policy": "replace", "keyTemplate": "monitor:{monitor}:position" }
+    },
+    {
+      "id": "monitor_mouse_enable",
+      "label": "Enable Monitor Mouse",
+      "method": "monitor_mouse_enable",
+      "args": { "monitor": "string", "enabled": "boolean" },
+      "queue": { "policy": "replace", "keyTemplate": "monitor:{monitor}:mouse" }
+    },
+    {
+      "id": "monitor_clipboard_enable",
+      "label": "Enable Monitor Clipboard",
+      "method": "monitor_clipboard_enable",
+      "args": { "monitor": "string", "enabled": "boolean" },
+      "queue": { "policy": "replace", "keyTemplate": "monitor:{monitor}:clipboard" }
+    },
+    {
+      "id": "monitor_keyboard_enable",
+      "label": "Enable Monitor Keyboard",
+      "method": "monitor_keyboard_enable",
+      "args": { "monitor": "string", "enabled": "boolean" },
+      "queue": { "policy": "replace", "keyTemplate": "monitor:{monitor}:keyboard" }
+    },
+    {
+      "id": "monitor_open_terminal",
+      "label": "Open Monitor Terminal",
+      "method": "monitor_open_terminal",
+      "args": { "monitor": "string" },
+      "queue": { "policy": "fifo" }
+    },
+    {
+      "id": "monitor_open_properties",
+      "label": "Open Monitor Properties",
+      "method": "monitor_open_properties",
+      "args": { "monitor": "string" },
+      "queue": { "policy": "fifo" }
+    },
+    {
+      "id": "monitor_open_remote_access",
+      "label": "Open Monitor Remote Access Settings",
+      "method": "monitor_open_remote_access",
+      "args": { "monitor": "string" },
+      "queue": { "policy": "fifo" }
+    },
+    {
+      "id": "monitor_set_title",
+      "label": "Set Monitor Title",
+      "method": "monitor_set_title",
+      "args": { "monitor": "string", "title": "string" },
+      "queue": { "policy": "replace", "keyTemplate": "monitor:{monitor}:title" }
+    },
+    {
+      "id": "all_monitors_connect",
+      "label": "Connect All Monitors",
+      "method": "all_monitors_connect",
+      "args": {},
+      "queue": { "policy": "replace", "key": "all-monitors:connected" }
+    },
+    {
+      "id": "all_monitors_disconnect",
+      "label": "Disconnect All Monitors",
+      "method": "all_monitors_disconnect",
+      "args": {},
+      "queue": { "policy": "replace", "key": "all-monitors:connected" }
+    },
+    {
+      "id": "get_state",
+      "label": "Refresh VMU State",
+      "method": "get_state",
+      "args": {},
+      "queue": { "policy": "fifo" }
+    }
+  ],
+  "feedback": [
+    { "id": "vmu_version", "type": "string" },
+    { "id": "installed_monitor_count", "type": "integer" },
+    { "id": "connected_monitor_count", "type": "integer" },
+    { "id": "monitor_exists", "type": "boolean", "scope": "monitor" },
+    { "id": "monitor_installed", "type": "boolean", "scope": "monitor" },
+    { "id": "monitor_connected", "type": "boolean", "scope": "monitor" },
+    { "id": "monitor_healthy", "type": "boolean", "scope": "monitor" },
+    { "id": "monitor_health_state", "type": "string", "scope": "monitor" },
+    { "id": "monitor_health_message", "type": "string", "scope": "monitor" },
+    { "id": "monitor_windows_display", "type": "integer|null", "scope": "monitor" },
+    { "id": "monitor_width", "type": "integer", "scope": "monitor" },
+    { "id": "monitor_height", "type": "integer", "scope": "monitor" },
+    { "id": "monitor_resolution", "type": "string", "scope": "monitor" },
+    { "id": "monitor_refresh_rate", "type": "integer", "scope": "monitor" },
+    { "id": "monitor_orientation", "type": "string", "scope": "monitor" },
+    { "id": "monitor_x", "type": "integer|null", "scope": "monitor" },
+    { "id": "monitor_y", "type": "integer|null", "scope": "monitor" },
+    { "id": "monitor_mouse_enabled", "type": "boolean", "scope": "monitor" },
+    { "id": "monitor_clipboard_enabled", "type": "boolean", "scope": "monitor" },
+    { "id": "monitor_keyboard_enabled", "type": "boolean", "scope": "monitor" },
+    { "id": "monitor_audio_supported", "type": "boolean", "scope": "monitor", "currentValue": false },
+    { "id": "monitor_audio_enabled", "type": "boolean", "scope": "monitor", "currentValue": false },
+    { "id": "monitor_remote_access", "type": "string", "scope": "monitor", "readOnly": true },
+    { "id": "monitor_title", "type": "string", "scope": "monitor" },
+    { "id": "monitor_name", "type": "string", "scope": "monitor" }
+  ]
+}
