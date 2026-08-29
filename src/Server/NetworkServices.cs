@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Net;
 using System.Net.NetworkInformation;
 using System.Text;
 using System.Text.Json;
@@ -5,100 +7,511 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using VirtualMonitorsUniverse.Core;
 
 namespace VirtualMonitorsUniverse.Server;
 
-internal sealed record WebSettingsSaveResult(string TargetUrl,bool RestartRequired,int WaitMilliseconds);
-internal sealed record MonitorCreateRequest(string? Name,string? Title,int Width,int Height,int RefreshRate,bool Portrait,string? AvatarAnimal);
-internal sealed record MonitorUpdateRequest(string? Name,string? Title,int Width,int Height,int RefreshRate,bool Portrait,string RemoteAccess,string SecurityMode,string? Password,bool RegenerateApiKey,bool CollaborationClipboard,bool CollaborationMouse,bool CollaborationKeyboard);
-internal sealed record AccessRuleRequest(string ClientId,string? IpAddress,string? MacAddress,string? ComputerName,string? UserName,string Permission);
+internal sealed record WebSettingsSaveResult(string TargetUrl, bool RestartRequired, int WaitMilliseconds);
+internal sealed record MonitorCreateRequest(string? Name, string? Title, int Width, int Height, int RefreshRate, bool Portrait, string? AvatarAnimal);
+internal sealed record MonitorUpdateRequest(string? Name, string? Title, int Width, int Height, int RefreshRate, bool Portrait, string RemoteAccess, string SecurityMode, string? Password, bool RegenerateApiKey, bool CollaborationClipboard, bool CollaborationMouse, bool CollaborationKeyboard);
+internal sealed record AccessRuleRequest(string ClientId, string? IpAddress, string? MacAddress, string? ComputerName, string? UserName, string Permission);
 internal sealed record MonitorOrderRequest(string[] Ids);
+internal sealed record ArrangementDisplayRequest(string DeviceName, int X, int Y);
+internal sealed record ArrangementApplyRequest(ArrangementDisplayRequest[] Displays);
 
 internal abstract class NetworkService : IAsyncDisposable
 {
     private WebApplication? _application;
-    protected NetworkService(string name,string serviceKey,LogStore logStore){Name=name;ServiceKey=serviceKey;LogStore=logStore;}
-    public string Name{get;} public string ServiceKey{get;} protected LogStore LogStore{get;} public bool IsRunning=>_application is not null; public int? ActivePort{get;private set;}
-    public async Task StartAsync(ServiceEndpointSettings endpoint){if(IsRunning)return;try{_application=await BuildAndStartAsync(endpoint);ActivePort=endpoint.Port;LogStore.Write("INFO",ServiceKey,"SERVICE_START",$"{Name} started on {endpoint.Interface}:{endpoint.Port}");}catch(Exception ex){LogStore.Write("ERROR",ServiceKey,"SERVICE_START_FAILED",$"{Name} failed to start: {ex.Message}",detailsJson:JsonSerializer.Serialize(new{exception=ex.ToString()}));throw;}}
-    public async Task StopAsync(){if(_application is null)return;var app=_application;_application=null;ActivePort=null;await app.StopAsync(TimeSpan.FromSeconds(5));await app.DisposeAsync();LogStore.Write("INFO",ServiceKey,"SERVICE_STOP",$"{Name} stopped");}
-    public async Task RestartAsync(ServiceEndpointSettings endpoint){if(_application is not null)await StopAsync();await StartAsync(endpoint);}
-    private async Task<WebApplication> BuildAndStartAsync(ServiceEndpointSettings endpoint){var b=WebApplication.CreateSlimBuilder();b.WebHost.UseUrls(endpoint.Interface.Equals("any",StringComparison.OrdinalIgnoreCase)?$"http://0.0.0.0:{endpoint.Port}":$"http://127.0.0.1:{endpoint.Port}");ConfigureServices(b.Services);var app=b.Build();ConfigureApplication(app);await app.StartAsync();return app;}
-    protected virtual void ConfigureServices(IServiceCollection services){} protected abstract void ConfigureApplication(WebApplication app);
-    public async ValueTask DisposeAsync(){if(_application is null)return;var app=_application;_application=null;ActivePort=null;await app.StopAsync(TimeSpan.FromSeconds(2));await app.DisposeAsync();}
+
+    protected NetworkService(string name, string serviceKey, LogStore logStore)
+    {
+        Name = name;
+        ServiceKey = serviceKey;
+        LogStore = logStore;
+    }
+
+    public string Name { get; }
+    public string ServiceKey { get; }
+    protected LogStore LogStore { get; }
+    public bool IsRunning => _application is not null;
+    public int? ActivePort { get; private set; }
+
+    public async Task StartAsync(ServiceEndpointSettings endpoint)
+    {
+        if (IsRunning) return;
+        try
+        {
+            _application = await BuildAndStartAsync(endpoint);
+            ActivePort = endpoint.Port;
+            LogStore.Write("INFO", ServiceKey, "SERVICE_START", $"{Name} started on {endpoint.Interface}:{endpoint.Port}");
+        }
+        catch (Exception ex)
+        {
+            LogStore.Write("ERROR", ServiceKey, "SERVICE_START_FAILED", $"{Name} failed to start: {ex.Message}", detailsJson: JsonSerializer.Serialize(new { exception = ex.ToString() }));
+            throw;
+        }
+    }
+
+    public async Task StopAsync()
+    {
+        if (_application is null) return;
+        var application = _application;
+        _application = null;
+        ActivePort = null;
+        await application.StopAsync(TimeSpan.FromSeconds(5));
+        await application.DisposeAsync();
+        LogStore.Write("INFO", ServiceKey, "SERVICE_STOP", $"{Name} stopped");
+    }
+
+    public async Task RestartAsync(ServiceEndpointSettings endpoint)
+    {
+        if (_application is not null) await StopAsync();
+        await StartAsync(endpoint);
+    }
+
+    private async Task<WebApplication> BuildAndStartAsync(ServiceEndpointSettings endpoint)
+    {
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.WebHost.UseUrls(endpoint.Interface.Equals("any", StringComparison.OrdinalIgnoreCase)
+            ? $"http://0.0.0.0:{endpoint.Port}"
+            : $"http://127.0.0.1:{endpoint.Port}");
+        ConfigureServices(builder.Services);
+        var application = builder.Build();
+        ConfigureApplication(application);
+        await application.StartAsync();
+        return application;
+    }
+
+    protected virtual void ConfigureServices(IServiceCollection services) { }
+    protected abstract void ConfigureApplication(WebApplication app);
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_application is null) return;
+        var application = _application;
+        _application = null;
+        ActivePort = null;
+        await application.StopAsync(TimeSpan.FromSeconds(2));
+        await application.DisposeAsync();
+    }
 }
 
 internal sealed class WebServerService : NetworkService
 {
-    private static readonly string[] ServiceKeys=["VMU","VMU_SERVER","WEB","SOCKET"];
-    private readonly MonitorApplicationService _monitors; private readonly MonitorThumbnailService _capture=new(); private readonly SystemResourceService _resources=new();
-    private readonly Func<IReadOnlyDictionary<string,bool>> _statusProvider; private readonly Func<ServerSettings> _settingsProvider; private readonly Func<ServerSettings,Task<WebSettingsSaveResult>> _settingsSaver; private readonly Func<int,bool> _isOwnedListener;
-    public WebServerService(LogStore logs,MonitorApplicationService monitors,Func<IReadOnlyDictionary<string,bool>> status,Func<ServerSettings> settings,Func<ServerSettings,Task<WebSettingsSaveResult>> saver,Func<int,bool> owned):base("Web Server","WEB",logs){_monitors=monitors;_statusProvider=status;_settingsProvider=settings;_settingsSaver=saver;_isOwnedListener=owned;}
+    private static readonly string[] ServiceKeys = ["VMU", "VMU_SERVER", "WEB", "SOCKET"];
+    private readonly MonitorApplicationService _monitors;
+    private readonly MonitorThumbnailService _capture = new();
+    private readonly SystemResourceService _resources = new();
+    private readonly DisplayArrangementCoordinator _arrangements;
+    private readonly Func<IReadOnlyDictionary<string, bool>> _statusProvider;
+    private readonly Func<ServerSettings> _settingsProvider;
+    private readonly Func<ServerSettings, Task<WebSettingsSaveResult>> _settingsSaver;
+    private readonly Func<int, bool> _isOwnedListener;
+
+    public WebServerService(
+        LogStore logs,
+        MonitorApplicationService monitors,
+        Func<IReadOnlyDictionary<string, bool>> status,
+        Func<ServerSettings> settings,
+        Func<ServerSettings, Task<WebSettingsSaveResult>> saver,
+        Func<int, bool> owned) : base("Web Server", "WEB", logs)
+    {
+        _monitors = monitors;
+        _statusProvider = status;
+        _settingsProvider = settings;
+        _settingsSaver = saver;
+        _isOwnedListener = owned;
+        _arrangements = new DisplayArrangementCoordinator(logs);
+    }
+
     protected override void ConfigureApplication(WebApplication app)
     {
-        app.MapGet("/",StatusPage);app.MapGet("/settings",SettingsPage);app.MapGet("/settings/arrangement",ArrangementPage);app.MapGet("/monitors",MonitorsPage);app.MapGet("/monitors/new",NewMonitorPage);app.MapGet("/monitors/{id}",MonitorPropertiesPage);app.MapGet("/monitor/{id}",TerminalPage);app.MapGet("/log",LogPage);
-        app.MapGet("/api/health",()=>Results.Json(new{status="ok",version=ProjectInfo.Version}));app.MapGet("/api/status",()=>Results.Json(StatusModel()));app.MapGet("/api/resources",()=>Results.Json(_resources.Read()));app.MapGet("/api/arrangement",()=>Results.Json(ArrangementModel()));app.MapGet("/api/settings",()=>Results.Json(_settingsProvider()));app.MapPost("/api/settings",SaveSettingsAsync);
-        app.MapGet("/api/log",(HttpRequest r)=>Results.Json(ReadLog(r)));app.MapGet("/api/log/count",(HttpRequest r)=>Results.Json(ReadLogCount(r)));app.MapDelete("/api/log",()=>{LogStore.Clear();return Results.NoContent();});app.MapGet("/api/log/export/{format}",ExportLog);
-        app.MapGet("/api/monitors",()=>Results.Json(_monitors.List()));app.MapPost("/api/monitors/order",ReorderAsync);app.MapGet("/api/monitors/name-available/{name}",(string name,string? except)=>Results.Json(new{available=_monitors.NameAvailable(name,except)}));app.MapPost("/api/monitors",CreateAsync);app.MapGet("/api/monitors/{id}",(string id)=>_monitors.Get(id)is{}m?Results.Json(m):Results.NotFound());app.MapPut("/api/monitors/{id}",UpdateAsync);
-        app.MapPost("/api/monitors/{id}/connect",(string id)=>Action(()=>_monitors.Connect(id)));app.MapPost("/api/monitors/{id}/disconnect",(string id)=>Action(()=>_monitors.Disconnect(id)));app.MapPost("/api/monitors/{id}/uninstall",Uninstall);app.MapGet("/api/monitors/{id}/thumbnail",ThumbnailAsync);app.MapGet("/api/monitors/{id}/live",LiveAsync);app.MapGet("/api/monitors/{id}/avatar",Avatar);app.MapPost("/api/monitors/{id}/avatar/animal/{animal}",(string id,string animal)=>Action(()=>_monitors.SetAnimalAvatar(id,animal)));app.MapPost("/api/monitors/{id}/avatar/upload",UploadAvatarAsync);
-        app.MapGet("/api/monitors/{id}/access-rules",(string id)=>Results.Json(_monitors.ListAccessRules(id)));app.MapPost("/api/monitors/{id}/access-rules",RuleAsync);app.MapDelete("/api/monitors/{id}/access-rules/{ruleId:long}",(string id,long ruleId)=>{_monitors.DeleteAccessRule(id,ruleId);return Results.NoContent();});
+        app.MapGet("/", StatusPage);
+        app.MapGet("/settings", SettingsPage);
+        app.MapGet("/settings/arrangement", () => Results.Redirect("/arrangement"));
+        app.MapGet("/arrangement", ArrangementPage);
+        app.MapGet("/monitors", MonitorsPage);
+        app.MapGet("/monitors/new", NewMonitorPage);
+        app.MapGet("/monitors/{id}", MonitorPropertiesPage);
+        app.MapGet("/monitor/{id}", TerminalPage);
+        app.MapGet("/log", LogPage);
+
+        app.MapGet("/api/health", () => Results.Json(new { status = "ok", version = ProjectInfo.Version }));
+        app.MapGet("/api/status", () => Results.Json(StatusModel()));
+        app.MapGet("/api/resources", () => Results.Json(_resources.Read()));
+        app.MapGet("/api/arrangement", () => Results.Json(ArrangementModel()));
+        app.MapPost("/api/arrangement/apply", ApplyArrangementAsync);
+        app.MapPost("/api/arrangement/keep", () => Results.Json(new { kept = _arrangements.Keep() }));
+        app.MapPost("/api/arrangement/revert", () => Results.Json(new { reverted = _arrangements.Revert() }));
+        app.MapPost("/api/arrangement/open-windows-settings", OpenWindowsDisplaySettings);
+        app.MapGet("/api/settings", () => Results.Json(_settingsProvider()));
+        app.MapPost("/api/settings", SaveSettingsAsync);
+
+        app.MapGet("/api/log", (HttpRequest request) => Results.Json(ReadLog(request)));
+        app.MapGet("/api/log/count", (HttpRequest request) => Results.Json(ReadLogCount(request)));
+        app.MapDelete("/api/log", () => { LogStore.Clear(); return Results.NoContent(); });
+        app.MapGet("/api/log/export/{format}", ExportLog);
+
+        app.MapGet("/api/monitors", () => Results.Json(_monitors.List()));
+        app.MapPost("/api/monitors/order", ReorderAsync);
+        app.MapGet("/api/monitors/name-available/{name}", (string name, string? except) => Results.Json(new { available = _monitors.NameAvailable(name, except) }));
+        app.MapPost("/api/monitors", CreateAsync);
+        app.MapGet("/api/monitors/{id}", (string id) => _monitors.Get(id) is { } monitor ? Results.Json(monitor) : Results.NotFound());
+        app.MapPut("/api/monitors/{id}", UpdateAsync);
+        app.MapPost("/api/monitors/{id}/connect", (string id) => Action(() => _monitors.Connect(id)));
+        app.MapPost("/api/monitors/{id}/disconnect", (string id) => Action(() => _monitors.Disconnect(id)));
+        app.MapPost("/api/monitors/{id}/uninstall", Uninstall);
+        app.MapGet("/api/monitors/{id}/thumbnail", ThumbnailAsync);
+        app.MapGet("/api/monitors/{id}/live", LiveAsync);
+        app.MapGet("/api/monitors/{id}/avatar", Avatar);
+        app.MapPost("/api/monitors/{id}/avatar/animal/{animal}", (string id, string animal) => Action(() => _monitors.SetAnimalAvatar(id, animal)));
+        app.MapPost("/api/monitors/{id}/avatar/upload", UploadAvatarAsync);
+        app.MapGet("/api/monitors/{id}/access-rules", (string id) => Results.Json(_monitors.ListAccessRules(id)));
+        app.MapPost("/api/monitors/{id}/access-rules", RuleAsync);
+        app.MapDelete("/api/monitors/{id}/access-rules/{ruleId:long}", (string id, long ruleId) => { _monitors.DeleteAccessRule(id, ruleId); return Results.NoContent(); });
     }
-    private object StatusModel(){var s=_statusProvider();var m=_monitors.List();return new{application=ProjectInfo.ProductName,version=ProjectInfo.Version,services=new[]{new{key="VMU",name="VMU",running=s.GetValueOrDefault("VMU")},new{key="VMU_SERVER",name="VMU Server",running=s.GetValueOrDefault("VMU_SERVER")},new{key="WEB",name="Web Server",running=s.GetValueOrDefault("WEB")},new{key="SOCKET",name="Socket Server",running=s.GetValueOrDefault("SOCKET")}},monitors=new{installed=m.Count(x=>x.Installed),connected=m.Count(x=>x.Connected)},remote=new{enabled=m.Any(x=>x.Configuration.RemoteAccess!=RemoteAccessMode.Disabled),clients=0},links=new{github=ProjectInfo.RepositoryUrl,documentation=ProjectInfo.DocumentationUrl,guide=ProjectInfo.GuideUrl,bugs=ProjectInfo.RepositoryUrl.TrimEnd('/')+"/issues"}};}
-    private IResult StatusPage()=>Shell("Status","""
-<div class="page"><h1>Virtual Monitors Universe</h1><div class="muted" id="version"></div><h2>Services</h2><div id="services" class="cards"></div><h2>Overview</h2><div class="stats"><a href="/monitors"><strong id="installed">0</strong><span>Installed Monitors</span></a><a href="/monitors"><strong id="connected">0</strong><span>Connected Monitors</span></a><div><strong id="remote">Disabled</strong><span>Remote Access</span></div><div><strong id="clients">0</strong><span>Remote Clients</span></div></div><h2>System Resources</h2><div class="resources"><div><b>CPU</b><span>System: <strong id="cpuS">—</strong></span><span>VMU: <strong id="cpuV">—</strong></span></div><div><b>GPU</b><span>System: <strong id="gpuS">—</strong></span><span>VMU: <strong id="gpuV">—</strong></span></div><div><b>RAM</b><span>System: <strong id="ramS">—</strong></span><span>VMU: <strong id="ramV">—</strong></span></div><div><b>NET</b><span>System: <strong id="netS">—</strong></span><span>VMU: <strong id="netV">—</strong></span></div></div><h2>Project</h2><div class="projecttiles"><a id="github"><b>◆</b>GitHub</a><a id="documentation"><b>📚</b>Documentation</a><a id="guide"><b>📖</b>User Guide</a><a id="bugs"><b>🐞</b>Report a Bug</a></div></div><script>const q=i=>document.getElementById(i),pct=v=>v==null?'—':v.toFixed(1)+' %',rate=v=>v==null?'—':v<1048576?(v/1024).toFixed(1)+' KB/s':(v/1048576).toFixed(1)+' MB/s';async function st(){const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());q('version').textContent='Version '+s.version;q('services').innerHTML=s.services.map(x=>'<div class="service"><span class="dot '+(x.running?'on':'off')+'"></span><span>'+x.name+'</span><b>'+(x.running?'Running':'Stopped')+'</b></div>').join('');q('installed').textContent=s.monitors.installed;q('connected').textContent=s.monitors.connected;q('remote').textContent=s.remote.enabled?'Enabled':'Disabled';q('clients').textContent=s.remote.clients;['github','documentation','guide','bugs'].forEach(k=>{q(k).href=s.links[k];q(k).target='_blank'})}async function rs(){if(document.hidden)return;const r=await fetch('/api/resources',{cache:'no-store'}).then(x=>x.json());q('cpuS').textContent=pct(r.systemCpu);q('cpuV').textContent=pct(r.vmuCpu);q('gpuS').textContent=pct(r.systemGpu);q('gpuV').textContent=pct(r.vmuGpu);q('ramS').textContent=pct(r.systemRam);q('ramV').textContent=(r.vmuRamBytes/1048576).toFixed(0)+' MB';q('netS').textContent=rate(r.systemNetBytesPerSecond);q('netV').textContent=rate(r.vmuNetBytesPerSecond)}st();rs();setInterval(st,2000);setInterval(rs,2000)</script>
-""");
-    private IResult SettingsPage()=>Shell("Settings","""
-<div class="page"><div class="subnav"><b>Settings</b><a href="/settings/arrangement">Arrangement</a></div><h1>Settings</h1><div id="error" class="error"></div><form id="form"><fieldset><legend>Services</legend><table class="settings"><tr><th>Service</th><th>Interface</th><th>Port</th></tr><tr><td>VMU Server</td><td><select id="vmuInterface"><option>localhost</option><option>any</option></select></td><td><input id="vmuPort" type="number"></td></tr><tr><td>Web Server</td><td><select id="webInterface"><option>localhost</option><option>any</option></select></td><td><input id="webPort" type="number"></td></tr><tr><td>Web Socket</td><td><select id="socketInterface"><option>localhost</option><option>any</option></select></td><td><input id="socketPort" type="number"></td></tr></table></fieldset><fieldset><legend>Web and Logging</legend><div class="formgrid"><label>Log Retention</label><div><input id="retention" type="number"> days</div><label>Monitor Preview</label><select id="preview"><option value="0">Manual only</option><option value="15">15 seconds</option><option value="30">30 seconds</option><option value="60">1 minute</option><option value="120">2 minutes</option><option value="300">5 minutes</option><option value="600">10 minutes</option></select></div></fieldset><fieldset><legend>On Exit</legend><div class="formgrid"><label>Monitors</label><select id="exit"><option>Disconnect</option><option>Keep</option><option>Uninstall</option></select><label>Restore Services</label><input id="restore" type="checkbox"></div></fieldset><button>Save</button></form></div><script>const q=i=>document.getElementById(i);let o;async function load(){o=await fetch('/api/settings').then(r=>r.json());['vmu','web','socket'].forEach(k=>{q(k+'Interface').value=o[k].interface;q(k+'Port').value=o[k].port});q('retention').value=Math.ceil(o.logging.retentionMinutes/1440);q('preview').value=o.webUi.monitorPreviewRefreshSeconds;q('exit').value=o.exit.monitorAction;q('restore').checked=o.exit.restoreServices}q('vmuInterface').onchange=()=>{if(q('vmuInterface').value==='any')q('webInterface').value='any'};q('form').onsubmit=async e=>{e.preventDefault();if(q('vmuInterface').value==='any')q('webInterface').value='any';const x={vmu:{interface:q('vmuInterface').value,port:+q('vmuPort').value},web:{interface:q('webInterface').value,port:+q('webPort').value},socket:{interface:q('socketInterface').value,port:+q('socketPort').value},logging:{retentionMinutes:+q('retention').value*1440},webUi:{monitorPreviewRefreshSeconds:+q('preview').value},exit:{monitorAction:q('exit').value,restoreServices:q('restore').checked},serviceState:o.serviceState},r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(x)});if(!r.ok)q('error').textContent=(await r.json()).error;else location.reload()};load()</script>
-""");
-    private object ArrangementModel(){var vm=_monitors.List().Where(x=>x.DeviceName is not null).ToDictionary(x=>x.DeviceName!,StringComparer.OrdinalIgnoreCase);return WindowsArrangementService.GetActive().Select(x=>new{x.WindowsNumber,x.DeviceName,x.X,x.Y,x.Width,x.Height,x.Primary,title=vm.TryGetValue(x.DeviceName,out var m)?m.Configuration.Title:null,isVirtual=vm.ContainsKey(x.DeviceName)});}
-    private IResult ArrangementPage()=>Shell("Arrangement","""
-<div class="page"><div class="subnav"><a href="/settings">Settings</a><b>Arrangement</b></div><h1>Arrangement</h1><p class="muted">Read-only Windows desktop topology.</p><div id="arr" class="arrangement"></div></div><script>async function load(){const a=await fetch('/api/arrangement').then(r=>r.json());if(!a.length)return;const minX=Math.min(...a.map(x=>x.x)),minY=Math.min(...a.map(x=>x.y)),maxX=Math.max(...a.map(x=>x.x+x.width)),maxY=Math.max(...a.map(x=>x.y+x.height)),s=Math.min(850/(maxX-minX),420/(maxY-minY)),b=document.getElementById('arr');b.style.height=Math.max(220,(maxY-minY)*s+40)+'px';b.innerHTML=a.map(x=>'<div class="arrdisplay '+(x.isVirtual?'virtual':'')+'" style="left:'+(20+(x.x-minX)*s)+'px;top:'+(20+(x.y-minY)*s)+'px;width:'+(x.width*s)+'px;height:'+(x.height*s)+'px"><strong>'+x.windowsNumber+'</strong>'+(x.title?'<span>'+x.title+'</span>':'')+'</div>').join('')}load()</script>
-""");
-    private IResult MonitorsPage(){var page="""
-<div class="page"><h1>Monitors</h1><div id="grid" class="monitorgrid"></div></div><script>const interval=__INTERVAL__,g=document.getElementById('grid');async function load(){const a=await fetch('/api/monitors',{cache:'no-store'}).then(r=>r.json());g.innerHTML=a.map(m=>'<div class="monitorcard" data-id="'+m.configuration.vmuId+'"><div class="cardtools"><button class="refresh">↻</button><button class="move">↕</button></div><a href="/monitors/'+encodeURIComponent(m.configuration.name)+'"><div class="monitorpic"><img class="preview '+(m.connected?'':'hidden')+'" src="'+(m.connected?'/api/monitors/'+encodeURIComponent(m.configuration.name)+'/thumbnail?t='+Date.now():'')+'"><div class="screen '+(m.connected?'hidden':'')+'"></div><div class="stand"></div></div><h3><span class="avatarEmoji">'+window.vmuAnimalEmoji(m.configuration.avatarValue)+'</span><span>'+m.configuration.title+'</span></h3><div>'+m.width+' × '+m.height+'</div><div><span class="dot '+(m.connected?'on':'off')+'"></span> '+(m.connected?'On':'Off')+'</div></a></div>').join('')+'<a class="monitorcard addmonitor" href="/monitors/new"><div class="plus">+</div><h3>Add Monitor</h3></a>';wire()}function wire(){document.querySelectorAll('.refresh').forEach(b=>b.onclick=e=>{e.preventDefault();const i=b.closest('.monitorcard').querySelector('.preview');if(i)i.src=i.src.split('?')[0]+'?t='+Date.now()});document.querySelectorAll('.move').forEach(b=>b.onmousedown=()=>b.closest('.monitorcard').draggable=true);document.querySelectorAll('.monitorcard[data-id]').forEach(c=>{c.ondragover=e=>e.preventDefault();c.ondragstart=e=>e.dataTransfer.setData('text/plain',c.dataset.id);c.ondrop=async e=>{e.preventDefault();const s=document.querySelector('[data-id="'+e.dataTransfer.getData('text/plain')+'"]');if(s&&s!==c){g.insertBefore(s,c);await fetch('/api/monitors/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:[...document.querySelectorAll('.monitorcard[data-id]')].map(x=>x.dataset.id)})})}};c.ondragend=()=>c.draggable=false})}function previews(){if(document.hidden||interval===0)return;document.querySelectorAll('.preview:not(.hidden)').forEach(i=>i.src=i.src.split('?')[0]+'?t='+Date.now())}load();if(interval>0)setInterval(previews,interval*1000)</script>
-""".Replace("__INTERVAL__",_settingsProvider().WebUi.MonitorPreviewRefreshSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));return Shell("Monitors",page);}
-    private static string Picker(string animal)=>"<div class=\"avatarpicker\" data-selected=\""+animal+"\"><button type=\"button\" class=\"avatarcurrent\">"+MonitorAvatarService.GetEmoji("animal",animal)+"</button><div class=\"avatargrid hidden\">"+string.Join("",MonitorAvatarService.AnimalNames.Select(a=>"<button type=\"button\" data-animal=\""+a+"\">"+MonitorAvatarService.GetEmoji("animal",a)+"</button>"))+"<label class=\"customtile hidden\"><img><span>Custom</span></label></div><input class=\"avatarfile\" type=\"file\" accept=\".png,.ico,.gif\" hidden></div>";
-    private static string PickerJs=>"""
-function picker(){const p=document.querySelector('.avatarpicker'),cur=p.querySelector('.avatarcurrent'),grid=p.querySelector('.avatargrid'),file=p.querySelector('.avatarfile'),custom=p.querySelector('.customtile');function select(a){p.dataset.selected=a;p._file=null;custom.classList.add('hidden');grid.querySelectorAll('[data-animal]').forEach(x=>x.classList.toggle('selected',x.dataset.animal===a));cur.textContent=window.vmuAnimalEmoji(a)}cur.onclick=()=>grid.classList.toggle('hidden');grid.querySelectorAll('[data-animal]').forEach(b=>b.onclick=()=>{select(b.dataset.animal);grid.classList.add('hidden')});custom.onclick=()=>file.click();file.onchange=()=>{if(!file.files[0])return;p._file=file.files[0];custom.classList.remove('hidden');custom.querySelector('img').src=URL.createObjectURL(p._file);grid.querySelectorAll('[data-animal]').forEach(x=>x.classList.remove('selected'));cur.textContent='🖼️';grid.classList.add('hidden')};select(p.dataset.selected)}setTimeout(picker,0);
-""";
-    private IResult NewMonitorPage(){var animal=MonitorAvatarService.RandomAnimal();var rates=string.Join("",MonitorApplicationService.SupportedRefreshRates.Select(x=>"<option value=\""+x+"\""+(x==60?" selected":"")+">"+x+" Hz</option>"));var page="""
-<div class="page"><h1>Add Monitor</h1><div id="error" class="error"></div><form id="f" class="properties"><label>Title <input id="title"></label><label>Name <input id="name"></label><label>Avatar __PICKER__</label><label>Resolution <select id="res"><option>1280x720</option><option selected>1920x1080</option><option>2560x1440</option><option>3840x2160</option></select></label><label>Refresh Rate <select id="hz">__RATES__</select></label><label>Orientation <select id="portrait"><option value="false">Landscape</option><option value="true">Portrait</option></select></label><button>Install</button></form><div id="op" class="operation hidden"><h2>Installing Monitor...</h2><div class="progress"><div id="bar"></div></div><p>Installation progress is written to the VMU log.</p></div></div><script>__PICKERJS__const q=i=>document.getElementById(i);q('f').onsubmit=async e=>{e.preventDefault();const p=document.querySelector('.avatarpicker'),wh=q('res').value.split('x').map(Number);q('f').classList.add('hidden');q('op').classList.remove('hidden');try{const r=await fetch('/api/monitors',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:q('title').value||null,name:q('name').value||null,width:wh[0],height:wh[1],refreshRate:+q('hz').value,portrait:q('portrait').value==='true',avatarAnimal:p.dataset.selected})}),x=await r.json();if(!r.ok)throw new Error(x.error);if(p._file){const fd=new FormData();fd.append('file',p._file);await fetch('/api/monitors/'+x.configuration.name+'/avatar/upload',{method:'POST',body:fd})}location.href='/monitors/'+x.configuration.name}catch(ex){q('op').classList.add('hidden');q('f').classList.remove('hidden');q('error').textContent=ex.message}}</script>
-""".Replace("__PICKER__",Picker(animal)).Replace("__RATES__",rates).Replace("__PICKERJS__",PickerJs);return Shell("Add Monitor",page);}
-    private IResult MonitorPropertiesPage(string id){var m=_monitors.Get(id);if(m is null)return Results.NotFound();if(!id.Equals(m.Configuration.Name,StringComparison.OrdinalIgnoreCase))return Results.Redirect("/monitors/"+Uri.EscapeDataString(m.Configuration.Name),true);var animal=m.Configuration.AvatarKind=="animal"?m.Configuration.AvatarValue:MonitorAvatarService.RandomAnimal();var rates=string.Join("",MonitorApplicationService.SupportedRefreshRates.Select(x=>"<option value=\""+x+"\">"+x+" Hz</option>"));var page="""
-<div class="page"><h1>Monitor Properties</h1><div id="error" class="error"></div><form id="f" class="properties"><label>Title <input id="title"></label><label>Name <input id="name"></label><label>Avatar __PICKER__</label><label>Resolution <select id="res"><option>1280x720</option><option>1920x1080</option><option>2560x1440</option><option>3840x2160</option></select></label><label>Refresh Rate <select id="hz">__RATES__</select></label><label>Orientation <select id="portrait"><option value="false">Landscape</option><option value="true">Portrait</option></select></label><fieldset><legend>Windows Settings</legend><label>Windows Display <input id="wd" readonly></label><label>GDI <input id="gdi" readonly></label><label>Current Position <input id="pos" readonly></label></fieldset><fieldset><legend>Monitor Health</legend><div class="health"><strong id="hs"></strong><span id="ht"></span><p id="hm"></p></div></fieldset><fieldset><legend>Remote Access</legend><label>Mode <select id="remote"><option>Disabled</option><option>Presentation</option><option>Collaboration</option></select></label><div id="caps"><label><input id="clip" type="checkbox"> Clipboard</label><label><input id="mouse" type="checkbox"> Mouse</label><label><input id="key" type="checkbox"> Keyboard</label></div><label>Access <select id="security"><option>Public</option><option>Password</option><option value="ApiKey">API Key</option><option value="Approval">White/Black List Approval</option></select></label><label>Password <input id="password" type="password"></label><label>API Key <input id="api" readonly></label></fieldset><div class="actions"><button id="save">Save</button><a class="buttonlink" href="/monitors">Cancel</a><button type="button" id="connect">Connect</button><button type="button" id="disconnect">Disconnect</button><button type="button" id="uninstall">Uninstall</button><a class="buttonlink" id="terminal">Open Terminal</a></div></form></div><script>__PICKERJS__const id=__ID__,q=i=>document.getElementById(i);let m,base='';function state(){return JSON.stringify([q('title').value,q('name').value,q('res').value,q('hz').value,q('portrait').value,q('remote').value,q('security').value,q('clip').checked,q('mouse').checked,q('key').checked,document.querySelector('.avatarpicker').dataset.selected,!!document.querySelector('.avatarpicker')._file])}function dirty(){q('save').disabled=state()===base}async function load(){m=await fetch('/api/monitors/'+id).then(r=>r.json());q('title').value=m.configuration.title;q('name').value=m.configuration.name;q('res').value=m.configuration.width+'x'+m.configuration.height;q('hz').value=m.configuration.refreshRate;q('portrait').value=String(m.configuration.portrait);q('wd').value=m.windowsDisplay??'—';q('gdi').value=m.deviceName??'—';q('pos').value=m.positionX==null?'—':'X: '+m.positionX+', Y: '+m.positionY;q('hs').textContent=m.health.state;q('hs').className=m.health.isError?'bad':'good';q('hm').textContent=m.health.message;q('ht').textContent=m.health.timestamp?new Date(m.health.timestamp).toLocaleString():'';q('remote').value=m.configuration.remoteAccess;q('security').value=m.configuration.securityMode;q('api').value=m.configuration.apiKey||'';q('clip').checked=m.configuration.collaborationClipboard;q('mouse').checked=m.configuration.collaborationMouse;q('key').checked=m.configuration.collaborationKeyboard;q('connect').disabled=!m.installed||m.connected;q('disconnect').disabled=!m.connected;q('terminal').classList.toggle('hidden',!m.connected||m.health.isError);q('terminal').href='/monitor/'+m.configuration.name;base=state();dirty()}q('f').oninput=dirty;q('f').onsubmit=async e=>{e.preventDefault();const wh=q('res').value.split('x').map(Number),x={title:q('title').value,name:q('name').value,width:wh[0],height:wh[1],refreshRate:+q('hz').value,portrait:q('portrait').value==='true',remoteAccess:q('remote').value,securityMode:q('security').value,password:q('password').value||null,regenerateApiKey:false,collaborationClipboard:q('clip').checked,collaborationMouse:q('mouse').checked,collaborationKeyboard:q('key').checked},r=await fetch('/api/monitors/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(x)});if(!r.ok){q('error').textContent=(await r.json()).error;return}const u=await r.json(),p=document.querySelector('.avatarpicker');if(p._file){const fd=new FormData();fd.append('file',p._file);await fetch('/api/monitors/'+u.configuration.name+'/avatar/upload',{method:'POST',body:fd})}else await fetch('/api/monitors/'+u.configuration.name+'/avatar/animal/'+p.dataset.selected,{method:'POST'});location.href='/monitors/'+u.configuration.name};async function act(a){const r=await fetch('/api/monitors/'+id+'/'+a,{method:'POST'});if(!r.ok)alert((await r.json()).error);else load()}q('connect').onclick=()=>act('connect');q('disconnect').onclick=()=>act('disconnect');q('uninstall').onclick=async()=>{if(confirm('Uninstall monitor?')){await fetch('/api/monitors/'+id+'/uninstall',{method:'POST'});location.href='/monitors'}};load()</script>
-""".Replace("__PICKER__",Picker(animal)).Replace("__RATES__",rates).Replace("__PICKERJS__",PickerJs).Replace("__ID__",JsonSerializer.Serialize(m.Configuration.Name));return Shell("Monitor "+m.Configuration.Title,page);}
-    private IResult TerminalPage(string id){var m=_monitors.Get(id);if(m is null)return Results.NotFound();if(!m.Connected||m.Health.IsError)return Results.Redirect("/monitors/"+Uri.EscapeDataString(m.Configuration.Name));var n=Uri.EscapeDataString(m.Configuration.Name);return Results.Content("<!doctype html><html><head><meta charset=\"utf-8\"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#292b2f}body{display:flex;align-items:center;justify-content:center}img{max-width:100vw;max-height:100vh;width:auto;height:auto;object-fit:contain;border:1px solid #45484d}</style></head><body><img src=\"/api/monitors/"+n+"/live\"></body></html>","text/html; charset=utf-8");}
-    private async Task LiveAsync(string id,HttpContext c){var m=_monitors.Get(id);if(m is null||!m.Connected||m.Health.IsError||m.DeviceName is null){c.Response.StatusCode=404;return;}c.Response.ContentType="multipart/x-mixed-replace; boundary=vmu";try{while(!c.RequestAborted.IsCancellationRequested){var f=await _capture.GetLiveFrameAsync(m.Configuration.VmuId,m.DeviceName,c.RequestAborted);var h=Encoding.ASCII.GetBytes($"--vmu\r\nContent-Type: image/jpeg\r\nContent-Length: {f.Length}\r\n\r\n");await c.Response.Body.WriteAsync(h,c.RequestAborted);await c.Response.Body.WriteAsync(f,c.RequestAborted);await c.Response.Body.WriteAsync("\r\n"u8.ToArray(),c.RequestAborted);await c.Response.Body.FlushAsync(c.RequestAborted);_resources.AddVmuNetworkBytes(h.Length+f.Length+2);await Task.Delay(100,c.RequestAborted);}}catch(OperationCanceledException){}catch(Exception ex){LogStore.Write("WARN","WEB","TERMINAL_STREAM_FAILED",ex.Message,m.Configuration.VmuId);}}
-    private async Task<IResult> ThumbnailAsync(string id,HttpContext c){try{var m=_monitors.Get(id);if(m is null||!m.Connected||m.DeviceName is null)return Results.NotFound();return Results.File(await _capture.GetThumbnailAsync(m.Configuration.VmuId,m.DeviceName,c.RequestAborted),"image/jpeg");}catch{return Results.NotFound();}}
-    private async Task<IResult> CreateAsync(HttpRequest r){try{var x=await r.ReadFromJsonAsync<MonitorCreateRequest>();if(x is null)return Results.BadRequest();return Results.Json(_monitors.Create(x.Name,x.Title,x.Width,x.Height,x.RefreshRate,x.Portrait,x.AvatarAnimal));}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
-    private async Task<IResult> UpdateAsync(HttpRequest r,string id){try{var x=await r.ReadFromJsonAsync<MonitorUpdateRequest>();if(x is null||!Enum.TryParse<RemoteAccessMode>(x.RemoteAccess,true,out var ra)||!Enum.TryParse<RemoteSecurityMode>(x.SecurityMode,true,out var sm))return Results.BadRequest();return Results.Json(_monitors.UpdateProperties(id,x.Name,x.Title,x.Width,x.Height,x.RefreshRate,x.Portrait,ra,sm,x.Password,x.RegenerateApiKey,x.CollaborationClipboard,x.CollaborationMouse,x.CollaborationKeyboard));}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
-    private async Task<IResult> ReorderAsync(HttpRequest r){var x=await r.ReadFromJsonAsync<MonitorOrderRequest>();if(x is null)return Results.BadRequest();_monitors.Reorder(x.Ids);return Results.NoContent();}
-    private IResult Avatar(string id){var a=_monitors.GetAvatar(id);return a is null?Results.NotFound():Results.File(a.Value.Bytes,a.Value.ContentType);}
-    private async Task<IResult> UploadAvatarAsync(HttpRequest r,string id){try{var f=(await r.ReadFormAsync()).Files.GetFile("file");if(f is null||f.Length==0)return Results.BadRequest();if(f.Length>2*1024*1024)return Results.BadRequest(new{error="Avatar file must be at most 2 MB."});await using var s=f.OpenReadStream();return Results.Json(_monitors.SetCustomAvatar(id,f.FileName,s));}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
-    private async Task<IResult> RuleAsync(HttpRequest r,string id){var x=await r.ReadFromJsonAsync<AccessRuleRequest>();if(x is null||!Enum.TryParse<AccessPermission>(x.Permission,true,out var p))return Results.BadRequest();return Results.Json(_monitors.UpsertAccessRule(id,x.ClientId,x.IpAddress,x.MacAddress,x.ComputerName,x.UserName,p));}
-    private static IResult Action(Func<MonitorSnapshot> a){try{return Results.Json(a());}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
-    private IResult Uninstall(string id){try{_monitors.Uninstall(id);return Results.NoContent();}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
-    private async Task<IResult> SaveSettingsAsync(HttpRequest r){var p=await r.ReadFromJsonAsync<ServerSettings>();if(p is null)return Results.BadRequest();if(p.Vmu.Interface.Equals("any",StringComparison.OrdinalIgnoreCase)&&!p.Web.Interface.Equals("any",StringComparison.OrdinalIgnoreCase))return Results.Conflict(new{error="Web Server interface must be 'any' while VMU Server interface is 'any'."});var ep=new[]{("VMU Server",p.Vmu.Port),("Web Server",p.Web.Port),("Web Socket",p.Socket.Port)};if(ep.GroupBy(x=>x.Port).Any(x=>x.Count()>1))return Results.Conflict(new{error="Service ports must be unique."});var active=IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Select(x=>x.Port).ToHashSet();var blocked=ep.FirstOrDefault(x=>active.Contains(x.Port)&&!_isOwnedListener(x.Port));if(blocked!=default)return Results.Conflict(new{error=$"{blocked.Item1} port {blocked.Port} is already used."});return Results.Json(await _settingsSaver(p));}
-    private IResult LogPage()=>Shell("Log","""
-<div class="logpage"><div class="filters"><h3>Filters</h3><label><input type="checkbox" data-s="VMU" checked> VMU</label><label><input type="checkbox" data-s="VMU_SERVER" checked> VMU Server</label><label><input type="checkbox" data-s="WEB" checked> Web Server</label><label><input type="checkbox" data-s="SOCKET" checked> Socket Server</label></div><div class="logmain"><div class="toolbar"><input id="search" placeholder="Search..."></div><div class="tablewrap"><table id="log"><thead><tr><th>Timecode</th><th>Level</th><th>Service</th><th>Monitor</th><th>Event</th><th>Message</th></tr></thead><tbody></tbody></table></div><div class="logfooter"><label><input id="tail" type="checkbox" checked> Always at end</label><span id="count"></span><div><button onclick="exp('xlsx')">Export XLSX</button><button onclick="exp('csv')">Export CSV</button><button onclick="exp('txt')">Export TXT</button><button id="clear">Clear</button></div></div></div></div><script>const q=i=>document.getElementById(i),tb=document.querySelector('#log tbody');function query(){const p=new URLSearchParams();document.querySelectorAll('[data-s]:checked').forEach(x=>p.append('service',x.dataset.s));if(q('search').value)p.set('q',q('search').value);return p}async function refresh(){const p=query(),a=await Promise.all([fetch('/api/log?'+p).then(r=>r.json()),fetch('/api/log/count?'+p).then(r=>r.json())]),rows=a[0],c=a[1];tb.innerHTML=rows.map(x=>'<tr><td>'+new Date(x.timestamp).toLocaleString()+'</td><td>'+x.level+'</td><td>'+x.service+'</td><td>'+(x.monitorId||'')+'</td><td>'+x.event+'</td><td>'+x.message+'</td></tr>').join('');const filtered=q('search').value||document.querySelectorAll('[data-s]:not(:checked)').length;q('count').innerHTML=filtered?'Displayed <b>'+c.filtered+'</b> of <b>'+c.total+'</b> records.':'Total records <b>'+c.total+'</b>';if(q('tail').checked&&tb.lastElementChild)tb.lastElementChild.scrollIntoView({block:'nearest'})}document.querySelectorAll('[data-s]').forEach(x=>x.onchange=refresh);q('search').oninput=refresh;q('clear').onclick=async()=>{if(confirm('Clear log?')){await fetch('/api/log',{method:'DELETE'});refresh()}};function exp(f){location.href='/api/log/export/'+f+'?'+query()}refresh();setInterval(refresh,1000)</script>
-""","logbody");
-    private IReadOnlyList<LogEntry> ReadLog(HttpRequest r){var s=r.Query["service"].Where(x=>!string.IsNullOrWhiteSpace(x)).Select(x=>x!).ToArray();return LogStore.Read(r.Query["q"].FirstOrDefault(),s.Length==0?ServiceKeys:s);}
-    private LogCount ReadLogCount(HttpRequest r){var s=r.Query["service"].Where(x=>!string.IsNullOrWhiteSpace(x)).Select(x=>x!).ToArray();return LogStore.Count(r.Query["q"].FirstOrDefault(),s.Length==0?ServiceKeys:s);}
-    private IResult ExportLog(HttpRequest r,string format){if(format is not("xlsx"or"csv"or"txt"))return Results.BadRequest();var b=LogExportService.ExportBytes(format,ReadLog(r));return Results.File(b,format=="xlsx"?"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":format=="csv"?"text/csv":"text/plain",$"vmu-log-{DateTime.Now:yyyyMMdd-HHmmss}.{format}");}
-    private string Navigation(){return string.Join("",_monitors.List().Where(x=>x.Connected&&!x.Health.IsError).Select(x=>"<a class=\"monitorNav\" href=\"/monitor/"+Uri.EscapeDataString(x.Configuration.Name)+"\"><span>"+MonitorAvatarService.GetEmoji(x.Configuration.AvatarKind,x.Configuration.AvatarValue)+"</span><b>"+System.Net.WebUtility.HtmlEncode(x.Configuration.Title)+"</b></a>"));}
-    private IResult Shell(string title,string body,string bodyClass="")
+
+    private object StatusModel()
     {
-        const string css="""
-*{box-sizing:border-box}html,body{margin:0;font-family:Segoe UI,Arial,sans-serif;color:#202124;background:#f5f6f8}body.logbody{height:100vh;overflow:hidden}nav{height:60px;background:#202124;display:flex;align-items:stretch;padding:0 10px}.navwrap{display:flex;align-items:center;border-right:1px solid #555;padding-right:10px}.gear{border:0;background:transparent;color:white;font-size:20px}.navmenu{display:none;position:fixed;top:52px;left:10px;background:white;border:1px solid #bbb;padding:5px;z-index:1000}.navmenu.open{display:block}.navmenu a{display:block;padding:8px;color:#222;text-decoration:none}.monitorNav{height:60px;display:flex;align-items:center;gap:7px;padding:0 14px;border-right:1px solid #555;color:#fff;text-decoration:none}.page{max-width:1000px;margin:30px auto;padding:0 20px}.muted{color:#687078}.cards,.stats,.projecttiles,.resources{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.service,.stats>*,.projecttiles>a,.resources>div{background:white;border:1px solid #d9dde3;border-radius:7px;padding:14px;display:flex;gap:8px;align-items:center;justify-content:center;color:#202124;text-decoration:none}.stats>*,.projecttiles>a,.resources>div{flex-direction:column}.dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:#aaa}.dot.on{background:#25a746}.formgrid{display:grid;grid-template-columns:150px 220px;gap:10px}.settings td,.settings th{padding:7px}.properties{max-width:760px}.properties>label,.properties fieldset>label{display:grid;grid-template-columns:160px 1fr;gap:12px;margin:10px 0}fieldset{border:1px solid #b8bec7;border-radius:4px;padding:12px;margin:14px 0}.actions{display:flex;gap:8px;margin-top:18px}.buttonlink{padding:7px 14px;border:1px solid #aaa;text-decoration:none;color:#222}.monitorgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}.monitorcard{position:relative;background:white;border:1px solid #d9dde3;border-radius:8px;padding:18px;text-align:center;min-height:250px}.monitorcard>a{text-decoration:none;color:#202124}.monitorcard h3{height:52px;display:flex;align-items:center;justify-content:center;gap:6px}.monitorcard h3 span:last-child{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.cardtools{display:none;position:absolute;right:7px;top:7px;z-index:3}.monitorcard:hover .cardtools{display:flex}.monitorpic{height:115px}.preview,.screen{width:125px;height:78px;border:7px solid #4b5563;margin:auto;object-fit:cover;background:#dceefa}.stand{width:45px;height:8px;background:#4b5563;margin:8px auto}.plus{font-size:92px}.avatarEmoji{font-size:25px}.avatarpicker{position:relative}.avatarcurrent{font-size:34px;width:54px;height:48px}.avatargrid{position:absolute;z-index:20;display:grid;grid-template-columns:repeat(4,52px);gap:4px;background:white;border:1px solid #aaa;padding:8px}.avatargrid button{font-size:27px;height:48px}.avatargrid button.selected{outline:3px solid #2d7dd2}.customtile img{width:32px;height:32px}.hidden{display:none!important}.health{display:grid;grid-template-columns:1fr auto}.health p{grid-column:1/3}.good{color:#218838}.bad{color:#b3261e}.subnav{display:flex;gap:12px}.subnav>*{padding:7px 12px;background:white;border:1px solid #ccd1d8}.arrangement{position:relative;background:#303338;border:1px solid #555;overflow:hidden}.arrdisplay{position:absolute;background:#d9dde3;border:2px solid white;display:flex;flex-direction:column;align-items:center;justify-content:center}.arrdisplay.virtual{background:#cfe4ff}.arrdisplay strong{font-size:28px}.logpage{display:grid;grid-template-columns:190px minmax(0,1fr);height:calc(100vh - 60px);padding:10px;gap:8px}.filters{background:#eee;border:1px solid #ccc;padding:8px}.filters label{display:block;padding:4px}.logmain{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-height:0}.toolbar{text-align:right}.tablewrap{background:white;border:1px solid #bbb;overflow:auto;min-height:0}#log{border-collapse:collapse;width:100%;font:13px Consolas,monospace}#log th{position:sticky;top:0;background:#e1e6ec;padding:6px;text-align:left}#log td{padding:5px;border-bottom:1px solid #eee;white-space:nowrap}.logfooter{display:grid;grid-template-columns:auto 1fr auto;gap:15px;align-items:center;padding-top:8px}.logfooter #count{text-align:center}.operation{background:white;border:1px solid #ccd1d8;padding:20px}.progress{height:16px;background:#ddd}.progress div{height:100%;background:#2d7dd2}
-""";
-        const string common="""
-<script>window.vmuAnimalEmoji=n=>({fox:'🦊',owl:'🦉',panda:'🐼',cat:'🐱',dog:'🐶',rabbit:'🐰',bear:'🐻',koala:'🐨',tiger:'🐯',lion:'🦁',penguin:'🐧',frog:'🐸',mouse:'🐭',cow:'🐮',pig:'🐷',monkey:'🐵'}[n]||'🖥️');const nb=document.getElementById('navButton'),nm=document.getElementById('navMenu');nb.onclick=e=>{e.stopPropagation();nm.classList.toggle('open')};document.addEventListener('click',()=>nm.classList.remove('open'));</script>
-""";
-        var html="<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>"+System.Net.WebUtility.HtmlEncode(title)+" - VMU</title><style>"+css+"</style></head><body class=\""+bodyClass+"\"><nav><div class=\"navwrap\"><button id=\"navButton\" class=\"gear\">⚙</button><div id=\"navMenu\" class=\"navmenu\"><a href=\"/\">Status</a><a href=\"/monitors\">Monitors</a><a href=\"/settings\">Settings</a><a href=\"/log\">View Log</a></div></div>"+Navigation()+"</nav>"+body+common+"</body></html>";return Results.Content(html,"text/html; charset=utf-8");
+        var status = _statusProvider();
+        var monitors = _monitors.List();
+        return new
+        {
+            application = ProjectInfo.ProductName,
+            version = ProjectInfo.Version,
+            services = new[]
+            {
+                new { key = "VMU", name = "VMU", running = status.GetValueOrDefault("VMU") },
+                new { key = "VMU_SERVER", name = "VMU Server", running = status.GetValueOrDefault("VMU_SERVER") },
+                new { key = "WEB", name = "Web Server", running = status.GetValueOrDefault("WEB") },
+                new { key = "SOCKET", name = "Socket Server", running = status.GetValueOrDefault("SOCKET") }
+            },
+            monitors = new { installed = monitors.Count(x => x.Installed), connected = monitors.Count(x => x.Connected) },
+            remote = new { enabled = monitors.Any(x => x.Configuration.RemoteAccess != RemoteAccessMode.Disabled), clients = 0 },
+            links = new
+            {
+                github = ProjectInfo.RepositoryUrl,
+                documentation = ProjectInfo.DocumentationUrl,
+                guide = ProjectInfo.GuideUrl,
+                bugs = ProjectInfo.RepositoryUrl.TrimEnd('/') + "/issues"
+            }
+        };
     }
+
+    private IResult StatusPage() => Shell("Status", WebUiRenderer.StatusBody());
+    private IResult SettingsPage() => Shell("Settings", WebUiRenderer.SettingsBody());
+    private IResult ArrangementPage() => Shell("Arrangement", WebUiRenderer.ArrangementBody(), "arrangementbody");
+    private IResult MonitorsPage() => Shell("Monitors", WebUiRenderer.MonitorsBody(_settingsProvider().WebUi.MonitorPreviewRefreshSeconds));
+    private IResult LogPage() => Shell("Log", WebUiRenderer.LogBody(), "logbody");
+
+    private IResult NewMonitorPage()
+    {
+        var animal = MonitorAvatarService.RandomAnimal();
+        var rates = BuildRefreshRateOptions(60);
+        return Shell("Add Monitor", WebUiRenderer.NewMonitorBody(WebUiRenderer.AvatarPicker("animal", animal), rates));
+    }
+
+    private IResult MonitorPropertiesPage(string id)
+    {
+        var monitor = _monitors.Get(id);
+        if (monitor is null) return Results.NotFound();
+        if (!id.Equals(monitor.Configuration.Name, StringComparison.OrdinalIgnoreCase))
+            return Results.Redirect("/monitors/" + Uri.EscapeDataString(monitor.Configuration.Name), permanent: true);
+
+        var rates = BuildRefreshRateOptions(monitor.Configuration.RefreshRate);
+        var picker = WebUiRenderer.AvatarPicker(monitor.Configuration.AvatarKind, monitor.Configuration.AvatarValue, monitor.Configuration.Name);
+        return Shell("Monitor " + monitor.Configuration.Title, WebUiRenderer.MonitorPropertiesBody(monitor.Configuration.Name, picker, rates));
+    }
+
+    private IResult TerminalPage(string id)
+    {
+        var monitor = _monitors.Get(id);
+        if (monitor is null) return Results.NotFound();
+        if (!id.Equals(monitor.Configuration.Name, StringComparison.OrdinalIgnoreCase))
+            return Results.Redirect("/monitor/" + Uri.EscapeDataString(monitor.Configuration.Name), permanent: true);
+
+        var vmuRunning = IsVmuServerRunning();
+        var ready = monitor.Connected && !monitor.Health.IsError;
+        return Shell("Terminal " + monitor.Configuration.Title, WebUiRenderer.TerminalBody(monitor.Configuration.Name, ready, vmuRunning), "terminalbody", WebUiRenderer.FullscreenNavButton);
+    }
+
+    private object ArrangementModel()
+    {
+        var virtualMonitors = _monitors.List()
+            .Where(x => x.DeviceName is not null)
+            .ToDictionary(x => x.DeviceName!, StringComparer.OrdinalIgnoreCase);
+
+        return WindowsArrangementService.GetActive().Select(display =>
+        {
+            virtualMonitors.TryGetValue(display.DeviceName, out var monitor);
+            return new
+            {
+                display.WindowsNumber,
+                display.DeviceName,
+                display.X,
+                display.Y,
+                display.Width,
+                display.Height,
+                display.Primary,
+                title = monitor?.Configuration.Title,
+                monitorName = monitor?.Configuration.Name,
+                isVirtual = monitor is not null
+            };
+        });
+    }
+
+    private async Task<IResult> ApplyArrangementAsync(HttpRequest request)
+    {
+        try
+        {
+            var payload = await request.ReadFromJsonAsync<ArrangementApplyRequest>();
+            if (payload?.Displays is null || payload.Displays.Length == 0) return Results.BadRequest(new { error = "Display arrangement is empty." });
+
+            var active = WindowsArrangementService.GetActive();
+            var requestedNames = payload.Displays.Select(x => x.DeviceName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (active.Count != payload.Displays.Length || active.Any(x => !requestedNames.Contains(x.DeviceName)))
+                return Results.Conflict(new { error = "The active Windows display set changed. Reset the arrangement and try again." });
+
+            var positions = payload.Displays.Select(x => new DisplayArrangementEntry(x.DeviceName, x.X, x.Y)).ToArray();
+            return Results.Json(_arrangements.Apply(positions));
+        }
+        catch (Exception ex)
+        {
+            LogStore.Write("ERROR", "VMU", "ARRANGEMENT_APPLY_FAILED", $"Display arrangement failed: {ex.Message}", detailsJson: JsonSerializer.Serialize(new { exception = ex.ToString() }));
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private IResult OpenWindowsDisplaySettings(HttpContext context)
+    {
+        var remote = context.Connection.RemoteIpAddress;
+        if (remote is null || !IPAddress.IsLoopback(remote)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+        try
+        {
+            Process.Start(new ProcessStartInfo("ms-settings:display") { UseShellExecute = true });
+            return Results.NoContent();
+        }
+        catch (Exception ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private async Task LiveAsync(string id, HttpContext context)
+    {
+        var monitor = _monitors.Get(id);
+        if (!IsVmuServerRunning())
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            return;
+        }
+        if (monitor is null || !monitor.Connected || monitor.Health.IsError || monitor.DeviceName is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        context.Response.ContentType = "multipart/x-mixed-replace; boundary=vmu";
+        try
+        {
+            while (!context.RequestAborted.IsCancellationRequested && IsVmuServerRunning())
+            {
+                var frame = await _capture.GetLiveFrameAsync(monitor.Configuration.VmuId, monitor.DeviceName, context.RequestAborted);
+                var header = Encoding.ASCII.GetBytes($"--vmu\r\nContent-Type: image/jpeg\r\nContent-Length: {frame.Length}\r\n\r\n");
+                await context.Response.Body.WriteAsync(header, context.RequestAborted);
+                await context.Response.Body.WriteAsync(frame, context.RequestAborted);
+                await context.Response.Body.WriteAsync("\r\n"u8.ToArray(), context.RequestAborted);
+                await context.Response.Body.FlushAsync(context.RequestAborted);
+                _resources.AddVmuNetworkBytes(header.Length + frame.Length + 2);
+                await Task.Delay(33, context.RequestAborted);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            LogStore.Write("WARN", "WEB", "TERMINAL_STREAM_FAILED", ex.Message, monitor.Configuration.VmuId);
+        }
+    }
+
+    private async Task<IResult> ThumbnailAsync(string id, HttpContext context)
+    {
+        try
+        {
+            var monitor = _monitors.Get(id);
+            if (monitor is null || !monitor.Connected || monitor.DeviceName is null) return Results.NotFound();
+            if (context.Request.Query.TryGetValue("force", out var force) && force.Any(x => x == "1" || x.Equals("true", StringComparison.OrdinalIgnoreCase)))
+                _capture.Invalidate(monitor.Configuration.VmuId);
+            return Results.File(await _capture.GetThumbnailAsync(monitor.Configuration.VmuId, monitor.DeviceName, context.RequestAborted), "image/jpeg");
+        }
+        catch
+        {
+            return Results.NotFound();
+        }
+    }
+
+    private async Task<IResult> CreateAsync(HttpRequest request)
+    {
+        try
+        {
+            var payload = await request.ReadFromJsonAsync<MonitorCreateRequest>();
+            if (payload is null) return Results.BadRequest();
+            return Results.Json(_monitors.Create(payload.Name, payload.Title, payload.Width, payload.Height, payload.RefreshRate, payload.Portrait, payload.AvatarAnimal));
+        }
+        catch (Exception ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private async Task<IResult> UpdateAsync(HttpRequest request, string id)
+    {
+        try
+        {
+            var payload = await request.ReadFromJsonAsync<MonitorUpdateRequest>();
+            if (payload is null || !Enum.TryParse<RemoteAccessMode>(payload.RemoteAccess, true, out var remoteAccess) || !Enum.TryParse<RemoteSecurityMode>(payload.SecurityMode, true, out var securityMode))
+                return Results.BadRequest();
+            return Results.Json(_monitors.UpdateProperties(id, payload.Name, payload.Title, payload.Width, payload.Height, payload.RefreshRate, payload.Portrait, remoteAccess, securityMode, payload.Password, payload.RegenerateApiKey, payload.CollaborationClipboard, payload.CollaborationMouse, payload.CollaborationKeyboard));
+        }
+        catch (Exception ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private async Task<IResult> ReorderAsync(HttpRequest request)
+    {
+        var payload = await request.ReadFromJsonAsync<MonitorOrderRequest>();
+        if (payload is null) return Results.BadRequest();
+        _monitors.Reorder(payload.Ids);
+        return Results.NoContent();
+    }
+
+    private IResult Avatar(string id)
+    {
+        var avatar = _monitors.GetAvatar(id);
+        return avatar is null ? Results.NotFound() : Results.File(avatar.Value.Bytes, avatar.Value.ContentType);
+    }
+
+    private async Task<IResult> UploadAvatarAsync(HttpRequest request, string id)
+    {
+        try
+        {
+            var file = (await request.ReadFormAsync()).Files.GetFile("file");
+            if (file is null || file.Length == 0) return Results.BadRequest();
+            if (file.Length > 2 * 1024 * 1024) return Results.BadRequest(new { error = "Avatar file must be at most 2 MB." });
+            await using var stream = file.OpenReadStream();
+            return Results.Json(_monitors.SetCustomAvatar(id, file.FileName, stream));
+        }
+        catch (Exception ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private async Task<IResult> RuleAsync(HttpRequest request, string id)
+    {
+        var payload = await request.ReadFromJsonAsync<AccessRuleRequest>();
+        if (payload is null || !Enum.TryParse<AccessPermission>(payload.Permission, true, out var permission)) return Results.BadRequest();
+        return Results.Json(_monitors.UpsertAccessRule(id, payload.ClientId, payload.IpAddress, payload.MacAddress, payload.ComputerName, payload.UserName, permission));
+    }
+
+    private static IResult Action(Func<MonitorSnapshot> action)
+    {
+        try { return Results.Json(action()); }
+        catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
+    }
+
+    private IResult Uninstall(string id)
+    {
+        try
+        {
+            _monitors.Uninstall(id);
+            return Results.NoContent();
+        }
+        catch (Exception ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private async Task<IResult> SaveSettingsAsync(HttpRequest request)
+    {
+        var proposed = await request.ReadFromJsonAsync<ServerSettings>();
+        if (proposed is null) return Results.BadRequest();
+        if (proposed.Vmu.Interface.Equals("any", StringComparison.OrdinalIgnoreCase) && !proposed.Web.Interface.Equals("any", StringComparison.OrdinalIgnoreCase))
+            return Results.Conflict(new { error = "Web Server must use All Interfaces while VMU Server uses All Interfaces." });
+
+        var endpoints = new[] { (Name: "VMU Server", Port: proposed.Vmu.Port), (Name: "Web Server", Port: proposed.Web.Port), (Name: "Web Socket", Port: proposed.Socket.Port) };
+        if (endpoints.GroupBy(x => x.Port).Any(x => x.Count() > 1)) return Results.Conflict(new { error = "Service ports must be unique." });
+
+        var active = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Select(x => x.Port).ToHashSet();
+        var blocked = endpoints.FirstOrDefault(x => active.Contains(x.Port) && !_isOwnedListener(x.Port));
+        if (blocked != default) return Results.Conflict(new { error = $"{blocked.Name} port {blocked.Port} is already used." });
+        return Results.Json(await _settingsSaver(proposed));
+    }
+
+    private IReadOnlyList<LogEntry> ReadLog(HttpRequest request)
+    {
+        var services = request.Query["service"].Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).ToArray();
+        return LogStore.Read(request.Query["q"].FirstOrDefault(), services.Length == 0 ? ServiceKeys : services);
+    }
+
+    private LogCount ReadLogCount(HttpRequest request)
+    {
+        var services = request.Query["service"].Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).ToArray();
+        return LogStore.Count(request.Query["q"].FirstOrDefault(), services.Length == 0 ? ServiceKeys : services);
+    }
+
+    private IResult ExportLog(HttpRequest request, string format)
+    {
+        if (format is not ("xlsx" or "csv" or "txt")) return Results.BadRequest();
+        var bytes = LogExportService.ExportBytes(format, ReadLog(request));
+        var contentType = format == "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : format == "csv" ? "text/csv" : "text/plain";
+        return Results.File(bytes, contentType, $"vmu-log-{DateTime.Now:yyyyMMdd-HHmmss}.{format}");
+    }
+
+    private string Navigation()
+    {
+        var status = _statusProvider();
+        return WebUiRenderer.MonitorNavigation(_monitors.List(), status.GetValueOrDefault("VMU_SERVER"));
+    }
+
+    private IResult Shell(string title, string body, string bodyClass = "", string extraNav = "") =>
+        Results.Content(WebUiRenderer.Shell(title, body, Navigation(), bodyClass, extraNav), "text/html; charset=utf-8");
+
+    private bool IsVmuServerRunning() => _statusProvider().GetValueOrDefault("VMU_SERVER");
+
+    private static string BuildRefreshRateOptions(int selected) => string.Join("", MonitorApplicationService.SupportedRefreshRates.Select(rate => $"<option value=\"{rate}\"{(rate == selected ? " selected" : string.Empty)}>{rate} Hz</option>"));
 }
 
 internal sealed class WebSocketServerService : NetworkService
 {
-    public WebSocketServerService(LogStore logs):base("Socket Server","SOCKET",logs){}
-    protected override void ConfigureApplication(WebApplication app){app.UseWebSockets();app.Map("/",async c=>{if(!c.WebSockets.IsWebSocketRequest){c.Response.StatusCode=426;return;}using var s=await c.WebSockets.AcceptWebSocketAsync();var b=new byte[4096];while(s.State==System.Net.WebSockets.WebSocketState.Open){var r=await s.ReceiveAsync(b,c.RequestAborted);if(r.MessageType==System.Net.WebSockets.WebSocketMessageType.Close){await s.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure,"Closing",c.RequestAborted);break;}}});}
+    public WebSocketServerService(LogStore logs) : base("Socket Server", "SOCKET", logs) { }
+
+    protected override void ConfigureApplication(WebApplication app)
+    {
+        app.UseWebSockets();
+        app.Map("/", async context =>
+        {
+            if (!context.WebSockets.IsWebSocketRequest)
+            {
+                context.Response.StatusCode = 426;
+                return;
+            }
+
+            using var socket = await context.WebSockets.AcceptWebSocketAsync();
+            var buffer = new byte[4096];
+            while (socket.State == System.Net.WebSockets.WebSocketState.Open)
+            {
+                var result = await socket.ReceiveAsync(buffer, context.RequestAborted);
+                if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close)
+                {
+                    await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "Closing", context.RequestAborted);
+                    break;
+                }
+            }
+        });
+    }
 }
