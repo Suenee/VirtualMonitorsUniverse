@@ -49,7 +49,8 @@ internal sealed class AboutForm : Form
         links.Controls.Add(CreateLink("User Guide", ProjectInfo.GuideUrl));
         root.Controls.Add(links, 1, 1);
 
-        var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.OK, Anchor = AnchorStyles.Right, Margin = new Padding(0, 16, 0, 0) };
+        var close = new Button { Text = "Close", AutoSize = true, Anchor = AnchorStyles.Right, Margin = new Padding(0, 16, 0, 0) };
+        close.Click += (_, _) => Close();
         root.Controls.Add(close, 1, 2);
         AcceptButton = close;
         CancelButton = close;
