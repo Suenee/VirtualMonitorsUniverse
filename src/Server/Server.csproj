@@ -15,4 +15,8 @@
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\Avatars\*.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="Assets\Avatars\avatars.md" />
+  </ItemGroup>
 </Project>
