@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 
 namespace VirtualMonitorsUniverse.Server;
@@ -66,6 +67,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             AutoClose = true
         };
         _menu.Opening += (_, _) => RefreshServiceMenuStates();
+        _menu.Opened += (_, _) => ActivateTrayMenu();
         _menu.Items.Add(new ToolStripMenuItem(ProjectInfo.ProductName, _icon.ToBitmap()) { Enabled = false });
         _menu.Items.Add(new ToolStripSeparator());
 
@@ -107,7 +109,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             Icon = _icon,
             Text = $"{ProjectInfo.ProductName} {ProjectInfo.Version}",
-            Visible = true
+            Visible = true,
+            ContextMenuStrip = _menu
         };
         _notifyIcon.MouseClick += OnNotifyIconMouseClick;
         _notifyIcon.MouseDoubleClick += OnNotifyIconMouseDoubleClick;
@@ -177,7 +180,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void RefreshMonitorMenu()
     {
+        foreach (ToolStripItem existing in _monitorsMenu.DropDownItems)
+        {
+            existing.Image?.Dispose();
+        }
         _monitorsMenu.DropDownItems.Clear();
+
         IReadOnlyList<MonitorSnapshot> monitors;
         try { monitors = _monitorService.List(); }
         catch (Exception ex)
@@ -195,12 +203,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         foreach (var monitor in monitors)
         {
             var terminal = _vmuServerRunning && monitor.Connected && !monitor.Health.IsError;
-            var customAvatar = monitor.Configuration.AvatarKind.Equals("custom", StringComparison.OrdinalIgnoreCase);
-            var label = customAvatar
-                ? monitor.Configuration.Title
-                : $"{MonitorAvatarService.GetEmoji(monitor.Configuration.AvatarKind, monitor.Configuration.AvatarValue)}  {monitor.Configuration.Title}";
-            var item = new ToolStripMenuItem(label, customAvatar ? MonitorAvatarService.CreateTrayImage(monitor.Configuration, _dataRoot) : null)
+            var item = new ToolStripMenuItem(monitor.Configuration.Title, MonitorAvatarService.CreateTrayImage(monitor.Configuration, _dataRoot))
             {
+                ImageScaling = ToolStripItemImageScaling.SizeToFit,
                 ShortcutKeyDisplayString = "     ",
                 ToolTipText = terminal ? "Connected — open Terminal" : "Open monitor properties"
             };
@@ -303,6 +308,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         RefreshServiceMenuStates();
         _menu.Show(Cursor.Position);
+        ActivateTrayMenu();
+    }
+
+    private void ActivateTrayMenu()
+    {
+        if (!_menu.IsHandleCreated) return;
+        SetForegroundWindow(_menu.Handle);
     }
 
     private void CloseMenuThen(Action action)
@@ -316,7 +328,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         if (eventArgs.Button == MouseButtons.Right)
         {
             _singleClickTimer.Stop();
-            ShowTrayMenu();
             return;
         }
         if (eventArgs.Button != MouseButtons.Left) return;
@@ -530,4 +541,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _notifyIcon.Visible = false;
         ExitThread();
     }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr windowHandle);
 }
