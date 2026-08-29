@@ -112,7 +112,7 @@ internal sealed class MonitorThumbnailService
                 using var source = desktopResource.QueryInterface<ID3D11Texture2D>();
                 context.CopyResource(staging, source);
 
-                var mapped = context.Map(staging, 0, MapMode.Read, D3D11MapFlags.None);
+                context.Map(staging, 0, MapMode.Read, D3D11MapFlags.None, out var mapped).CheckError();
                 try
                 {
                     using var frame = CopyToBitmap(mapped.DataPointer, checked((int)mapped.RowPitch), width, height);
