@@ -64,7 +64,20 @@ internal sealed class MonitorApplicationService
 
             var display = ResolveDisplay(identity.GdiName);
             var actualRefresh = checked((int)(display.Mode?.RefreshRate ?? (uint)refreshRate));
-            var record = _store.CreateBound(friendlyName, identity.GdiName, newInstanceId, targetWidth, targetHeight, actualRefresh, portrait);
+            var discovered = _store.EnsureForDevice(identity.GdiName, newInstanceId, targetWidth, targetHeight, actualRefresh);
+            var record = _store.Update(
+                discovered.VmuId,
+                friendlyName,
+                targetWidth,
+                targetHeight,
+                actualRefresh,
+                portrait,
+                RemoteAccessMode.Disabled,
+                false,
+                null,
+                false,
+                false,
+                false);
             _logStore.Write("INFO", "VMU", "MONITOR_INSTALL", $"{record.FriendlyName} installed as {newInstanceId}", record.VmuId);
 
             if (!connect)
