@@ -14,6 +14,7 @@ internal sealed class MonitorApplicationService
     private readonly WindowsDisplayModeService _displayModes=new(); private readonly WindowsDisplayConfigTopologyService _topology=new(); private readonly WindowsAlphaReflowService _reflow=new(); private readonly WindowsAlphaVddIdentityService _identity=new(); private readonly WindowsVddNodeService _vddNodes=new();
 
     public MonitorApplicationService(MonitorStore store,LogStore logStore,string dataRoot){_store=store;_logStore=logStore;_dataRoot=dataRoot;_order=new MonitorOrderService(dataRoot);}
+    public string DataRoot=>_dataRoot;
     public IReadOnlyList<MonitorSnapshot> List(){SynchronizeDiscoveredMonitors();var displays=ReadVirtualDisplays();return _order.Apply(_store.List()).Select(r=>ToSnapshot(r,displays)).ToArray();}
     public MonitorSnapshot? Get(string idOrName){SynchronizeDiscoveredMonitors();var r=_store.Get(idOrName);return r is null?null:ToSnapshot(r,ReadVirtualDisplays());}
     public bool NameAvailable(string name,string? except=null){try{name=MonitorStore.NormalizeCanonical(name);var exceptId=string.IsNullOrWhiteSpace(except)?null:_store.Get(except)?.VmuId;return !_store.NameExists(name,exceptId);}catch{return false;}}
