@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -311,6 +312,10 @@ internal sealed class WebServerService : NetworkService
         if (!IsVmuServerRunning())
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
 
+        // MonitorApplicationService.Get reads the current Windows display state on
+        // every request. This is the same native state observed by /arrangement,
+        // so a move made in Windows Display Settings is reflected before a new
+        // portal hand-off calculates its monitor edges.
         var monitor = _monitors.Get(id);
         if (monitor is null) return Results.NotFound();
         if (!monitor.Connected || monitor.Health.IsError)
@@ -536,7 +541,12 @@ internal sealed class WebServerService : NetworkService
 
 internal sealed class WebSocketServerService : NetworkService
 {
-    public WebSocketServerService(LogStore logs) : base("Socket Server", "SOCKET", logs) { }
+    private readonly RemoteActionRegistry _actions;
+
+    public WebSocketServerService(LogStore logs, RemoteActionRegistry actions) : base("Socket Server", "SOCKET", logs)
+    {
+        _actions = actions;
+    }
 
     protected override void ConfigureApplication(WebApplication app)
     {
@@ -545,21 +555,153 @@ internal sealed class WebSocketServerService : NetworkService
         {
             if (!context.WebSockets.IsWebSocketRequest)
             {
-                context.Response.StatusCode = 426;
+                context.Response.StatusCode = StatusCodes.Status426UpgradeRequired;
                 return;
             }
 
             using var socket = await context.WebSockets.AcceptWebSocketAsync();
-            var buffer = new byte[4096];
-            while (socket.State == System.Net.WebSockets.WebSocketState.Open)
-            {
-                var result = await socket.ReceiveAsync(buffer, context.RequestAborted);
-                if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close)
-                {
-                    await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "Closing", context.RequestAborted);
-                    break;
-                }
-            }
+            await RunVppSessionAsync(socket, context.RequestAborted);
         });
+    }
+
+    private async Task RunVppSessionAsync(WebSocket socket, CancellationToken cancellationToken)
+    {
+        while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+        {
+            var payload = await ReceiveTextAsync(socket, cancellationToken);
+            if (payload is null) break;
+            await HandleVppMessageAsync(socket, payload, cancellationToken);
+        }
+    }
+
+    private async Task HandleVppMessageAsync(WebSocket socket, string payload, CancellationToken cancellationToken)
+    {
+        string? correlationId = null;
+        string recipient = "sum";
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) throw new RemoteActionException("INVALID_MESSAGE", "VPP message must be a JSON object.");
+            if (!root.TryGetProperty("protocolVersion", out var version) || version.ValueKind != JsonValueKind.Number || version.GetInt32() != 1)
+                throw new RemoteActionException("UNSUPPORTED_PROTOCOL", "VMU supports VPP protocolVersion 1.");
+            correlationId = RequiredString(root, "id");
+            var type = RequiredString(root, "type");
+            var from = RequiredString(root, "from");
+            var target = RequiredString(root, "recipient");
+            recipient = from;
+            if (!from.Equals("sum", StringComparison.Ordinal)) throw new RemoteActionException("INVALID_ROUTING", "VMU accepts application VPP calls from the 'sum' client.");
+            if (!type.Equals("call", StringComparison.Ordinal)) throw new RemoteActionException("INVALID_MESSAGE", "VMU currently accepts VPP call messages on the Socket Server.");
+            var method = RequiredString(root, "method");
+            var expectsResponse = root.TryGetProperty("expectsResponse", out var expects) && expects.ValueKind == JsonValueKind.True;
+            var args = root.TryGetProperty("args", out var argsElement) ? argsElement : default;
+            if (args.ValueKind != JsonValueKind.Object) throw new RemoteActionException("INVALID_ARGUMENT", "VPP call args must be a JSON object.");
+
+            if (target.Equals("server", StringComparison.Ordinal))
+            {
+                if (!method.Equals("ping", StringComparison.Ordinal)) throw new RemoteActionException("UNKNOWN_METHOD", $"Unknown Socket Server method '{method}'.");
+                if (expectsResponse) await SendAsync(socket, Response(correlationId, recipient, new { success = true, application = "vmu", version = ProjectInfo.Version }), cancellationToken);
+                return;
+            }
+            if (!target.Equals("vmu", StringComparison.Ordinal)) throw new RemoteActionException("INVALID_ROUTING", "VMU application calls must use recipient 'vmu'.");
+
+            var result = _actions.Execute(method, args);
+            LogStore.Write("INFO", "SOCKET", "VPP_REMOTE_ACTION", $"SUM executed remote action '{method}'.", detailsJson: JsonSerializer.Serialize(new { method, correlationId }));
+            if (expectsResponse) await SendAsync(socket, Response(correlationId, recipient, result), cancellationToken);
+            if (!method.Equals("get_state", StringComparison.Ordinal))
+                await SendAsync(socket, Event("stateChanged", recipient, _actions.StateSnapshot()), cancellationToken);
+        }
+        catch (RemoteActionException ex)
+        {
+            LogStore.Write("WARN", "SOCKET", "VPP_REMOTE_ACTION_REJECTED", ex.Message, detailsJson: JsonSerializer.Serialize(new { correlationId, code = ex.Code }));
+            if (correlationId is not null && socket.State == WebSocketState.Open)
+                await SendAsync(socket, Error(correlationId, recipient, ex.Code, ex.Message), cancellationToken);
+        }
+        catch (JsonException ex)
+        {
+            LogStore.Write("WARN", "SOCKET", "VPP_INVALID_JSON", ex.Message);
+            if (socket.State == WebSocketState.Open)
+                await SendAsync(socket, Error(correlationId, recipient, "INVALID_MESSAGE", "The VPP payload is not valid JSON."), cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            LogStore.Write("ERROR", "SOCKET", "VPP_REMOTE_ACTION_FAILED", ex.Message, detailsJson: JsonSerializer.Serialize(new { correlationId, exception = ex.ToString() }));
+            if (socket.State == WebSocketState.Open)
+                await SendAsync(socket, Error(correlationId, recipient, "COMMAND_FAILED", ex.Message), cancellationToken);
+        }
+    }
+
+    private static string RequiredString(JsonElement root, string property)
+    {
+        if (!root.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString()))
+            throw new RemoteActionException("INVALID_MESSAGE", $"VPP field '{property}' must be a non-empty string.");
+        return value.GetString()!;
+    }
+
+    private static object Response(string correlationId, string recipient, object result) => new
+    {
+        protocolVersion = 1,
+        id = Guid.NewGuid().ToString(),
+        type = "response",
+        from = "vmu",
+        recipient,
+        correlationId,
+        result,
+        source = new { app = ProjectInfo.ProductName, version = ProjectInfo.Version },
+        timestamp = DateTimeOffset.Now.ToString("O")
+    };
+
+    private static object Error(string? correlationId, string recipient, string code, string message) => new
+    {
+        protocolVersion = 1,
+        id = Guid.NewGuid().ToString(),
+        type = "error",
+        from = "vmu",
+        recipient,
+        correlationId,
+        error = new { code, message },
+        source = new { app = ProjectInfo.ProductName, version = ProjectInfo.Version },
+        timestamp = DateTimeOffset.Now.ToString("O")
+    };
+
+    private static object Event(string eventName, string recipient, object args) => new
+    {
+        protocolVersion = 1,
+        id = Guid.NewGuid().ToString(),
+        type = "event",
+        from = "vmu",
+        recipient,
+        @event = eventName,
+        args,
+        expectsResponse = false,
+        source = new { app = ProjectInfo.ProductName, version = ProjectInfo.Version },
+        timestamp = DateTimeOffset.Now.ToString("O")
+    };
+
+    private static async Task SendAsync(WebSocket socket, object message, CancellationToken cancellationToken)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(message);
+        await socket.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken);
+    }
+
+    private static async Task<string?> ReceiveTextAsync(WebSocket socket, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[8192];
+        using var stream = new MemoryStream();
+        while (true)
+        {
+            var result = await socket.ReceiveAsync(buffer, cancellationToken);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", cancellationToken);
+                return null;
+            }
+            if (result.MessageType != WebSocketMessageType.Text)
+                throw new RemoteActionException("INVALID_MESSAGE", "VMU Socket Server accepts VPP JSON as WebSocket text messages only.");
+            stream.Write(buffer, 0, result.Count);
+            if (stream.Length > 1024 * 1024) throw new RemoteActionException("INVALID_MESSAGE", "VPP message exceeds the 1 MB safety limit.");
+            if (result.EndOfMessage) return Encoding.UTF8.GetString(stream.ToArray());
+        }
     }
 }
