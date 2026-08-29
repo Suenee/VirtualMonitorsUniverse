@@ -31,22 +31,51 @@ internal static class MonitorAvatarService
             }
         }
 
-        // GDI+ DrawString flattens Segoe UI Emoji to monochrome glyphs on many
-        // Windows builds. WinForms TextRenderer follows the native Windows text
-        // path and preserves the system's color emoji rendering where available.
         var bitmap = new Bitmap(24, 24, PixelFormat.Format32bppArgb);
         using var graphics = Graphics.FromImage(bitmap);
         graphics.Clear(Color.Transparent);
-        using var font = new Font("Segoe UI Emoji", 15f, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var font = new Font("Segoe UI Emoji", 16f, FontStyle.Regular, GraphicsUnit.Pixel);
+        var glyph = GetEmoji(monitor.AvatarKind, monitor.AvatarValue);
+
+        // Prefer the native WinForms text path because it can preserve color emoji.
         TextRenderer.DrawText(
             graphics,
-            GetEmoji(monitor.AvatarKind, monitor.AvatarValue),
+            glyph,
             font,
             new Rectangle(0, 0, bitmap.Width, bitmap.Height),
             Color.Black,
             Color.Transparent,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+
+        // Some Windows/graphics combinations produce a completely transparent
+        // bitmap for color emoji. In that case use GDI+ as a deterministic visible
+        // fallback. It can be monochrome, but the selected avatar remains legible.
+        if (!HasVisiblePixels(bitmap))
+        {
+            graphics.Clear(Color.Transparent);
+            using var format = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center,
+                FormatFlags = StringFormatFlags.NoClip
+            };
+            using var brush = new SolidBrush(Color.Black);
+            graphics.DrawString(glyph, font, brush, new RectangleF(0, 0, bitmap.Width, bitmap.Height), format);
+        }
+
         return bitmap;
+    }
+
+    private static bool HasVisiblePixels(Bitmap bitmap)
+    {
+        for (var y = 0; y < bitmap.Height; y++)
+        {
+            for (var x = 0; x < bitmap.Width; x++)
+            {
+                if (bitmap.GetPixel(x, y).A > 8) return true;
+            }
+        }
+        return false;
     }
 
     public static string SaveCustom(string dataRoot, string vmuId, string fileName, Stream content)
