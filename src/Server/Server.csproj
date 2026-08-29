@@ -16,7 +16,6 @@
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="Assets\Avatars\*.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <None Include="Assets\Avatars\avatars.md" />
+    <None Update="Assets\Avatars\*.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
