@@ -125,9 +125,13 @@ internal static class WebPageEnhancements
 """;
 
     public const string Terminal = """
+<style>
+.terminalToast{position:fixed;right:16px;bottom:16px;z-index:5000;padding:9px 12px;border-radius:7px;background:#282d33;color:#fff;box-shadow:0 3px 12px #0005;font-size:13px}.terminalToast.error{background:#8b1f28}
+</style>
 <script>
 (() => {
-  let previousOnline = true;
+  let previousReady = null;
+
   async function reconnectTerminal() {
     try {
       const [s, m] = await Promise.all([
@@ -136,17 +140,100 @@ internal static class WebPageEnhancements
       ]);
       const vmu = s.services.find(x => x.key === 'VMU_SERVER')?.running === true;
       const ready = vmu && m.connected && !m.health.isError;
-      if (!previousOnline && ready) {
+      if (ready && previousReady === false) {
         stopStream();
         startStream();
+      } else if (!ready) {
+        stopStream();
       }
-      previousOnline = true;
+      previousReady = ready;
     } catch {
-      previousOnline = false;
+      previousReady = false;
       stopStream();
     }
   }
-  setInterval(reconnectTerminal, 1000);
+
+  function toast(message, error = false) {
+    document.getElementById('terminalToast')?.remove();
+    const box = document.createElement('div');
+    box.id = 'terminalToast';
+    box.className = 'terminalToast' + (error ? ' error' : '');
+    box.textContent = message;
+    document.body.appendChild(box);
+    setTimeout(() => box.remove(), 2600);
+  }
+
+  async function beep() {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return;
+      const context = new AudioContextClass();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.frequency.value = 880;
+      gain.gain.value = 0.06;
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.08);
+      oscillator.onended = () => context.close();
+    } catch {}
+  }
+
+  async function captureTerminalViewport() {
+    if (!navigator.mediaDevices?.getDisplayMedia || !navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+      toast('Screenshot is unavailable in this browser/context.', true);
+      return;
+    }
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: 'browser' },
+        audio: false,
+        preferCurrentTab: true,
+        selfBrowserSurface: 'include'
+      });
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+      await video.play();
+      if (!video.videoWidth || !video.videoHeight) throw new Error('The selected browser surface returned no image.');
+
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const context = canvas.getContext('2d', { alpha: false });
+      if (!context) throw new Error('Canvas capture is unavailable.');
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise((resolve, reject) => canvas.toBlob(x => x ? resolve(x) : reject(new Error('PNG encoding failed.')), 'image/png'));
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      await beep();
+      toast('Screenshot copied to clipboard.');
+    } catch (error) {
+      if (error?.name !== 'NotAllowedError') toast(error?.message || 'Screenshot failed.', true);
+    } finally {
+      stream?.getTracks().forEach(track => track.stop());
+    }
+  }
+
+  const fullscreen = document.getElementById('fullscreenToggle');
+  if (fullscreen && !document.getElementById('terminalScreenshot')) {
+    const screenshot = document.createElement('button');
+    screenshot.id = 'terminalScreenshot';
+    screenshot.className = 'iconButton';
+    screenshot.type = 'button';
+    screenshot.textContent = '📷';
+    screenshot.setAttribute('aria-label', 'Copy Terminal screenshot');
+    screenshot.title = 'Copy Terminal screenshot';
+    screenshot.addEventListener('click', captureTerminalViewport);
+    fullscreen.parentElement?.insertBefore(screenshot, fullscreen);
+  }
+
+  setInterval(reconnectTerminal, 750);
+  window.addEventListener('online', reconnectTerminal);
+  window.addEventListener('pageshow', reconnectTerminal);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) reconnectTerminal(); });
 })();
 </script>
 """;
