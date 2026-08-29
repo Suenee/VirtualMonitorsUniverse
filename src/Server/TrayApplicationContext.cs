@@ -9,6 +9,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _icon;
     private readonly string _settingsPath;
     private readonly LogStore _logStore;
+    private readonly MonitorApplicationService _monitorService;
     private readonly WebServerService _webService;
     private readonly WebSocketServerService _socketService;
     private readonly System.Windows.Forms.Timer _singleClickTimer;
@@ -25,6 +26,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _socketStartItem;
     private readonly ToolStripMenuItem _socketStopItem;
     private readonly ToolStripMenuItem _socketRestartItem;
+    private readonly ToolStripMenuItem _monitorsMenu;
     private LogForm? _logForm;
     private SettingsForm? _settingsForm;
     private AboutForm? _aboutForm;
@@ -36,9 +38,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         var repoRoot = Environment.GetEnvironmentVariable("VMU_REPO_ROOT");
         var dataRoot = !string.IsNullOrWhiteSpace(repoRoot) ? Path.Combine(repoRoot, "data") : Path.Combine(AppContext.BaseDirectory, "data");
+        var databasePath = Path.Combine(dataRoot, "vmu.db");
         _settingsPath = Path.Combine(dataRoot, "settings.json");
-        _logStore = new LogStore(Path.Combine(dataRoot, "vmu.db"));
-        _webService = new WebServerService(_logStore, GetStatusSnapshot, () => ServerSettings.Load(_settingsPath), SaveSettingsFromWebAsync, IsOwnedListener);
+        _logStore = new LogStore(databasePath);
+        _monitorService = new MonitorApplicationService(new MonitorStore(databasePath), _logStore);
+        _webService = new WebServerService(_logStore, _monitorService, GetStatusSnapshot, () => ServerSettings.Load(_settingsPath), SaveSettingsFromWebAsync, IsOwnedListener);
         _socketService = new WebSocketServerService(_logStore);
         ApplyLogRetention();
         _logStore.Write("INFO", "VMU", "APPLICATION_START", $"{ProjectInfo.ProductName} {ProjectInfo.Version} started");
@@ -57,24 +61,29 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         var vmuMenu = new ToolStripMenuItem("VMU Server", UiIcons.Create(UiIconKind.Server));
         (_vmuStateItem, _vmuStartItem, _vmuStopItem, _vmuRestartItem) = PopulateServiceMenu(vmuMenu, false, OnVmuAction);
+        ConfigureDropDownDirection(vmuMenu);
         _menu.Items.Add(vmuMenu);
 
         var webMenu = new ToolStripMenuItem("Web Server", UiIcons.Create(UiIconKind.Web));
         (_webStateItem, _webStartItem, _webStopItem, _webRestartItem) = PopulateServiceMenu(webMenu, true, OnWebAction);
         _webOpenItem = webMenu.DropDownItems.OfType<ToolStripMenuItem>().Last();
+        ConfigureDropDownDirection(webMenu);
         _menu.Items.Add(webMenu);
 
         var socketMenu = new ToolStripMenuItem("Socket Server", UiIcons.Create(UiIconKind.Socket));
         (_socketStateItem, _socketStartItem, _socketStopItem, _socketRestartItem) = PopulateServiceMenu(socketMenu, false, OnSocketAction);
+        ConfigureDropDownDirection(socketMenu);
         _menu.Items.Add(socketMenu);
 
-        var monitors = new ToolStripMenuItem("Monitors", UiIcons.Create(UiIconKind.Monitors));
-        monitors.DropDownItems.Add(new ToolStripMenuItem("(empty)") { Enabled = false });
-        _menu.Items.Add(monitors);
-        _menu.Items.Add(new ToolStripMenuItem("Settings", UiIcons.Create(UiIconKind.Settings), (_, _) => OpenSettings()));
-        _menu.Items.Add(new ToolStripMenuItem("View log...", UiIcons.Create(UiIconKind.Log), (_, _) => OpenLog()));
+        _monitorsMenu = new ToolStripMenuItem("Monitors", UiIcons.Create(UiIconKind.Monitors));
+        _monitorsMenu.DropDownOpening += (_, _) => RefreshMonitorMenu();
+        ConfigureDropDownDirection(_monitorsMenu);
+        _menu.Items.Add(_monitorsMenu);
+
+        _menu.Items.Add(new ToolStripMenuItem("Settings", UiIcons.Create(UiIconKind.Settings), (_, _) => CloseMenuThen(OpenSettings)));
+        _menu.Items.Add(new ToolStripMenuItem("View log...", UiIcons.Create(UiIconKind.Log), (_, _) => CloseMenuThen(OpenLog)));
         _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add(new ToolStripMenuItem("About", UiIcons.Create(UiIconKind.About), (_, _) => OpenAbout()));
+        _menu.Items.Add(new ToolStripMenuItem("About", UiIcons.Create(UiIconKind.About), (_, _) => CloseMenuThen(OpenAbout)));
         _menu.Items.Add(new ToolStripMenuItem("Exit", UiIcons.Create(UiIconKind.Exit), OnExit));
 
         _singleClickTimer = new System.Windows.Forms.Timer { Interval = Math.Max(100, SystemInformation.DoubleClickTime) };
@@ -135,9 +144,84 @@ internal sealed class TrayApplicationContext : ApplicationContext
         if (includeOpenClient)
         {
             parent.DropDownItems.Add(new ToolStripSeparator());
-            parent.DropDownItems.Add(new ToolStripMenuItem("Open Client...", UiIcons.Create(UiIconKind.Open), (_, _) => OpenWebClient()));
+            parent.DropDownItems.Add(new ToolStripMenuItem("Open Client...", UiIcons.Create(UiIconKind.Open), (_, _) => CloseMenuThen(OpenWebClient)));
         }
         return (state, start, stop, restart);
+    }
+
+    private static void ConfigureDropDownDirection(ToolStripMenuItem item)
+    {
+        item.DropDownOpening += (_, _) =>
+        {
+            if (item.Owner is null) return;
+            var topLeft = item.Owner.PointToScreen(item.Bounds.Location);
+            var itemBounds = new Rectangle(topLeft, item.Bounds.Size);
+            var workingArea = Screen.FromRectangle(itemBounds).WorkingArea;
+            var preferred = item.DropDown.GetPreferredSize(Size.Empty);
+            var roomRight = workingArea.Right - itemBounds.Right;
+            var roomLeft = itemBounds.Left - workingArea.Left;
+            item.DropDownDirection = roomRight >= preferred.Width || roomRight >= roomLeft
+                ? ToolStripDropDownDirection.Right
+                : ToolStripDropDownDirection.Left;
+        };
+    }
+
+    private void RefreshMonitorMenu()
+    {
+        _monitorsMenu.DropDownItems.Clear();
+        IReadOnlyList<MonitorSnapshot> monitors;
+        try { monitors = _monitorService.List(); }
+        catch (Exception ex)
+        {
+            _monitorsMenu.DropDownItems.Add(new ToolStripMenuItem($"Unavailable: {ex.Message}") { Enabled = false });
+            return;
+        }
+
+        if (monitors.Count == 0)
+        {
+            _monitorsMenu.DropDownItems.Add(new ToolStripMenuItem("(empty)") { Enabled = false });
+            return;
+        }
+
+        foreach (var monitor in monitors)
+        {
+            var item = new ToolStripMenuItem(monitor.Configuration.FriendlyName, UiIcons.Create(monitor.Connected ? UiIconKind.Running : UiIconKind.Stopped));
+            item.DropDownItems.Add(new ToolStripMenuItem(monitor.Connected ? "Connected" : "Disconnected", UiIcons.Create(monitor.Connected ? UiIconKind.Running : UiIconKind.Stopped)) { Enabled = false });
+            item.DropDownItems.Add(new ToolStripSeparator());
+            var connect = new ToolStripMenuItem("Connect", UiIcons.Create(UiIconKind.Start), (_, _) => RunMonitorAction(() => _monitorService.Connect(monitor.Configuration.VmuId)));
+            connect.Enabled = monitor.Installed && !monitor.Connected;
+            var disconnect = new ToolStripMenuItem("Disconnect", UiIcons.Create(UiIconKind.Stop), (_, _) => ConfirmMonitorAction("disconnect", monitor, () => _monitorService.Disconnect(monitor.Configuration.VmuId)));
+            disconnect.Enabled = monitor.Installed && monitor.Connected;
+            var uninstall = new ToolStripMenuItem("Uninstall", null, (_, _) => ConfirmMonitorUninstall(monitor));
+            uninstall.Enabled = monitor.Installed;
+            item.DropDownItems.Add(connect);
+            item.DropDownItems.Add(disconnect);
+            item.DropDownItems.Add(uninstall);
+            item.DropDownItems.Add(new ToolStripSeparator());
+            item.DropDownItems.Add(new ToolStripMenuItem("Properties...", UiIcons.Create(UiIconKind.Settings), (_, _) => CloseMenuThen(() => OpenMonitorProperties(monitor.Configuration.VmuId))));
+            ConfigureDropDownDirection(item);
+            _monitorsMenu.DropDownItems.Add(item);
+        }
+    }
+
+    private void RunMonitorAction(Func<MonitorSnapshot> action)
+    {
+        try { _ = action(); }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "VMU Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
+
+    private void ConfirmMonitorAction(string verb, MonitorSnapshot monitor, Func<MonitorSnapshot> action)
+    {
+        var result = MessageBox.Show($"Are you sure you want to {verb} monitor '{monitor.Configuration.FriendlyName}'?", "VMU Monitor", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+        if (result == DialogResult.Yes) RunMonitorAction(action);
+    }
+
+    private void ConfirmMonitorUninstall(MonitorSnapshot monitor)
+    {
+        var result = MessageBox.Show($"Are you sure you want to uninstall monitor '{monitor.Configuration.FriendlyName}'?\r\n\r\nThe virtual monitor will be removed from Windows.", "VMU Monitor", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+        if (result != DialogResult.Yes) return;
+        try { _monitorService.Uninstall(monitor.Configuration.VmuId); }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "VMU Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
     private void OnVmuAction(int action)
@@ -219,15 +303,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _menu.Close(ToolStripDropDownCloseReason.AppClicked);
             return;
         }
-
         RefreshServiceMenuStates();
         _menu.Show(Cursor.Position);
     }
 
+    private void CloseMenuThen(Action action)
+    {
+        if (_menu.Visible) _menu.Close(ToolStripDropDownCloseReason.ItemClicked);
+        action();
+    }
+
     private void OnNotifyIconMouseClick(object? sender, MouseEventArgs e)
     {
-        // Right-click is handled by NotifyIcon.ContextMenuStrip. Keeping it on the
-        // standard WinForms path lets the shell select the correct monitor and edge.
         if (e.Button != MouseButtons.Left) return;
         _singleClickTimer.Stop();
         _singleClickTimer.Start();
@@ -248,8 +335,24 @@ internal sealed class TrayApplicationContext : ApplicationContext
             return;
         }
         var settings = ServerSettings.Load(_settingsPath);
-        try { Process.Start(new ProcessStartInfo($"http://127.0.0.1:{settings.Web.Port}/") { UseShellExecute = true }); }
-        catch (Exception ex) { MessageBox.Show(ex.Message, "VMU Web Client", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        OpenUrl($"http://127.0.0.1:{settings.Web.Port}/");
+    }
+
+    private void OpenMonitorProperties(string vmuId)
+    {
+        if (!_webService.IsRunning)
+        {
+            MessageBox.Show("Web Server is not running.", "VMU Monitor", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var settings = ServerSettings.Load(_settingsPath);
+        OpenUrl($"http://127.0.0.1:{settings.Web.Port}/monitors/{Uri.EscapeDataString(vmuId)}");
+    }
+
+    private static void OpenUrl(string url)
+    {
+        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "VMU", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
     private void OpenLog()
