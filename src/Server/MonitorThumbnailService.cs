@@ -61,8 +61,8 @@ internal sealed class MonitorThumbnailService
         var target = FindOutput(factory, deviceName)
             ?? throw new InvalidOperationException($"DXGI output '{deviceName}' was not found.");
 
-        using var adapter = target.Value.Adapter;
-        using var output = target.Value.Output;
+        using var adapter = target.Adapter;
+        using var output = target.Output;
         using var output1 = output.QueryInterface<IDXGIOutput1>();
 
         var createResult = D3D11.D3D11CreateDevice(
@@ -107,8 +107,10 @@ internal sealed class MonitorThumbnailService
                 var result = duplication.AcquireNextFrame(1000, out _, out desktopResource);
                 if (result.Failure)
                     throw new InvalidOperationException($"DXGI could not acquire a frame from '{deviceName}' (0x{result.Code:X8}).");
-                acquired = true;
+                if (desktopResource is null)
+                    throw new InvalidOperationException($"DXGI returned no desktop resource for '{deviceName}'.");
 
+                acquired = true;
                 using var source = desktopResource.QueryInterface<ID3D11Texture2D>();
                 context.CopyResource(staging, source);
 
