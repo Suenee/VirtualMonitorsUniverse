@@ -4,7 +4,7 @@ VMU captures monitor pixels through the Windows DXGI Desktop Duplication API. Ca
 
 ## Current scope
 
-Version 0.29 provides two demand-driven capture surfaces for connected, healthy VMU monitors:
+Version 0.30 provides two demand-driven capture surfaces for connected, healthy VMU monitors:
 
 ```text
 GET /api/monitors/{name}/thumbnail
@@ -15,9 +15,11 @@ GET /api/monitors/{name}/live
 
 The MJPEG transport remains an ALPHA milestone, not the final remote-display codec. It validates continuous per-monitor DXGI capture, browser presentation, service ownership, and VMU network/resource accounting before the project introduces the planned hardware-capable H.264/WebRTC pipeline.
 
-Version 0.28 removed the largest avoidable setup cost by keeping the DXGI factory, adapter/output, D3D11 device/context, Desktop Duplication object, and staging texture in a reusable live-capture session. Version 0.29 removes the additional fixed 33 ms HTTP-loop delay, allowing Desktop Duplication frame availability and actual encode/send time to drive the ALPHA stream cadence. A live session's latest immutable JPEG may also satisfy a thumbnail request, avoiding a competing Desktop Duplication session for the same output and improving preview reliability while Terminal is active.
+Version 0.28 removed the largest avoidable setup cost by keeping the DXGI factory, adapter/output, D3D11 device/context, Desktop Duplication object, and staging texture in a reusable live-capture session. Version 0.29 removed the additional fixed 33 ms HTTP-loop delay, allowing Desktop Duplication frame availability and actual encode/send time to drive the ALPHA stream cadence. A live session's latest immutable JPEG may also satisfy a thumbnail request, avoiding a competing Desktop Duplication session for the same output and improving preview reliability while Terminal is active.
 
-MJPEG still requires full-frame GPU readback, CPU bitmap conversion, JPEG encoding, HTTP transfer, and browser JPEG decoding. These remain the primary performance limits and are why MJPEG is not the production transport.
+Version 0.30 reduces per-frame latency inside the capture path. After `AcquireNextFrame`, VMU now issues the GPU copy into its staging texture and releases the Desktop Duplication frame before CPU-side mapping and JPEG encoding. This shortens the time VMU owns the duplicated desktop frame and lets Desktop Duplication continue tracking newer desktop updates while the previous frame is being encoded. The mapped D3D11 staging texture is also wrapped directly by the Windows bitmap encoder instead of first copying every pixel row into a second full-size managed bitmap. At 1920 x 1080 this removes an avoidable multi-megabyte CPU memory copy from every live frame. Frames that do not require downscaling are encoded directly from that mapped view; thumbnail scaling uses a lower-overhead bilinear path.
+
+MJPEG still requires full-frame GPU readback, CPU JPEG encoding, HTTP transfer, and browser JPEG decoding. These remain the primary performance limits and are why MJPEG is not the production transport.
 
 ## Service ownership
 
@@ -40,9 +42,11 @@ The production WebRTC implementation may use negotiated media ports rather than 
 vmu_id / canonical name
   -> current GDI output
   -> persistent DXGI Desktop Duplication session for live Terminal
-  -> D3D11 staging texture
-  -> CPU readback
-  -> thumbnail JPEG or live MJPEG frame
+  -> GPU copy to D3D11 staging texture
+  -> early ReleaseFrame
+  -> mapped staging texture
+  -> JPEG encode
+  -> multipart MJPEG transport
 ```
 
 VMU uses `Vortice.Direct3D11` 3.8.3 as the maintained .NET binding for D3D11/DXGI. No custom capture driver is introduced.
@@ -53,7 +57,7 @@ Thumbnail capture is requested only for connected monitors and browser refresh s
 
 The current ALPHA implementation retains the reusable D3D/DXGI session after a viewer disconnects so a subsequent viewer can resume without setup latency. No new frames are captured while no client requests them. A later lifecycle refinement should reference-count viewers and release persistent graphics resources when the last viewer leaves or after a short idle timeout.
 
-For an interactive desktop, stale frames are less valuable than the newest frame. The production pipeline should therefore avoid deep queues and use a latest-frame-wins policy when capture, encoding, or transport cannot keep up. DXGI dirty rectangles, move rectangles, and pointer metadata are natural future optimizations before or alongside the production encoder path.
+For an interactive desktop, stale frames are less valuable than the newest frame. The next tuning stage should decouple capture from HTTP transmission with a bounded latest-frame slot so a slow network client cannot delay capture of a newer desktop frame. Capture/encode/send timing, accumulated DXGI frames, and dropped stale frames should be instrumented before larger transport changes.
 
 ## Planned production transport
 
