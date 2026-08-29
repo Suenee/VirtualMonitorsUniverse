@@ -4,6 +4,7 @@ Technical and project documentation for Virtual Monitors Universe.
 
 - [Development](DEVELOPMENT.md)
 - [Virtual monitor model](MONITORS.md)
+- [Monitor capture](CAPTURE.md)
 - [Driver notes](driver.md)
 - [Self-test](selftest.md)
 
