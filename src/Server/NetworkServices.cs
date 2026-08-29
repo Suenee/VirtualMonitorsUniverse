@@ -1,4 +1,5 @@
 using System.Net.NetworkInformation;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -7,525 +8,127 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace VirtualMonitorsUniverse.Server;
 
-internal sealed record WebSettingsSaveResult(string TargetUrl, bool RestartRequired, int WaitMilliseconds);
-internal sealed record MonitorCreateRequest(string? Name, string? Title, int Width, int Height, int RefreshRate, bool Portrait, string? AvatarAnimal);
-internal sealed record MonitorUpdateRequest(string? Name, string? Title, int Width, int Height, int RefreshRate, bool Portrait, string RemoteAccess, string SecurityMode, string? Password, bool RegenerateApiKey, bool CollaborationClipboard, bool CollaborationMouse, bool CollaborationKeyboard);
-internal sealed record AccessRuleRequest(string ClientId, string? IpAddress, string? MacAddress, string? ComputerName, string? UserName, string Permission);
+internal sealed record WebSettingsSaveResult(string TargetUrl,bool RestartRequired,int WaitMilliseconds);
+internal sealed record MonitorCreateRequest(string? Name,string? Title,int Width,int Height,int RefreshRate,bool Portrait,string? AvatarAnimal);
+internal sealed record MonitorUpdateRequest(string? Name,string? Title,int Width,int Height,int RefreshRate,bool Portrait,string RemoteAccess,string SecurityMode,string? Password,bool RegenerateApiKey,bool CollaborationClipboard,bool CollaborationMouse,bool CollaborationKeyboard);
+internal sealed record AccessRuleRequest(string ClientId,string? IpAddress,string? MacAddress,string? ComputerName,string? UserName,string Permission);
+internal sealed record MonitorOrderRequest(string[] Ids);
 
 internal abstract class NetworkService : IAsyncDisposable
 {
     private WebApplication? _application;
-
-    protected NetworkService(string name, string serviceKey, LogStore logStore)
-    {
-        Name = name;
-        ServiceKey = serviceKey;
-        LogStore = logStore;
-    }
-
-    public string Name { get; }
-    public string ServiceKey { get; }
-    protected LogStore LogStore { get; }
-    public bool IsRunning => _application is not null;
-    public int? ActivePort { get; private set; }
-
-    public async Task StartAsync(ServiceEndpointSettings endpoint)
-    {
-        if (IsRunning) return;
-        try
-        {
-            _application = await BuildAndStartAsync(endpoint);
-            ActivePort = endpoint.Port;
-            LogStore.Write("INFO", ServiceKey, "SERVICE_START", $"{Name} started on {endpoint.Interface}:{endpoint.Port}");
-        }
-        catch (Exception ex)
-        {
-            LogStore.Write("ERROR", ServiceKey, "SERVICE_START_FAILED", $"{Name} failed to start: {ex.Message}", detailsJson: JsonSerializer.Serialize(new { endpoint.Interface, endpoint.Port, exception = ex.ToString() }));
-            throw;
-        }
-    }
-
-    public async Task StopAsync()
-    {
-        if (_application is null) return;
-        var app = _application;
-        _application = null;
-        var port = ActivePort;
-        ActivePort = null;
-        try
-        {
-            await app.StopAsync(TimeSpan.FromSeconds(5));
-            await app.DisposeAsync();
-            LogStore.Write("INFO", ServiceKey, "SERVICE_STOP", $"{Name} stopped" + (port is null ? string.Empty : $" (port {port})"));
-        }
-        catch (Exception ex)
-        {
-            LogStore.Write("ERROR", ServiceKey, "SERVICE_STOP_FAILED", $"{Name} failed to stop cleanly: {ex.Message}", detailsJson: JsonSerializer.Serialize(new { exception = ex.ToString() }));
-            throw;
-        }
-    }
-
-    public async Task RestartAsync(ServiceEndpointSettings endpoint)
-    {
-        if (_application is not null) await StopAsync();
-        await StartAsync(endpoint);
-    }
-
-    private async Task<WebApplication> BuildAndStartAsync(ServiceEndpointSettings endpoint)
-    {
-        var builder = WebApplication.CreateSlimBuilder();
-        builder.WebHost.UseUrls(endpoint.Interface.Equals("any", StringComparison.OrdinalIgnoreCase)
-            ? $"http://0.0.0.0:{endpoint.Port}"
-            : $"http://127.0.0.1:{endpoint.Port}");
-        ConfigureServices(builder.Services);
-        var app = builder.Build();
-        ConfigureApplication(app);
-        await app.StartAsync();
-        return app;
-    }
-
-    protected virtual void ConfigureServices(IServiceCollection services) { }
-    protected abstract void ConfigureApplication(WebApplication application);
-
-    public async ValueTask DisposeAsync()
-    {
-        if (_application is null) return;
-        var app = _application;
-        _application = null;
-        ActivePort = null;
-        await app.StopAsync(TimeSpan.FromSeconds(2));
-        await app.DisposeAsync();
-    }
+    protected NetworkService(string name,string serviceKey,LogStore logStore){Name=name;ServiceKey=serviceKey;LogStore=logStore;}
+    public string Name{get;} public string ServiceKey{get;} protected LogStore LogStore{get;} public bool IsRunning=>_application is not null; public int? ActivePort{get;private set;}
+    public async Task StartAsync(ServiceEndpointSettings endpoint){if(IsRunning)return;try{_application=await BuildAndStartAsync(endpoint);ActivePort=endpoint.Port;LogStore.Write("INFO",ServiceKey,"SERVICE_START",$"{Name} started on {endpoint.Interface}:{endpoint.Port}");}catch(Exception ex){LogStore.Write("ERROR",ServiceKey,"SERVICE_START_FAILED",$"{Name} failed to start: {ex.Message}",detailsJson:JsonSerializer.Serialize(new{endpoint.Interface,endpoint.Port,exception=ex.ToString()}));throw;}}
+    public async Task StopAsync(){if(_application is null)return;var app=_application;_application=null;var port=ActivePort;ActivePort=null;try{await app.StopAsync(TimeSpan.FromSeconds(5));await app.DisposeAsync();LogStore.Write("INFO",ServiceKey,"SERVICE_STOP",$"{Name} stopped"+(port is null?string.Empty:$" (port {port})"));}catch(Exception ex){LogStore.Write("ERROR",ServiceKey,"SERVICE_STOP_FAILED",$"{Name} failed to stop cleanly: {ex.Message}",detailsJson:JsonSerializer.Serialize(new{exception=ex.ToString()}));throw;}}
+    public async Task RestartAsync(ServiceEndpointSettings endpoint){if(_application is not null)await StopAsync();await StartAsync(endpoint);}
+    private async Task<WebApplication> BuildAndStartAsync(ServiceEndpointSettings endpoint){var builder=WebApplication.CreateSlimBuilder();builder.WebHost.UseUrls(endpoint.Interface.Equals("any",StringComparison.OrdinalIgnoreCase)?$"http://0.0.0.0:{endpoint.Port}":$"http://127.0.0.1:{endpoint.Port}");ConfigureServices(builder.Services);var app=builder.Build();ConfigureApplication(app);await app.StartAsync();return app;}
+    protected virtual void ConfigureServices(IServiceCollection services){} protected abstract void ConfigureApplication(WebApplication application);
+    public async ValueTask DisposeAsync(){if(_application is null)return;var app=_application;_application=null;ActivePort=null;await app.StopAsync(TimeSpan.FromSeconds(2));await app.DisposeAsync();}
 }
 
 internal sealed class WebServerService : NetworkService
 {
-    private static readonly string[] ServiceKeys = ["VMU", "VMU_SERVER", "WEB", "SOCKET"];
-    private readonly MonitorApplicationService _monitorService;
-    private readonly MonitorThumbnailService _thumbnails = new();
-    private readonly Func<IReadOnlyDictionary<string, bool>> _statusProvider;
-    private readonly Func<ServerSettings> _settingsProvider;
-    private readonly Func<ServerSettings, Task<WebSettingsSaveResult>> _settingsSaver;
-    private readonly Func<int, bool> _isOwnedListener;
-
-    public WebServerService(
-        LogStore logStore,
-        MonitorApplicationService monitorService,
-        Func<IReadOnlyDictionary<string, bool>> statusProvider,
-        Func<ServerSettings> settingsProvider,
-        Func<ServerSettings, Task<WebSettingsSaveResult>> settingsSaver,
-        Func<int, bool> isOwnedListener)
-        : base("Web Server", "WEB", logStore)
-    {
-        _monitorService = monitorService;
-        _statusProvider = statusProvider;
-        _settingsProvider = settingsProvider;
-        _settingsSaver = settingsSaver;
-        _isOwnedListener = isOwnedListener;
-    }
+    private static readonly string[] ServiceKeys=["VMU","VMU_SERVER","WEB","SOCKET"];
+    private readonly MonitorApplicationService _monitors; private readonly MonitorThumbnailService _capture=new(); private readonly SystemResourceService _resources=new();
+    private readonly Func<IReadOnlyDictionary<string,bool>> _statusProvider; private readonly Func<ServerSettings> _settingsProvider; private readonly Func<ServerSettings,Task<WebSettingsSaveResult>> _settingsSaver; private readonly Func<int,bool> _isOwnedListener;
+    public WebServerService(LogStore logStore,MonitorApplicationService monitorService,Func<IReadOnlyDictionary<string,bool>> statusProvider,Func<ServerSettings> settingsProvider,Func<ServerSettings,Task<WebSettingsSaveResult>> settingsSaver,Func<int,bool> isOwnedListener):base("Web Server","WEB",logStore){_monitors=monitorService;_statusProvider=statusProvider;_settingsProvider=settingsProvider;_settingsSaver=settingsSaver;_isOwnedListener=isOwnedListener;}
 
     protected override void ConfigureApplication(WebApplication app)
     {
-        app.MapGet("/", StatusPage);
-        app.MapGet("/settings", SettingsPage);
-        app.MapGet("/monitors", MonitorsPage);
-        app.MapGet("/monitors/new", NewMonitorPage);
-        app.MapGet("/monitors/{id}", MonitorPropertiesPage);
-        app.MapGet("/monitor/{id}", TerminalPage);
-        app.MapGet("/log", LogPage);
-
-        app.MapGet("/api/health", () => Results.Json(new { status = "ok", version = ProjectInfo.Version }));
-        app.MapGet("/api/status", () => Results.Json(CreateStatusModel()));
-        app.MapGet("/api/settings", () => Results.Json(_settingsProvider()));
-        app.MapPost("/api/settings", SaveSettingsAsync);
-        app.MapGet("/api/log", (HttpRequest request) => Results.Json(ReadLog(request)));
-        app.MapGet("/api/log/{id:long}", (long id) => LogStore.ReadById(id) is { } entry ? Results.Json(entry) : Results.NotFound());
-        app.MapDelete("/api/log", () => { LogStore.Clear(); return Results.NoContent(); });
-        app.MapGet("/api/log/export/{format}", ExportLog);
-
-        app.MapGet("/api/monitors", () => Results.Json(_monitorService.List()));
-        app.MapGet("/api/monitors/name-available/{name}", (string name, string? except) => Results.Json(new { available = _monitorService.NameAvailable(name, except) }));
-        app.MapPost("/api/monitors", CreateMonitorAsync);
-        app.MapGet("/api/monitors/{id}", (string id) => _monitorService.Get(id) is { } monitor ? Results.Json(monitor) : Results.NotFound());
-        app.MapPut("/api/monitors/{id}", UpdateMonitorAsync);
-        app.MapPost("/api/monitors/{id}/connect", (string id) => RunMonitorAction(() => _monitorService.Connect(id)));
-        app.MapPost("/api/monitors/{id}/disconnect", (string id) => RunMonitorAction(() => _monitorService.Disconnect(id)));
-        app.MapPost("/api/monitors/{id}/uninstall", RunMonitorUninstall);
-        app.MapGet("/api/monitors/{id}/thumbnail", GetThumbnailAsync);
-        app.MapGet("/api/monitors/{id}/avatar", GetAvatar);
-        app.MapPost("/api/monitors/{id}/avatar/animal/{animal}", (string id, string animal) => RunMonitorAction(() => _monitorService.SetAnimalAvatar(id, animal)));
-        app.MapPost("/api/monitors/{id}/avatar/upload", UploadAvatarAsync);
-        app.MapGet("/api/monitors/{id}/access-rules", (string id) => Results.Json(_monitorService.ListAccessRules(id)));
-        app.MapPost("/api/monitors/{id}/access-rules", UpsertAccessRuleAsync);
-        app.MapDelete("/api/monitors/{id}/access-rules/{ruleId:long}", DeleteAccessRule);
+        app.MapGet("/",StatusPage);app.MapGet("/settings",SettingsPage);app.MapGet("/settings/arrangement",ArrangementPage);app.MapGet("/monitors",MonitorsPage);app.MapGet("/monitors/new",NewMonitorPage);app.MapGet("/monitors/{id}",MonitorPropertiesPage);app.MapGet("/monitor/{id}",TerminalPage);app.MapGet("/log",LogPage);
+        app.MapGet("/api/health",()=>Results.Json(new{status="ok",version=ProjectInfo.Version}));app.MapGet("/api/status",()=>Results.Json(CreateStatusModel()));app.MapGet("/api/resources",()=>Results.Json(_resources.Read()));app.MapGet("/api/arrangement",()=>Results.Json(CreateArrangementModel()));
+        app.MapGet("/api/settings",()=>Results.Json(_settingsProvider()));app.MapPost("/api/settings",SaveSettingsAsync);
+        app.MapGet("/api/log",(HttpRequest r)=>Results.Json(ReadLog(r)));app.MapGet("/api/log/count",(HttpRequest r)=>Results.Json(ReadLogCount(r)));app.MapGet("/api/log/{id:long}",(long id)=>LogStore.ReadById(id)is{}e?Results.Json(e):Results.NotFound());app.MapDelete("/api/log",()=>{LogStore.Clear();return Results.NoContent();});app.MapGet("/api/log/export/{format}",ExportLog);
+        app.MapGet("/api/monitors",()=>Results.Json(_monitors.List()));app.MapPost("/api/monitors/order",ReorderMonitorsAsync);app.MapGet("/api/monitors/name-available/{name}",(string name,string? except)=>Results.Json(new{available=_monitors.NameAvailable(name,except)}));app.MapPost("/api/monitors",CreateMonitorAsync);app.MapGet("/api/monitors/{id}",(string id)=>_monitors.Get(id)is{}m?Results.Json(m):Results.NotFound());app.MapPut("/api/monitors/{id}",UpdateMonitorAsync);
+        app.MapPost("/api/monitors/{id}/connect",(string id)=>RunMonitorAction(()=>_monitors.Connect(id)));app.MapPost("/api/monitors/{id}/disconnect",(string id)=>RunMonitorAction(()=>_monitors.Disconnect(id)));app.MapPost("/api/monitors/{id}/uninstall",RunMonitorUninstall);app.MapGet("/api/monitors/{id}/thumbnail",GetThumbnailAsync);app.MapGet("/api/monitors/{id}/live",StreamMonitorAsync);
+        app.MapGet("/api/monitors/{id}/avatar",GetAvatar);app.MapPost("/api/monitors/{id}/avatar/animal/{animal}",(string id,string animal)=>RunMonitorAction(()=>_monitors.SetAnimalAvatar(id,animal)));app.MapPost("/api/monitors/{id}/avatar/upload",UploadAvatarAsync);
+        app.MapGet("/api/monitors/{id}/access-rules",(string id)=>Results.Json(_monitors.ListAccessRules(id)));app.MapPost("/api/monitors/{id}/access-rules",UpsertAccessRuleAsync);app.MapDelete("/api/monitors/{id}/access-rules/{ruleId:long}",DeleteAccessRule);
     }
 
-    private object CreateStatusModel()
-    {
-        var states = _statusProvider();
-        IReadOnlyList<MonitorSnapshot> monitors;
-        try { monitors = _monitorService.List(); } catch { monitors = []; }
-        return new
-        {
-            application = ProjectInfo.ProductName,
-            version = ProjectInfo.Version,
-            services = new[]
-            {
-                new { key = "VMU", name = "VMU", running = states.GetValueOrDefault("VMU") },
-                new { key = "VMU_SERVER", name = "VMU Server", running = states.GetValueOrDefault("VMU_SERVER") },
-                new { key = "WEB", name = "Web Server", running = states.GetValueOrDefault("WEB") },
-                new { key = "SOCKET", name = "Socket Server", running = states.GetValueOrDefault("SOCKET") },
-            },
-            monitors = new { installed = monitors.Count(x => x.Installed), connected = monitors.Count(x => x.Connected) },
-            remote = new { enabled = monitors.Any(x => x.Configuration.RemoteAccess != RemoteAccessMode.Disabled), clients = 0 },
-            links = new
-            {
-                github = ProjectInfo.RepositoryUrl,
-                documentation = ProjectInfo.DocumentationUrl,
-                guide = ProjectInfo.GuideUrl,
-                bugs = ProjectInfo.RepositoryUrl.TrimEnd('/') + "/issues",
-            },
-        };
-    }
+    private object CreateStatusModel(){var states=_statusProvider();IReadOnlyList<MonitorSnapshot> ms;try{ms=_monitors.List();}catch{ms=[];}return new{application=ProjectInfo.ProductName,version=ProjectInfo.Version,services=new[]{new{key="VMU",name="VMU",running=states.GetValueOrDefault("VMU")},new{key="VMU_SERVER",name="VMU Server",running=states.GetValueOrDefault("VMU_SERVER")},new{key="WEB",name="Web Server",running=states.GetValueOrDefault("WEB")},new{key="SOCKET",name="Socket Server",running=states.GetValueOrDefault("SOCKET")}},monitors=new{installed=ms.Count(x=>x.Installed),connected=ms.Count(x=>x.Connected)},remote=new{enabled=ms.Any(x=>x.Configuration.RemoteAccess!=RemoteAccessMode.Disabled),clients=0},links=new{github=ProjectInfo.RepositoryUrl,documentation=ProjectInfo.DocumentationUrl,guide=ProjectInfo.GuideUrl,bugs=ProjectInfo.RepositoryUrl.TrimEnd('/')+"/issues"}};}
 
-    private IResult StatusPage()
-    {
-        const string body = """
-<div class="page"><h1>Virtual Monitors Universe</h1><div class="muted" id="version"></div>
-<h2>Services</h2><div id="services" class="cards"></div>
-<h2>Overview</h2><div class="stats">
-<a href="/monitors"><strong id="installed">0</strong><span>Installed Monitors</span></a>
-<a href="/monitors"><strong id="connected">0</strong><span>Connected Monitors</span></a>
-<div><strong id="remote">Disabled</strong><span>Remote Access</span></div>
-<div><strong id="clients">0</strong><span>Remote Clients</span></div></div>
-<h2>Project</h2><div class="projecttiles">
-<a id="github" target="_blank" rel="noreferrer"><b>◆</b><span>GitHub</span></a>
-<a id="documentation" target="_blank" rel="noreferrer"><b>📚</b><span>Documentation</span></a>
-<a id="guide" target="_blank" rel="noreferrer"><b>📖</b><span>User Guide</span></a>
-<a id="bugs" target="_blank" rel="noreferrer"><b>🐞</b><span>Report a Bug</span></a></div></div>
-<script>
-async function refreshStatus(){const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());
-document.getElementById('version').textContent='Version '+s.version;
-document.getElementById('services').innerHTML=s.services.map(x=>`<div class="service"><span class="dot ${x.running?'on':'off'}"></span><span>${x.name}</span><b>${x.running?'Running':'Stopped'}</b></div>`).join('');
-document.getElementById('installed').textContent=s.monitors.installed;document.getElementById('connected').textContent=s.monitors.connected;
-document.getElementById('remote').textContent=s.remote.enabled?'Enabled':'Disabled';document.getElementById('clients').textContent=s.remote.clients;
-for(const k of ['github','documentation','guide','bugs'])document.getElementById(k).href=s.links[k];}
-refreshStatus();setInterval(refreshStatus,1500);
-</script>
+    private IResult StatusPage()=>HtmlShell("Status","""
+<div class="page"><h1>Virtual Monitors Universe</h1><div class="muted" id="version"></div><h2>Services</h2><div id="services" class="cards"></div><h2>Overview</h2><div class="stats"><a href="/monitors"><strong id="installed">0</strong><span>Installed Monitors</span></a><a href="/monitors"><strong id="connected">0</strong><span>Connected Monitors</span></a><div><strong id="remote">Disabled</strong><span>Remote Access</span></div><div><strong id="clients">0</strong><span>Remote Clients</span></div></div>
+<h2>System Resources</h2><div class="resources"><div><b>CPU</b><span>System: <strong id="cpuS">—</strong></span><span>VMU: <strong id="cpuV">—</strong></span></div><div><b>GPU</b><span>System: <strong id="gpuS">—</strong></span><span>VMU: <strong id="gpuV">—</strong></span></div><div><b>RAM</b><span>System: <strong id="ramS">—</strong></span><span>VMU: <strong id="ramV">—</strong></span></div><div><b>NET</b><span>System: <strong id="netS">—</strong></span><span>VMU: <strong id="netV">—</strong></span></div></div>
+<h2>Project</h2><div class="projecttiles"><a id="github" target="_blank"><b>◆</b><span>GitHub</span></a><a id="documentation" target="_blank"><b>📚</b><span>Documentation</span></a><a id="guide" target="_blank"><b>📖</b><span>User Guide</span></a><a id="bugs" target="_blank"><b>🐞</b><span>Report a Bug</span></a></div></div>
+<script>const q=id=>document.getElementById(id);const pct=v=>v==null?'—':v.toFixed(1)+' %';const rate=v=>v==null?'—':v<1048576?(v/1024).toFixed(1)+' KB/s':(v/1048576).toFixed(1)+' MB/s';async function status(){const s=await fetch('/api/status',{cache:'no-store'}).then(r=>r.json());q('version').textContent='Version '+s.version;q('services').innerHTML=s.services.map(x=>`<div class="service"><span class="dot ${x.running?'on':'off'}"></span><span>${x.name}</span><b>${x.running?'Running':'Stopped'}</b></div>`).join('');q('installed').textContent=s.monitors.installed;q('connected').textContent=s.monitors.connected;q('remote').textContent=s.remote.enabled?'Enabled':'Disabled';q('clients').textContent=s.remote.clients;for(const k of ['github','documentation','guide','bugs'])q(k).href=s.links[k];}async function resources(){if(document.hidden)return;const r=await fetch('/api/resources',{cache:'no-store'}).then(x=>x.json());q('cpuS').textContent=pct(r.systemCpu);q('cpuV').textContent=pct(r.vmuCpu);q('gpuS').textContent=pct(r.systemGpu);q('gpuV').textContent=pct(r.vmuGpu);q('ramS').textContent=pct(r.systemRam);q('ramV').textContent=(r.vmuRamBytes/1048576).toFixed(0)+' MB';q('netS').textContent=rate(r.systemNetBytesPerSecond);q('netV').textContent=rate(r.vmuNetBytesPerSecond);}status();resources();setInterval(status,2000);setInterval(resources,2000);</script>
+""");
+
+    private IResult SettingsPage()=>HtmlShell("Settings","""
+<div class="page"><div class="subnav"><b>Settings</b><a href="/settings/arrangement">Arrangement</a></div><h1>Settings</h1><div id="error" class="error"></div><form id="form" class="settingsform"><fieldset><legend>Services</legend><table class="settings"><thead><tr><th>Service</th><th>Interface</th><th>Port</th></tr></thead><tbody><tr><td>VMU Server</td><td><select id="vmuInterface"><option>localhost</option><option>any</option></select></td><td><input id="vmuPort" type="number"></td></tr><tr><td>Web Server</td><td><select id="webInterface"><option>localhost</option><option>any</option></select></td><td><input id="webPort" type="number"></td></tr><tr><td>Web Socket</td><td><select id="socketInterface"><option>localhost</option><option>any</option></select></td><td><input id="socketPort" type="number"></td></tr></tbody></table></fieldset><fieldset><legend>Web and Logging</legend><div class="formgrid"><label>Log Retention</label><div><input id="retention" type="number"> days</div><label>Monitor Preview</label><select id="previewRefresh"><option value="0">Manual only</option><option value="15">15 seconds</option><option value="30">30 seconds</option><option value="60">1 minute</option><option value="120">2 minutes</option><option value="300">5 minutes</option><option value="600">10 minutes</option></select></div></fieldset><fieldset><legend>On Exit</legend><div class="formgrid"><label>Monitors</label><select id="monitorAction"><option>Disconnect</option><option>Keep</option><option>Uninstall</option></select><label>Restore Services</label><input id="restore" type="checkbox"></div></fieldset><div class="actions"><button>Save</button><button type="button" id="cancel">Cancel</button></div></form></div>
+<script>const q=id=>document.getElementById(id);let original;function dep(){if(q('vmuInterface').value==='any')q('webInterface').value='any'}async function load(){original=await fetch('/api/settings').then(r=>r.json());for(const k of ['vmu','web','socket']){q(k+'Interface').value=original[k].interface;q(k+'Port').value=original[k].port}q('retention').value=Math.ceil(original.logging.retentionMinutes/1440);q('previewRefresh').value=original.webUi.monitorPreviewRefreshSeconds;q('monitorAction').value=original.exit.monitorAction;q('restore').checked=original.exit.restoreServices;dep()}q('vmuInterface').onchange=dep;q('cancel').onclick=()=>location.reload();q('form').onsubmit=async e=>{e.preventDefault();dep();const data={vmu:{interface:q('vmuInterface').value,port:+q('vmuPort').value},web:{interface:q('webInterface').value,port:+q('webPort').value},socket:{interface:q('socketInterface').value,port:+q('socketPort').value},logging:{retentionMinutes:+q('retention').value*1440},webUi:{monitorPreviewRefreshSeconds:+q('previewRefresh').value},exit:{monitorAction:q('monitorAction').value,restoreServices:q('restore').checked},serviceState:original.serviceState};const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!r.ok){q('error').textContent=(await r.json()).error;return}const x=await r.json();if(x.restartRequired)window.vmuWaitForEndpoint(x.targetUrl,x.waitMilliseconds,'settings');else location.reload()};load();</script>
+""");
+
+    private object CreateArrangementModel(){var vm=_monitors.List().ToDictionary(x=>x.DeviceName??"",StringComparer.OrdinalIgnoreCase);return WindowsArrangementService.GetActive().Select(x=>new{x.WindowsNumber,x.DeviceName,x.X,x.Y,x.Width,x.Height,x.Primary,title=vm.TryGetValue(x.DeviceName,out var m)?m.Configuration.Title:null,isVirtual=vm.ContainsKey(x.DeviceName)});}
+    private IResult ArrangementPage()=>HtmlShell("Arrangement","""
+<div class="page"><div class="subnav"><a href="/settings">Settings</a><b>Arrangement</b></div><h1>Arrangement</h1><p class="muted">Read-only view of the active Windows desktop topology. Display numbers use the closest public Windows enumeration available to VMU.</p><div id="arrangement" class="arrangement"></div></div><script>async function load(){const a=await fetch('/api/arrangement').then(r=>r.json());if(!a.length)return;const minX=Math.min(...a.map(x=>x.x)),minY=Math.min(...a.map(x=>x.y)),maxX=Math.max(...a.map(x=>x.x+x.width)),maxY=Math.max(...a.map(x=>x.y+x.height));const scale=Math.min(850/(maxX-minX),420/(maxY-minY));const box=document.getElementById('arrangement');box.style.height=Math.max(220,(maxY-minY)*scale+40)+'px';box.innerHTML=a.map(x=>`<div class="arrdisplay ${x.isVirtual?'virtual':''}" style="left:${20+(x.x-minX)*scale}px;top:${20+(x.y-minY)*scale}px;width:${x.width*scale}px;height:${x.height*scale}px"><strong>${x.windowsNumber}</strong>${x.title?`<span>${x.title}</span>`:''}</div>`).join('')}load()</script>
+""");
+
+    private IResult MonitorsPage(){var refresh=_settingsProvider().WebUi.MonitorPreviewRefreshSeconds;return HtmlShell("Monitors",$"""
+<div class="page"><h1>Monitors</h1><div id="monitorGrid" class="monitorgrid"></div></div><script>const refreshSeconds={refresh};const esc=s=>{{const d=document.createElement('div');d.textContent=s??'';return d.innerHTML}};function avatar(m){{return m.configuration.avatarKind==='custom'?`<img class="avatar" src="/api/monitors/${{encodeURIComponent(m.configuration.name)}}/avatar">`:`<span class="avatarEmoji">${{window.vmuAnimalEmoji(m.configuration.avatarValue)}}</span>`}}async function load(){{const list=await fetch('/api/monitors',{{cache:'no-store'}}).then(r=>r.json());monitorGrid.innerHTML=list.map(m=>`<div class="monitorcard" draggable="false" data-id="${{m.configuration.vmuId}}"><div class="cardtools"><button class="refresh" title="Refresh preview">↻</button><button class="move" title="Move">↕</button></div><a href="/monitors/${{encodeURIComponent(m.configuration.name)}}"><div class="monitorpic"><img class="preview ${{m.connected?'':'hidden'}}" src="${{m.connected?'/api/monitors/'+encodeURIComponent(m.configuration.name)+'/thumbnail?t='+Date.now():''}}"><div class="screen ${{m.connected?'hidden':''}}"></div><div class="stand"></div></div><h3>${{avatar(m)}} <span>${{esc(m.configuration.title)}}</span></h3><div>${{m.width}} × ${{m.height}}</div><div><span class="dot ${{m.connected?'on':'off'}}"></span> ${{m.connected?'On':'Off'}}</div></a></div>`).join('')+`<a class="monitorcard addmonitor" href="/monitors/new"><div class="plus">+</div><h3>Add Monitor</h3></a>`;wire()}}function wire(){{document.querySelectorAll('.refresh').forEach(b=>b.onclick=e=>{{e.preventDefault();const img=b.closest('.monitorcard').querySelector('.preview');if(img&&!img.classList.contains('hidden'))img.src=img.src.split('?')[0]+'?t='+Date.now()}});document.querySelectorAll('.move').forEach(b=>b.onmousedown=()=>b.closest('.monitorcard').draggable=true);document.querySelectorAll('.monitorcard[data-id]').forEach(c=>{{c.ondragstart=e=>e.dataTransfer.setData('text/plain',c.dataset.id);c.ondragover=e=>e.preventDefault();c.ondrop=async e=>{{e.preventDefault();const id=e.dataTransfer.getData('text/plain'),src=document.querySelector(`[data-id="${{id}}"]`);if(src&&src!==c){{monitorGrid.insertBefore(src,c);const ids=[...document.querySelectorAll('.monitorcard[data-id]')].map(x=>x.dataset.id);await fetch('/api/monitors/order',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ids}})}})}}}};c.ondragend=()=>c.draggable=false}})}}function previews(){{if(document.hidden||refreshSeconds===0)return;document.querySelectorAll('.preview:not(.hidden)').forEach(i=>i.src=i.src.split('?')[0]+'?t='+Date.now())}}load();if(refreshSeconds>0)setInterval(previews,refreshSeconds*1000)</script>
+""");}
+
+    private string AvatarPicker(string selected){return $"<div class=\"avatarpicker\" data-selected=\"{selected}\"><button type=\"button\" class=\"avatarcurrent\">{MonitorAvatarService.GetEmoji("animal",selected)}</button><div class=\"avatargrid hidden\">{string.Join("",MonitorAvatarService.AnimalNames.Select(a=>$"<button type=\"button\" data-animal=\"{a}\">{MonitorAvatarService.GetEmoji("animal",a)}</button>"))}<label class=\"customtile hidden\"><img><span>Custom</span></label></div><input class=\"avatarfile\" type=\"file\" accept=\".png,.ico,.gif,image/png,image/gif,image/x-icon\" hidden></div>";}
+    private IResult NewMonitorPage(){var rates=string.Join("",MonitorApplicationService.SupportedRefreshRates.Select(x=>$"<option value=\"{x}\"{(x==60?" selected":"")}>{x} Hz</option>"));var animal=MonitorAvatarService.RandomAnimal();var body=$"""
+<div class="page"><h1>Add Monitor</h1><div id="error" class="error"></div><form id="newMonitor" class="properties newmonitor"><label>Title <input id="title" placeholder="Display title"></label><label>Name <input id="name" pattern="[a-z0-9][a-z0-9-]*" placeholder="canonical-name"></label><div id="nameHint" class="fieldhint"></div><label>Avatar {AvatarPicker(animal)}</label><label>Resolution <select id="resolution"><option>1280x720</option><option selected>1920x1080</option><option>2560x1440</option><option>3840x2160</option></select></label><label>Refresh Rate <select id="refreshRate">{rates}</select></label><label>Orientation <select id="portrait"><option value="false">Landscape</option><option value="true">Portrait</option></select></label><div class="actions"><button id="install">Install</button><a class="buttonlink" href="/monitors">Cancel</a></div></form><div id="operation" class="operation hidden"><h2>Installing Monitor...</h2><div class="progress"><div id="operationBar"></div></div><p>Installation progress is also written to the VMU log.</p></div></div>
+<script>{AvatarScript()}const q=id=>document.getElementById(id);let valid=true,checking=0;async function validate(){{const v=q('name').value.trim();if(!v){{valid=true;q('install').disabled=false;return}}if(!/^[a-z0-9][a-z0-9-]*$/.test(v)){{valid=false;q('install').disabled=true;q('nameHint').textContent='Use only a-z, 0-9 and hyphen.';return}}const n=++checking,x=await fetch('/api/monitors/name-available/'+encodeURIComponent(v)).then(r=>r.json());if(n!==checking)return;valid=x.available;q('install').disabled=!valid;q('nameHint').textContent=valid?'':`Name '${{v}}' already exists.`}}q('name').oninput=()=>{{q('name').value=q('name').value.trimStart().toLowerCase().replace(/[^a-z0-9-]/g,'');validate()}};q('newMonitor').onsubmit=async e=>{{e.preventDefault();await validate();if(!valid)return;const [width,height]=q('resolution').value.split('x').map(Number),picker=document.querySelector('.avatarpicker');q('newMonitor').classList.add('hidden');q('operation').classList.remove('hidden');const timer=setInterval(()=>q('operationBar').style.width=Math.min(92,(parseFloat(q('operationBar').style.width)||0)+1)+'%',180);try{{const r=await fetch('/api/monitors',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{name:q('name').value||null,title:q('title').value||null,width,height,refreshRate:+q('refreshRate').value,portrait:q('portrait').value==='true',avatarAnimal:picker.dataset.selected}})}}),x=await r.json();if(!r.ok)throw new Error(x.error||'Monitor could not be installed.');if(picker._file){{const fd=new FormData();fd.append('file',picker._file);const ar=await fetch('/api/monitors/'+encodeURIComponent(x.configuration.name)+'/avatar/upload',{{method:'POST',body:fd}});if(!ar.ok)throw new Error('Monitor installed, but avatar upload failed.')}}clearInterval(timer);location.href='/monitors/'+encodeURIComponent(x.configuration.name)}}catch(ex){{clearInterval(timer);q('operation').classList.add('hidden');q('newMonitor').classList.remove('hidden');q('error').textContent=ex.message}}}};</script>
+""";return HtmlShell("Add Monitor",body);}
+
+    private string AvatarScript()=>"""
+function wireAvatar(){document.querySelectorAll('.avatarpicker').forEach(p=>{const current=p.querySelector('.avatarcurrent'),grid=p.querySelector('.avatargrid'),file=p.querySelector('.avatarfile'),custom=p.querySelector('.customtile');const select=a=>{p.dataset.selected=a;p._file=null;custom.classList.add('hidden');grid.querySelectorAll('[data-animal]').forEach(x=>x.classList.toggle('selected',x.dataset.animal===a));current.textContent=window.vmuAnimalEmoji(a)};current.onclick=()=>grid.classList.toggle('hidden');grid.querySelectorAll('[data-animal]').forEach(b=>b.onclick=()=>{select(b.dataset.animal);grid.classList.add('hidden')});custom.onclick=()=>file.click();grid.ondblclick=e=>{if(e.target===grid)file.click()};file.onchange=()=>{if(!file.files[0])return;p._file=file.files[0];custom.classList.remove('hidden');custom.querySelector('img').src=URL.createObjectURL(p._file);grid.querySelectorAll('[data-animal]').forEach(x=>x.classList.remove('selected'));current.textContent='🖼️';grid.classList.add('hidden')};select(p.dataset.selected)})}setTimeout(wireAvatar,0);
 """;
-        return HtmlShell("Status", body);
-    }
-
-    private IResult SettingsPage()
-    {
-        const string body = """
-<div class="page"><h1>Settings</h1><div id="error" class="error"></div><form id="form" class="settingsform">
-<fieldset><legend>Services</legend><table class="settings"><thead><tr><th>Service</th><th>Interface</th><th>Port</th></tr></thead><tbody>
-<tr><td>VMU Server</td><td><select id="vmuInterface"><option>localhost</option><option>any</option></select></td><td><input id="vmuPort" type="number" min="1" max="65535"></td></tr>
-<tr><td>Web Server</td><td><select id="webInterface"><option>localhost</option><option>any</option></select></td><td><input id="webPort" type="number" min="1" max="65535"></td></tr>
-<tr><td>Web Socket</td><td><select id="socketInterface"><option>localhost</option><option>any</option></select></td><td><input id="socketPort" type="number" min="1" max="65535"></td></tr></tbody></table></fieldset>
-<fieldset><legend>Web and Logging</legend><div class="formgrid"><label for="retention">Log Retention</label><div><input id="retention" type="number" min="1" max="3650"> days</div><label for="previewRefresh">Monitor Preview</label><select id="previewRefresh"><option value="0">Manual only</option><option value="15">15 seconds</option><option value="30">30 seconds</option><option value="60">1 minute</option><option value="120">2 minutes</option><option value="300">5 minutes</option><option value="600">10 minutes</option></select></div></fieldset>
-<fieldset><legend>On Exit</legend><div class="formgrid"><label for="monitorAction">Monitors</label><select id="monitorAction"><option>Disconnect</option><option>Keep</option><option>Uninstall</option></select><label for="restore">Restore Services</label><div><input id="restore" type="checkbox"></div></div></fieldset>
-<div class="actions"><button type="submit">Save</button><button type="button" id="cancel">Cancel</button></div></form></div>
-<script>
-const q=id=>document.getElementById(id);let original;
-function dependency(){if(q('vmuInterface').value==='any')q('webInterface').value='any';}
-async function load(){original=await fetch('/api/settings').then(r=>r.json());q('vmuInterface').value=original.vmu.interface;q('vmuPort').value=original.vmu.port;q('webInterface').value=original.web.interface;q('webPort').value=original.web.port;q('socketInterface').value=original.socket.interface;q('socketPort').value=original.socket.port;q('retention').value=Math.ceil(original.logging.retentionMinutes/1440);q('previewRefresh').value=String(original.webUi.monitorPreviewRefreshSeconds);q('monitorAction').value=original.exit.monitorAction;q('restore').checked=original.exit.restoreServices;dependency();}
-q('vmuInterface').onchange=dependency;q('cancel').onclick=()=>location.reload();
-q('form').onsubmit=async e=>{e.preventDefault();dependency();q('error').textContent='';const data={vmu:{interface:q('vmuInterface').value,port:+q('vmuPort').value},web:{interface:q('webInterface').value,port:+q('webPort').value},socket:{interface:q('socketInterface').value,port:+q('socketPort').value},logging:{retentionMinutes:+q('retention').value*1440},webUi:{monitorPreviewRefreshSeconds:+q('previewRefresh').value},exit:{monitorAction:q('monitorAction').value,restoreServices:q('restore').checked},serviceState:original.serviceState};const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!r.ok){const x=await r.json();q('error').textContent=x.error||'Settings could not be saved.';return;}const result=await r.json();if(result.restartRequired)window.vmuWaitForEndpoint(result.targetUrl,result.waitMilliseconds,'settings');else location.reload();};load();
-</script>
-""";
-        return HtmlShell("Settings", body);
-    }
-
-    private IResult MonitorsPage()
-    {
-        var refresh = _settingsProvider().WebUi.MonitorPreviewRefreshSeconds;
-        const string template = """
-<div class="page"><h1>Monitors</h1><div id="monitorGrid" class="monitorgrid"></div></div>
-<script>
-const refreshSeconds=__REFRESH__;function esc(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML}
-function avatar(m){return m.configuration.avatarKind==='custom'?`<img class="avatar" src="/api/monitors/${encodeURIComponent(m.configuration.name)}/avatar">`:`<span class="avatarEmoji">${window.vmuAnimalEmoji(m.configuration.avatarValue)}</span>`;}
-async function loadMonitors(){const list=await fetch('/api/monitors',{cache:'no-store'}).then(r=>r.json());document.getElementById('monitorGrid').innerHTML=list.map(m=>`<a class="monitorcard" href="/monitors/${encodeURIComponent(m.configuration.name)}"><div class="monitorpic"><img class="preview ${m.connected?'':'hidden'}" src="${m.connected?'/api/monitors/'+encodeURIComponent(m.configuration.name)+'/thumbnail?t='+Date.now():''}"><div class="screen ${m.connected?'hidden':''}"></div><div class="stand"></div></div><h3>${avatar(m)} ${esc(m.configuration.title)}</h3><div>${m.width} × ${m.height}</div><div><span class="dot ${m.connected?'on':'off'}"></span> ${m.connected?'On':'Off'}</div></a>`).join('')+`<a class="monitorcard addmonitor" href="/monitors/new"><div class="plus">+</div><h3>Add Monitor</h3></a>`;}
-function refreshPreviews(){if(document.hidden||refreshSeconds===0)return;document.querySelectorAll('.preview').forEach(img=>{const u=new URL(img.src);u.searchParams.set('t',Date.now());img.src=u.toString();});}
-loadMonitors();if(refreshSeconds>0)setInterval(refreshPreviews,refreshSeconds*1000);
-</script>
-""";
-        return HtmlShell("Monitors", template.Replace("__REFRESH__", refresh.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-    }
-
-    private IResult NewMonitorPage()
-    {
-        var rates = string.Join("", MonitorApplicationService.SupportedRefreshRates.Select(x => $"<option value=\"{x}\"{(x == MonitorApplicationService.RecommendedRefreshRate ? " selected" : "")}>{x} Hz</option>"));
-        var animals = string.Join("", MonitorAvatarService.AnimalNames.Select(x => $"<option value=\"{x}\">{System.Net.WebUtility.HtmlEncode(x)}</option>"));
-        const string template = """
-<div class="page"><h1>Add Monitor</h1><div id="error" class="error"></div><form id="newMonitor" class="properties newmonitor">
-<label>Name <input id="name" autocomplete="off" pattern="[a-z0-9][a-z0-9-]*" placeholder="canonical-name"></label><div id="nameHint" class="fieldhint"></div>
-<label>Title <input id="title" placeholder="Display title"></label>
-<label>Avatar <div class="avatarcontrols"><select id="avatarAnimal"><option value="">Random animal</option>__ANIMALS__</select><input id="avatarFile" type="file" accept=".png,.ico,.gif,image/png,image/gif,image/x-icon"></div></label>
-<label>Resolution <select id="resolution"><option value="1280x720">1280 × 720</option><option value="1920x1080" selected>1920 × 1080</option><option value="2560x1440">2560 × 1440</option><option value="3840x2160">3840 × 2160</option></select></label>
-<label>Refresh Rate <select id="refreshRate">__RATES__</select></label><label>Orientation <select id="portrait"><option value="false">Landscape</option><option value="true">Portrait</option></select></label>
-<div class="actions"><button id="install" type="submit">Install</button><a class="buttonlink" href="/monitors">Cancel</a></div></form><div id="operation" class="operation hidden"><h2>Installing Monitor...</h2><div class="progress"><div id="operationBar"></div></div><p>Windows may ask for administrator confirmation.</p></div></div>
-<script>
-const q=id=>document.getElementById(id);let nameValid=true,checking=0;
-async function validateName(){const v=q('name').value.trim();q('name').classList.remove('invalid');q('nameHint').textContent='';if(!v){nameValid=true;q('install').disabled=false;return;}if(!/^[a-z0-9][a-z0-9-]*$/.test(v)){nameValid=false;q('name').classList.add('invalid');q('nameHint').textContent='Use only a-z, 0-9 and hyphen.';q('install').disabled=true;return;}const n=++checking;const x=await fetch('/api/monitors/name-available/'+encodeURIComponent(v)).then(r=>r.json());if(n!==checking)return;nameValid=x.available;q('name').classList.toggle('invalid',!nameValid);q('nameHint').textContent=nameValid?'':`Name '${v}' already exists.`;q('install').disabled=!nameValid;}
-q('name').oninput=()=>{q('name').value=q('name').value.trimStart().toLowerCase().replace(/[^a-z0-9-]/g,'');validateName();};
-q('newMonitor').onsubmit=async e=>{e.preventDefault();await validateName();if(!nameValid)return;q('error').textContent='';const [width,height]=q('resolution').value.split('x').map(Number);q('newMonitor').classList.add('hidden');q('operation').classList.remove('hidden');const started=Date.now(),timer=setInterval(()=>q('operationBar').style.width=Math.min(92,Math.round((Date.now()-started)/20000*92))+'%',120);try{const r=await fetch('/api/monitors',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:q('name').value.trim()||null,title:q('title').value.trim()||null,width,height,refreshRate:+q('refreshRate').value,portrait:q('portrait').value==='true',avatarAnimal:q('avatarAnimal').value||null})});const x=await r.json();if(!r.ok)throw new Error(x.error||'Monitor could not be installed.');if(q('avatarFile').files[0]){const fd=new FormData();fd.append('file',q('avatarFile').files[0]);const ar=await fetch('/api/monitors/'+encodeURIComponent(x.configuration.name)+'/avatar/upload',{method:'POST',body:fd});if(!ar.ok)throw new Error('Monitor was installed, but the custom avatar could not be saved.');}clearInterval(timer);q('operationBar').style.width='100%';setTimeout(()=>location.href='/monitors/'+encodeURIComponent(x.configuration.name),300);}catch(ex){clearInterval(timer);q('operation').classList.add('hidden');q('newMonitor').classList.remove('hidden');q('error').textContent=ex.message;}};
-</script>
-""";
-        return HtmlShell("Add Monitor", template.Replace("__RATES__", rates).Replace("__ANIMALS__", animals));
-    }
 
     private IResult MonitorPropertiesPage(string id)
     {
-        var monitor = _monitorService.Get(id);
-        if (monitor is null) return Results.NotFound();
-        if (!id.Equals(monitor.Configuration.Name, StringComparison.OrdinalIgnoreCase)) return Results.Redirect("/monitors/" + Uri.EscapeDataString(monitor.Configuration.Name), true);
+        var m=_monitors.Get(id);if(m is null)return Results.NotFound();if(!id.Equals(m.Configuration.Name,StringComparison.OrdinalIgnoreCase))return Results.Redirect("/monitors/"+Uri.EscapeDataString(m.Configuration.Name),true);var rates=string.Join("",MonitorApplicationService.SupportedRefreshRates.Select(x=>$"<option value=\"{x}\">{x} Hz</option>"));var body=$"""
+<div class="page"><h1>Monitor Properties</h1><div id="error" class="error"></div><form id="props" class="properties"><label>Title <input id="title"></label><label>Name <input id="name"></label><div id="nameHint" class="fieldhint"></div><label>Avatar {AvatarPicker(m.Configuration.AvatarKind=="animal"?m.Configuration.AvatarValue:MonitorAvatarService.RandomAnimal())}</label><label>Resolution <select id="resolution"><option>1280x720</option><option>1920x1080</option><option>2560x1440</option><option>3840x2160</option></select></label><label>Refresh Rate <select id="refreshRate">{rates}</select></label><label>Orientation <select id="portrait"><option value="false">Landscape</option><option value="true">Portrait</option></select></label>
+<fieldset><legend>Windows Settings</legend><label>Windows Display <input id="windowsDisplay" readonly></label><label>GDI <input id="gdi" readonly></label><label>Current Position <input id="position" readonly></label></fieldset><fieldset><legend>Monitor Health</legend><div class="health"><strong id="healthState"></strong><span id="healthTime"></span><p id="healthMessage"></p></div></fieldset>
+<fieldset><legend>Remote Access</legend><label>Mode <select id="remoteAccess"><option>Disabled</option><option>Presentation</option><option>Collaboration</option></select></label><p id="modeHint" class="hint"></p><div id="collaboration" class="inlinechecks"><label><input id="allowClipboard" type="checkbox"> Clipboard</label><label><input id="allowMouse" type="checkbox"> Mouse</label><label><input id="allowKeyboard" type="checkbox"> Keyboard</label></div><label>Access <select id="securityMode"><option>Public</option><option>Password</option><option value="ApiKey">API Key</option><option value="Approval">White/Black List Approval</option></select></label><div id="passwordRow"><label>Password <input id="password" type="password"></label></div><div id="apiRow"><label>API Key <div class="keyrow"><input id="apiKey" readonly><button type="button" id="regen">Generate New Key</button></div></label></div><div id="approvalRow"><table class="accessrules"><thead><tr><th>IP Address</th><th>MAC</th><th>Computer</th><th>User</th><th>Permission</th></tr></thead><tbody id="rules"></tbody></table></div></fieldset><div class="actions"><button id="save" disabled>Save</button><a class="buttonlink" href="/monitors">Cancel</a><button type="button" id="connect">Connect</button><button type="button" id="disconnect">Disconnect</button><button type="button" id="uninstall" class="danger">Uninstall</button><a class="buttonlink" id="terminal">Open Terminal</a></div></form></div>
+<script>{AvatarScript()}const id={JsonSerializer.Serialize(m.Configuration.Name)},q=x=>document.getElementById(x);let current,base='',regen=false,valid=true;function state(){{return JSON.stringify({{title:q('title').value,name:q('name').value,res:q('resolution').value,hz:q('refreshRate').value,p:q('portrait').value,r:q('remoteAccess').value,s:q('securityMode').value,c:q('allowClipboard').checked,m:q('allowMouse').checked,k:q('allowKeyboard').checked,pw:q('password').value,regen,avatar:document.querySelector('.avatarpicker').dataset.selected,file:!!document.querySelector('.avatarpicker')._file}})}}function dirty(){{q('save').disabled=!valid||state()===base}}function mode(){{q('modeHint').textContent=q('remoteAccess').value==='Disabled'?'Remote access is disabled.':q('remoteAccess').value==='Presentation'?'View-only remote display.':'Remote display with selected collaboration controls.';q('collaboration').classList.toggle('hidden',q('remoteAccess').value!=='Collaboration');q('securityMode').disabled=q('remoteAccess').value==='Disabled';q('passwordRow').classList.toggle('hidden',q('securityMode').value!=='Password');q('apiRow').classList.toggle('hidden',q('securityMode').value!=='ApiKey');q('approvalRow').classList.toggle('hidden',q('securityMode').value!=='Approval')}}async function load(){{current=await fetch('/api/monitors/'+id).then(r=>r.json());q('title').value=current.configuration.title;q('name').value=current.configuration.name;q('resolution').value=current.configuration.width+'x'+current.configuration.height;q('refreshRate').value=current.configuration.refreshRate;q('portrait').value=String(current.configuration.portrait);q('windowsDisplay').value=current.windowsDisplay??'—';q('gdi').value=current.deviceName??'—';q('position').value=current.positionX==null?'—':`X: ${{current.positionX}}, Y: ${{current.positionY}}`;q('healthState').textContent=current.health.state;q('healthState').className=current.health.isError?'bad':'good';q('healthMessage').textContent=current.health.message;q('healthTime').textContent=current.health.timestamp?new Date(current.health.timestamp).toLocaleString():'';q('remoteAccess').value=current.configuration.remoteAccess;q('securityMode').value=current.configuration.securityMode;q('apiKey').value=current.configuration.apiKey||'';q('allowClipboard').checked=current.configuration.collaborationClipboard;q('allowMouse').checked=current.configuration.collaborationMouse;q('allowKeyboard').checked=current.configuration.collaborationKeyboard;q('connect').disabled=!current.installed||current.connected;q('disconnect').disabled=!current.installed||!current.connected;q('terminal').classList.toggle('hidden',!current.connected||current.health.isError);q('terminal').href='/monitor/'+current.configuration.name;mode();base=state();dirty()}}['title','name','resolution','refreshRate','portrait','remoteAccess','securityMode','password','allowClipboard','allowMouse','allowKeyboard'].forEach(x=>q(x).oninput=()=>{{mode();dirty()}});q('regen').onclick=()=>{{regen=true;dirty()}};q('props').onsubmit=async e=>{{e.preventDefault();const [width,height]=q('resolution').value.split('x').map(Number),data={{name:q('name').value,title:q('title').value,width,height,refreshRate:+q('refreshRate').value,portrait:q('portrait').value==='true',remoteAccess:q('remoteAccess').value,securityMode:q('securityMode').value,password:q('password').value||null,regenerateApiKey:regen,collaborationClipboard:q('allowClipboard').checked,collaborationMouse:q('allowMouse').checked,collaborationKeyboard:q('allowKeyboard').checked}},r=await fetch('/api/monitors/'+id,{{method:'PUT',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}});if(!r.ok){{q('error').textContent=(await r.json()).error;return}}const u=await r.json(),p=document.querySelector('.avatarpicker');if(p._file){{const fd=new FormData();fd.append('file',p._file);await fetch('/api/monitors/'+u.configuration.name+'/avatar/upload',{{method:'POST',body:fd}})}}else await fetch('/api/monitors/'+u.configuration.name+'/avatar/animal/'+p.dataset.selected,{{method:'POST'}});location.href='/monitors/'+u.configuration.name}};async function act(a){{const r=await fetch('/api/monitors/'+id+'/'+a,{{method:'POST'}});if(!r.ok)alert((await r.json()).error);else load()}}q('connect').onclick=()=>act('connect');q('disconnect').onclick=()=>act('disconnect');q('uninstall').onclick=async()=>{{if(confirm('Uninstall monitor?')){{await fetch('/api/monitors/'+id+'/uninstall',{{method:'POST'}});location.href='/monitors'}}}};load()</script>
+""";return HtmlShell("Monitor "+m.Configuration.Title,body);
+    }
 
-        var rates = string.Join("", MonitorApplicationService.SupportedRefreshRates.Select(x => $"<option value=\"{x}\">{x} Hz</option>"));
-        var animals = string.Join("", MonitorAvatarService.AnimalNames.Select(x => $"<option value=\"{x}\">{System.Net.WebUtility.HtmlEncode(x)}</option>"));
-        var jsonId = JsonSerializer.Serialize(monitor.Configuration.Name);
-        const string template = """
-<div class="page"><h1>Monitor Properties</h1><div id="error" class="error"></div><form id="props" class="properties">
-<label>Name <input id="name" pattern="[a-z0-9][a-z0-9-]*"></label><div id="nameHint" class="fieldhint"></div><label>Title <input id="title"></label>
-<label>Avatar <div class="avatarcontrols"><span id="avatarPreview"></span><select id="avatarAnimal"><option value="">Keep current</option>__ANIMALS__</select><input id="avatarFile" type="file" accept=".png,.ico,.gif,image/png,image/gif,image/x-icon"></div></label>
-<label>Windows Display <input id="windowsDisplay" readonly></label><label>GDI <input id="gdi" readonly></label><label>Current Position <input id="position" readonly></label>
-<label>Resolution <select id="resolution"><option value="1280x720">1280 × 720</option><option value="1920x1080">1920 × 1080</option><option value="2560x1440">2560 × 1440</option><option value="3840x2160">3840 × 2160</option></select></label><label>Refresh Rate <select id="refreshRate">__RATES__</select></label><label>Orientation <select id="portrait"><option value="false">Landscape</option><option value="true">Portrait</option></select></label>
-<fieldset><legend>Remote Access</legend><label>Mode <select id="remoteAccess"><option>Disabled</option><option>Presentation</option><option>Collaboration</option></select></label><p id="modeHint" class="hint"></p>
-<div id="collaboration" class="inlinechecks"><label><input id="allowClipboard" type="checkbox"> Clipboard</label><label><input id="allowMouse" type="checkbox"> Mouse</label><label><input id="allowKeyboard" type="checkbox"> Keyboard</label></div>
-<label>Access <select id="securityMode"><option>Public</option><option>Password</option><option value="ApiKey">API Key</option><option value="Approval">White/Black List Approval</option></select></label>
-<div id="passwordRow"><label>Password <input id="password" type="password" placeholder="New password (blank keeps current)"></label></div>
-<div id="apiRow"><label>API Key <div class="keyrow"><input id="apiKey" readonly><button type="button" id="regen">Generate New Key</button></div></label></div>
-<div id="approvalRow"><table class="accessrules"><thead><tr><th>IP Address</th><th>MAC</th><th>Computer</th><th>User</th><th>Permission</th><th></th></tr></thead><tbody id="rules"></tbody></table><div class="ruleadd"><input id="ruleClient" placeholder="Client/User ID"><input id="ruleIp" placeholder="IP"><input id="ruleMac" placeholder="MAC"><input id="ruleComputer" placeholder="Computer"><input id="ruleUser" placeholder="User"><select id="rulePermission"><option>Deny</option><option>Deferred</option><option>Allow</option></select><button type="button" id="addRule">Add / Update</button></div></div>
-</fieldset>
-<div class="actions"><button id="save" type="submit" disabled>Save</button><a class="buttonlink" href="/monitors">Cancel</a><button type="button" id="connect">Connect</button><button type="button" id="disconnect">Disconnect</button><button type="button" id="uninstall" class="danger">Uninstall</button><a class="buttonlink" id="terminal">Open Terminal</a></div></form></div>
-<script>
-const id=__ID__;const q=x=>document.getElementById(x);let current,baseline='',regenKey=false,nameValid=true;
-function modeHelp(){q('modeHint').textContent=q('remoteAccess').value==='Disabled'?'Remote access is disabled.':q('remoteAccess').value==='Presentation'?'View-only remote display.':'Remote display with the selected collaboration controls.';q('collaboration').classList.toggle('hidden',q('remoteAccess').value!=='Collaboration');q('securityMode').disabled=q('remoteAccess').value==='Disabled';updateSecurity();}
-function updateSecurity(){const disabled=q('remoteAccess').value==='Disabled';q('passwordRow').classList.toggle('hidden',q('securityMode').value!=='Password');q('apiRow').classList.toggle('hidden',q('securityMode').value!=='ApiKey');q('approvalRow').classList.toggle('hidden',q('securityMode').value!=='Approval');q('password').disabled=disabled||q('securityMode').value!=='Password';q('regen').disabled=disabled||q('securityMode').value!=='ApiKey';}
-function collaborationGuard(){if(q('remoteAccess').value==='Collaboration'&&!q('allowClipboard').checked&&!q('allowMouse').checked&&!q('allowKeyboard').checked){q('remoteAccess').value='Presentation';modeHelp();}}
-function state(){return JSON.stringify({name:q('name').value.trim(),title:q('title').value.trim(),resolution:q('resolution').value,refreshRate:q('refreshRate').value,portrait:q('portrait').value,remoteAccess:q('remoteAccess').value,securityMode:q('securityMode').value,clipboard:q('allowClipboard').checked,mouse:q('allowMouse').checked,keyboard:q('allowKeyboard').checked,animal:q('avatarAnimal').value,file:q('avatarFile').value,regen:regenKey,password:q('password').value});}
-function dirty(){q('save').disabled=!nameValid||state()===baseline;}
-async function validateName(){const v=q('name').value.trim();q('name').classList.remove('invalid');q('nameHint').textContent='';if(!/^[a-z0-9][a-z0-9-]*$/.test(v)){nameValid=false;q('name').classList.add('invalid');q('nameHint').textContent='Use only a-z, 0-9 and hyphen.';dirty();return;}const x=await fetch('/api/monitors/name-available/'+encodeURIComponent(v)+'?except='+encodeURIComponent(id)).then(r=>r.json());nameValid=x.available;q('name').classList.toggle('invalid',!nameValid);q('nameHint').textContent=nameValid?'':`Name '${v}' already exists.`;dirty();}
-async function loadRules(){if(q('securityMode').value!=='Approval')return;const data=await fetch('/api/monitors/'+encodeURIComponent(id)+'/access-rules').then(r=>r.json());q('rules').innerHTML=data.map(x=>`<tr><td>${x.ipAddress??'—'}</td><td>${x.macAddress??'—'}</td><td>${x.computerName??'—'}</td><td>${x.userName??'—'}</td><td><select data-rule="${x.id}"><option ${x.permission==='Deny'?'selected':''}>Deny</option><option ${x.permission==='Deferred'?'selected':''}>Deferred</option><option ${x.permission==='Allow'?'selected':''}>Allow</option></select></td><td><button type="button" data-delete="${x.id}">Remove</button></td></tr>`).join('');document.querySelectorAll('[data-rule]').forEach(s=>s.onchange=async()=>{const old=data.find(x=>x.id==s.dataset.rule);await fetch('/api/monitors/'+encodeURIComponent(id)+'/access-rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:old.clientId,ipAddress:old.ipAddress,macAddress:old.macAddress,computerName:old.computerName,userName:old.userName,permission:s.value})});loadRules();});document.querySelectorAll('[data-delete]').forEach(b=>b.onclick=async()=>{await fetch('/api/monitors/'+encodeURIComponent(id)+'/access-rules/'+b.dataset.delete,{method:'DELETE'});loadRules();});}
-async function load(){current=await fetch('/api/monitors/'+encodeURIComponent(id),{cache:'no-store'}).then(r=>r.json());q('name').value=current.configuration.name;q('title').value=current.configuration.title;const w=current.configuration.width,h=current.configuration.height;q('resolution').value=`${w}x${h}`;if(!q('resolution').value){const o=document.createElement('option');o.value=`${w}x${h}`;o.textContent=`${w} × ${h}`;q('resolution').append(o);q('resolution').value=o.value;}q('refreshRate').value=current.configuration.refreshRate;q('portrait').value=String(current.configuration.portrait);q('windowsDisplay').value=current.windowsDisplay??'—';q('gdi').value=current.deviceName??'—';q('position').value=current.positionX==null?'—':`X: ${current.positionX}, Y: ${current.positionY}`;q('remoteAccess').value=current.configuration.remoteAccess;q('securityMode').value=current.configuration.securityMode;q('apiKey').value=current.configuration.apiKey||'';q('allowClipboard').checked=current.configuration.collaborationClipboard;q('allowMouse').checked=current.configuration.collaborationMouse;q('allowKeyboard').checked=current.configuration.collaborationKeyboard;q('avatarPreview').innerHTML=current.configuration.avatarKind==='custom'?`<img class="avatar" src="/api/monitors/${encodeURIComponent(id)}/avatar?t=${Date.now()}">`:`<span class="avatarEmoji">${window.vmuAnimalEmoji(current.configuration.avatarValue)}</span>`;q('avatarAnimal').value='';q('avatarFile').value='';q('password').value='';regenKey=false;q('connect').disabled=!current.installed||current.connected;q('disconnect').disabled=!current.installed||!current.connected;q('uninstall').disabled=!current.installed;q('terminal').href='/monitor/'+encodeURIComponent(current.configuration.name);modeHelp();await loadRules();baseline=state();dirty();}
-['title','resolution','refreshRate','portrait','avatarAnimal','avatarFile','password'].forEach(x=>q(x).addEventListener('input',dirty));q('name').oninput=()=>{q('name').value=q('name').value.trimStart().toLowerCase().replace(/[^a-z0-9-]/g,'');validateName();};q('remoteAccess').onchange=()=>{modeHelp();collaborationGuard();dirty();};q('securityMode').onchange=()=>{updateSecurity();loadRules();dirty();};['allowClipboard','allowMouse','allowKeyboard'].forEach(x=>q(x).onchange=()=>{collaborationGuard();dirty();});q('regen').onclick=()=>{regenKey=true;q('apiKey').value='New unique key will be generated on Save';dirty();};
-q('props').onsubmit=async e=>{e.preventDefault();await validateName();if(!nameValid)return;const [width,height]=q('resolution').value.split('x').map(Number);const data={name:q('name').value.trim(),title:q('title').value.trim(),width,height,refreshRate:+q('refreshRate').value,portrait:q('portrait').value==='true',remoteAccess:q('remoteAccess').value,securityMode:q('securityMode').value,password:q('password').value||null,regenerateApiKey:regenKey,collaborationClipboard:q('allowClipboard').checked,collaborationMouse:q('allowMouse').checked,collaborationKeyboard:q('allowKeyboard').checked};const r=await fetch('/api/monitors/'+encodeURIComponent(id),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!r.ok){const x=await r.json();q('error').textContent=x.error||'Could not save monitor properties.';return;}const updated=await r.json();if(q('avatarAnimal').value)await fetch('/api/monitors/'+encodeURIComponent(updated.configuration.name)+'/avatar/animal/'+encodeURIComponent(q('avatarAnimal').value),{method:'POST'});if(q('avatarFile').files[0]){const fd=new FormData();fd.append('file',q('avatarFile').files[0]);await fetch('/api/monitors/'+encodeURIComponent(updated.configuration.name)+'/avatar/upload',{method:'POST',body:fd});}if(updated.configuration.name!==id){location.href='/monitors/'+encodeURIComponent(updated.configuration.name);return;}await load();};
-async function action(name,question){if(question&&!confirm(question))return false;const r=await fetch('/api/monitors/'+encodeURIComponent(id)+'/'+name,{method:'POST'});if(!r.ok){const x=await r.json();alert(x.error||'Monitor operation failed.');return false;}return true;}q('connect').onclick=async()=>{if(await action('connect'))load();};q('disconnect').onclick=async()=>{if(await action('disconnect',`Disconnect '${current.configuration.title}'?`))load();};q('uninstall').onclick=async()=>{if(await action('uninstall',`Uninstall '${current.configuration.title}' from Windows?`))location.href='/monitors';};
-q('addRule').onclick=async()=>{if(!q('ruleClient').value.trim())return;await fetch('/api/monitors/'+encodeURIComponent(id)+'/access-rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:q('ruleClient').value,ipAddress:q('ruleIp').value||null,macAddress:q('ruleMac').value||null,computerName:q('ruleComputer').value||null,userName:q('ruleUser').value||null,permission:q('rulePermission').value})});for(const x of ['ruleClient','ruleIp','ruleMac','ruleComputer','ruleUser'])q(x).value='';loadRules();};load().catch(e=>q('error').textContent=e.message);
-</script>
+    private IResult TerminalPage(string id){var m=_monitors.Get(id);if(m is null)return Results.NotFound();if(!m.Connected||m.Health.IsError)return Results.Redirect("/monitors/"+Uri.EscapeDataString(m.Configuration.Name));if(!id.Equals(m.Configuration.Name,StringComparison.OrdinalIgnoreCase))return Results.Redirect("/monitor/"+Uri.EscapeDataString(m.Configuration.Name),true);var n=Uri.EscapeDataString(m.Configuration.Name);return Results.Content($"<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{System.Net.WebUtility.HtmlEncode(m.Configuration.Title)} - VMU</title><style>html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#292b2f}}body{{display:flex;align-items:center;justify-content:center}}img{{display:block;max-width:100vw;max-height:100vh;width:auto;height:auto;object-fit:contain;border:1px solid #45484d;box-shadow:0 0 20px #0005}}</style></head><body><img src=\"/api/monitors/{n}/live\"></body></html>","text/html; charset=utf-8");}
+
+    private async Task StreamMonitorAsync(string id,HttpContext context){var m=_monitors.Get(id);if(m is null||!m.Connected||m.Health.IsError||string.IsNullOrWhiteSpace(m.DeviceName)){context.Response.StatusCode=404;return;}context.Response.ContentType="multipart/x-mixed-replace; boundary=vmu";context.Response.Headers.CacheControl="no-store";try{while(!context.RequestAborted.IsCancellationRequested){var frame=await _capture.GetLiveFrameAsync(m.Configuration.VmuId,m.DeviceName,context.RequestAborted);var header=Encoding.ASCII.GetBytes($"--vmu\r\nContent-Type: image/jpeg\r\nContent-Length: {frame.Length}\r\n\r\n");await context.Response.Body.WriteAsync(header,context.RequestAborted);await context.Response.Body.WriteAsync(frame,context.RequestAborted);await context.Response.Body.WriteAsync("\r\n"u8.ToArray(),context.RequestAborted);await context.Response.Body.FlushAsync(context.RequestAborted);_resources.AddVmuNetworkBytes(header.Length+frame.Length+2);await Task.Delay(100,context.RequestAborted);}}catch(OperationCanceledException){}catch(Exception ex){LogStore.Write("WARN","WEB","TERMINAL_STREAM_FAILED",ex.Message,m.Configuration.VmuId);}}
+    private async Task<IResult> GetThumbnailAsync(string id,HttpContext context){try{var m=_monitors.Get(id);if(m is null||!m.Connected||string.IsNullOrWhiteSpace(m.DeviceName))return Results.NotFound();return Results.File(await _capture.GetThumbnailAsync(m.Configuration.VmuId,m.DeviceName,context.RequestAborted),"image/jpeg");}catch(Exception ex){LogStore.Write("WARN","WEB","THUMBNAIL_FAILED",ex.Message,id);return Results.NotFound();}}
+
+    private async Task<IResult> CreateMonitorAsync(HttpRequest r){try{var x=await r.ReadFromJsonAsync<MonitorCreateRequest>();if(x is null)return Results.BadRequest(new{error="Invalid monitor creation payload."});var m=_monitors.Create(x.Name,x.Title,x.Width,x.Height,x.RefreshRate,x.Portrait,x.AvatarAnimal);return Results.Created($"/api/monitors/{m.Configuration.Name}",m);}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private async Task<IResult> UpdateMonitorAsync(HttpRequest r,string id){try{var x=await r.ReadFromJsonAsync<MonitorUpdateRequest>();if(x is null||!Enum.TryParse<RemoteAccessMode>(x.RemoteAccess,true,out var remote)||!Enum.TryParse<RemoteSecurityMode>(x.SecurityMode,true,out var security))return Results.BadRequest(new{error="Invalid monitor properties payload."});return Results.Json(_monitors.UpdateProperties(id,x.Name,x.Title,x.Width,x.Height,x.RefreshRate,x.Portrait,remote,security,x.Password,x.RegenerateApiKey,x.CollaborationClipboard,x.CollaborationMouse,x.CollaborationKeyboard));}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private async Task<IResult> ReorderMonitorsAsync(HttpRequest r){try{var x=await r.ReadFromJsonAsync<MonitorOrderRequest>();if(x is null)return Results.BadRequest();_monitors.Reorder(x.Ids);return Results.NoContent();}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private IResult GetAvatar(string id){var a=_monitors.GetAvatar(id);return a is null?Results.NotFound():Results.File(a.Value.Bytes,a.Value.ContentType);}
+    private async Task<IResult> UploadAvatarAsync(HttpRequest r,string id){try{var f=(await r.ReadFormAsync()).Files.GetFile("file");if(f is null||f.Length==0)return Results.BadRequest(new{error="Avatar file is required."});if(f.Length>2*1024*1024)return Results.BadRequest(new{error="Avatar file must be at most 2 MB."});await using var s=f.OpenReadStream();return Results.Json(_monitors.SetCustomAvatar(id,f.FileName,s));}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private async Task<IResult> UpsertAccessRuleAsync(HttpRequest r,string id){try{var x=await r.ReadFromJsonAsync<AccessRuleRequest>();if(x is null||!Enum.TryParse<AccessPermission>(x.Permission,true,out var p))return Results.BadRequest(new{error="Invalid access rule."});return Results.Json(_monitors.UpsertAccessRule(id,x.ClientId,x.IpAddress,x.MacAddress,x.ComputerName,x.UserName,p));}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private IResult DeleteAccessRule(string id,long ruleId){try{_monitors.DeleteAccessRule(id,ruleId);return Results.NoContent();}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private static IResult RunMonitorAction(Func<MonitorSnapshot> action){try{return Results.Json(action());}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private IResult RunMonitorUninstall(string id){try{_monitors.Uninstall(id);_capture.Invalidate(id);return Results.NoContent();}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+
+    private async Task<IResult> SaveSettingsAsync(HttpRequest request){var p=await request.ReadFromJsonAsync<ServerSettings>();if(p is null)return Results.BadRequest(new{error="Invalid settings payload."});if(p.Vmu.Interface.Equals("any",StringComparison.OrdinalIgnoreCase)&&!p.Web.Interface.Equals("any",StringComparison.OrdinalIgnoreCase))return Results.Conflict(new{error="Web Server interface must be 'any' while VMU Server interface is 'any'."});var ep=new[]{("VMU Server",p.Vmu.Port),("Web Server",p.Web.Port),("Web Socket",p.Socket.Port)};if(ep.Any(x=>x.Port is<1 or>65535))return Results.Conflict(new{error="Service ports must be between 1 and 65535."});var d=ep.GroupBy(x=>x.Port).FirstOrDefault(x=>x.Count()>1);if(d is not null)return Results.Conflict(new{error=$"Port {d.Key} is configured for more than one VMU service."});var active=IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Select(x=>x.Port).ToHashSet();var blocked=ep.FirstOrDefault(x=>active.Contains(x.Port)&&!_isOwnedListener(x.Port));if(blocked!=default)return Results.Conflict(new{error=$"{blocked.Item1} port {blocked.Port} is already used by another TCP listener on this computer."});return Results.Json(await _settingsSaver(p));}
+
+    private IResult LogPage()=>HtmlShell("View Log","""
+<div class="logpage"><div class="filters"><h3>Filters</h3><label><input type="checkbox" data-service="VMU" checked> VMU</label><label><input type="checkbox" data-service="VMU_SERVER" checked> VMU Server</label><label><input type="checkbox" data-service="WEB" checked> Web Server</label><label><input type="checkbox" data-service="SOCKET" checked> Socket Server</label></div><div class="logmain"><div class="toolbar"><div class="searchbox"><input id="search" placeholder="Search..."><button id="clearSearch">×</button></div></div><div class="tablewrap"><table id="log"><thead><tr><th>Timecode</th><th>Level</th><th>Service</th><th>Monitor</th><th>Event</th><th>Message</th></tr></thead><tbody></tbody></table></div><div class="logfooter"><label><input id="tail" type="checkbox" checked> Always at end</label><span id="count"></span><div><button id="exportXlsx">Export XLSX</button><button id="exportCsv">Export CSV</button><button id="exportTxt">Export TXT</button><button id="clear">Clear</button></div></div></div></div>
+<script>const q=id=>document.getElementById(id),tbody=document.querySelector('#log tbody');function query(){const p=new URLSearchParams();document.querySelectorAll('[data-service]:checked').forEach(x=>p.append('service',x.dataset.service));if(q('search').value)p.set('q',q('search').value);return p}async function refresh(){const p=query(),[rows,c]=await Promise.all([fetch('/api/log?'+p).then(r=>r.json()),fetch('/api/log/count?'+p).then(r=>r.json())]);tbody.innerHTML=rows.map(x=>`<tr><td>${new Date(x.timestamp).toLocaleString()}</td><td>${x.level}</td><td>${x.service}</td><td>${x.monitorId??''}</td><td>${x.event}</td><td>${x.message}</td></tr>`).join('');const filtered=q('search').value||document.querySelectorAll('[data-service]:not(:checked)').length;q('count').innerHTML=filtered?`Displayed <b>${c.filtered}</b> of <b>${c.total}</b> records.`:`Total records <b>${c.total}</b>`;if(q('tail').checked&&tbody.lastElementChild)tbody.lastElementChild.scrollIntoView({block:'nearest'})}document.querySelectorAll('[data-service]').forEach(x=>x.onchange=refresh);q('search').oninput=refresh;q('clearSearch').onclick=()=>{q('search').value='';refresh()};q('clear').onclick=async()=>{if(confirm('Clear the log?')){await fetch('/api/log',{method:'DELETE'});refresh()}};function exp(f){location.href='/api/log/export/'+f+'?'+query()}q('exportXlsx').onclick=()=>exp('xlsx');q('exportCsv').onclick=()=>exp('csv');q('exportTxt').onclick=()=>exp('txt');refresh();setInterval(refresh,1000)</script>
+""","logbody");
+    private IReadOnlyList<LogEntry> ReadLog(HttpRequest r){var s=r.Query["service"].Where(x=>!string.IsNullOrWhiteSpace(x)).Select(x=>x!).ToArray();return LogStore.Read(r.Query["q"].FirstOrDefault(),s.Length==0?ServiceKeys:s);}
+    private LogCount ReadLogCount(HttpRequest r){var s=r.Query["service"].Where(x=>!string.IsNullOrWhiteSpace(x)).Select(x=>x!).ToArray();return LogStore.Count(r.Query["q"].FirstOrDefault(),s.Length==0?ServiceKeys:s);}
+    private IResult ExportLog(HttpRequest r,string format){if(format is not("xlsx"or"csv"or"txt"))return Results.BadRequest();var bytes=LogExportService.ExportBytes(format,ReadLog(r));return Results.File(bytes,format=="xlsx"?"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":format=="csv"?"text/csv":"text/plain",$"vmu-log-{DateTime.Now:yyyyMMdd-HHmmss}.{format}");}
+
+    private string MonitorNavigation(){try{return string.Join("",_monitors.List().Where(m=>m.Connected&&!m.Health.IsError).Select(m=>{var a=m.Configuration.AvatarKind=="custom"?$"<img src=\"/api/monitors/{m.Configuration.Name}/avatar\">":$"<span>{MonitorAvatarService.GetEmoji(m.Configuration.AvatarKind,m.Configuration.AvatarValue)}</span>";return $"<a class=\"monitorNav\" href=\"/monitor/{Uri.EscapeDataString(m.Configuration.Name)}\">{a}<b>{System.Net.WebUtility.HtmlEncode(m.Configuration.Title)}</b></a>";}));}catch{return string.Empty;}}
+    private IResult HtmlShell(string title,string body,string bodyClass="")
+    {
+        var css="""
+*{box-sizing:border-box}html,body{margin:0;font-family:Segoe UI,Arial,sans-serif;color:#202124;background:#f5f6f8}body.logbody{height:100vh;overflow:hidden}nav{height:60px;background:#202124;display:flex;align-items:stretch;padding:0 10px;overflow-x:auto}.navwrap{position:relative;display:flex;align-items:center;border-right:1px solid #555;padding-right:10px}.gear{width:40px;height:40px;border:0;background:transparent;color:white;font-size:20px}.navmenu{display:none;position:fixed;top:52px;left:10px;background:white;border:1px solid #bbb;padding:5px;z-index:1000}.navmenu.open{display:block}.navmenu a{display:block;padding:8px;color:#222;text-decoration:none}.monitorNav{height:60px;display:flex;align-items:center;gap:7px;padding:0 14px;border-right:1px solid #555;color:#fff;text-decoration:none;white-space:nowrap}.monitorNav img{width:24px;height:24px;object-fit:contain}.page{max-width:1000px;margin:30px auto;padding:0 20px}.muted,.hint,.fieldhint{color:#687078}.cards,.stats,.projecttiles,.resources{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.service,.stats>div,.stats>a,.projecttiles>a,.resources>div{background:white;border:1px solid #d9dde3;border-radius:7px;padding:14px;display:flex;gap:8px;align-items:center;justify-content:center;color:#202124;text-decoration:none}.stats>a,.stats>div,.projecttiles>a,.resources>div{flex-direction:column}.resources span{font-size:13px}.dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:#aaa}.dot.on{background:#25a746}.settingsform{width:500px;max-width:100%}.settings{width:100%}.settings td,.settings th{padding:7px}.formgrid{display:grid;grid-template-columns:150px 220px;gap:10px;align-items:center}.actions{display:flex;gap:8px;margin-top:18px;flex-wrap:wrap}.actions button,.buttonlink,.logfooter button{padding:7px 14px}.buttonlink{border:1px solid #aaa;text-decoration:none;color:#222;background:#f4f4f4}.properties{max-width:760px}.properties>label,.properties fieldset>label{display:grid;grid-template-columns:160px 1fr;gap:12px;align-items:center;margin:10px 0}fieldset{border:1px solid #b8bec7;border-radius:4px;padding:12px;margin-top:14px}.monitorgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}.monitorcard{position:relative;background:white;border:1px solid #d9dde3;border-radius:8px;padding:18px;text-align:center;min-height:250px}.monitorcard>a{color:#202124;text-decoration:none}.monitorcard h3{height:52px;margin:8px 0;display:flex;align-items:center;justify-content:center;gap:6px}.monitorcard h3 span:last-child{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.cardtools{display:none;position:absolute;right:7px;top:7px;z-index:3}.monitorcard:hover .cardtools{display:flex}.cardtools button{border:0;background:#eef1f5;padding:5px 8px;cursor:pointer}.monitorpic{height:115px}.preview,.screen{width:125px;height:78px;border:7px solid #4b5563;border-radius:5px;margin:auto;object-fit:cover;background:#dceefa}.stand{width:45px;height:8px;background:#4b5563;margin:8px auto}.plus{font-size:92px}.avatar,.avatargrid img{width:28px;height:28px;object-fit:contain}.avatarEmoji{font-size:25px}.avatarpicker{position:relative}.avatarcurrent{font-size:34px;width:54px;height:48px}.avatargrid{position:absolute;z-index:20;display:grid;grid-template-columns:repeat(4,52px);gap:4px;background:white;border:1px solid #aaa;padding:8px;box-shadow:0 4px 14px #0003}.avatargrid button{font-size:27px;height:48px;border:1px solid #ddd;background:#fff}.avatargrid button.selected{outline:3px solid #2d7dd2;background:#e8f2ff}.customtile{display:flex;flex-direction:column;align-items:center;font-size:10px}.hidden{display:none!important}.health{display:grid;grid-template-columns:1fr auto;gap:5px}.health p{grid-column:1/3}.good{color:#218838}.bad{color:#b3261e}.subnav{display:flex;gap:12px}.subnav a,.subnav b{padding:7px 12px;background:white;border:1px solid #ccd1d8;text-decoration:none;color:#222}.arrangement{position:relative;background:#303338;border:1px solid #555;overflow:hidden}.arrdisplay{position:absolute;background:#d9dde3;border:2px solid #fff;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden}.arrdisplay.virtual{background:#cfe4ff}.arrdisplay strong{font-size:28px}.logpage{display:grid;grid-template-columns:190px minmax(0,1fr);height:calc(100vh - 60px);padding:10px;gap:8px}.filters{background:#eee;border:1px solid #ccc;padding:8px}.filters label{display:block;padding:4px}.logmain{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-height:0}.toolbar{display:flex;justify-content:flex-end;margin-bottom:6px}.tablewrap{background:white;border:1px solid #bbb;overflow:auto;min-height:0}#log{border-collapse:collapse;width:100%;font:13px Consolas,monospace}#log th{position:sticky;top:0;background:#e1e6ec;padding:6px;text-align:left}#log td{padding:5px;border-bottom:1px solid #eee;white-space:nowrap}.logfooter{display:grid;grid-template-columns:auto 1fr auto;gap:15px;align-items:center;padding-top:8px}.logfooter #count{text-align:center}.operation{background:white;border:1px solid #ccd1d8;padding:20px}.progress{height:16px;background:#ddd}.progress div{height:100%;background:#2d7dd2}.connection{display:none;position:fixed;inset:0;background:#f5f6f8f5;z-index:5000;align-items:center;justify-content:center}.connection.show{display:flex}@media(max-width:700px){.monitorNav b{display:none}.properties>label,.properties fieldset>label,.formgrid{grid-template-columns:1fr}}
 """;
-        var body = template.Replace("__RATES__", rates).Replace("__ANIMALS__", animals).Replace("__ID__", jsonId);
-        return HtmlShell("Monitor " + monitor.Configuration.Title, body);
-    }
-
-    private IResult TerminalPage(string id)
-    {
-        var monitor = _monitorService.Get(id);
-        if (monitor is null) return Results.NotFound();
-        if (!id.Equals(monitor.Configuration.Name, StringComparison.OrdinalIgnoreCase)) return Results.Redirect("/monitor/" + Uri.EscapeDataString(monitor.Configuration.Name), true);
-        var safeTitle = System.Net.WebUtility.HtmlEncode(monitor.Configuration.Title);
-        var safeName = Uri.EscapeDataString(monitor.Configuration.Name);
-        var body = $"<div class=\"page\"><h1>{safeTitle}</h1><div class=\"terminalPlaceholder\"><img src=\"/api/monitors/{safeName}/thumbnail?t={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}\"><p>Live Terminal streaming is the next capture phase.</p></div></div>";
-        return HtmlShell("Terminal " + monitor.Configuration.Title, body);
-    }
-
-    private async Task<IResult> CreateMonitorAsync(HttpRequest request)
-    {
-        try
-        {
-            var input = await request.ReadFromJsonAsync<MonitorCreateRequest>();
-            if (input is null) return Results.BadRequest(new { error = "Invalid monitor creation payload." });
-            var monitor = _monitorService.Create(input.Name, input.Title, input.Width, input.Height, input.RefreshRate, input.Portrait, input.AvatarAnimal);
-            return Results.Created($"/api/monitors/{monitor.Configuration.Name}", monitor);
-        }
-        catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
-    }
-
-    private async Task<IResult> UpdateMonitorAsync(HttpRequest request, string id)
-    {
-        try
-        {
-            var input = await request.ReadFromJsonAsync<MonitorUpdateRequest>();
-            if (input is null) return Results.BadRequest(new { error = "Invalid monitor properties payload." });
-            if (!Enum.TryParse<RemoteAccessMode>(input.RemoteAccess, true, out var remote)) return Results.BadRequest(new { error = "Invalid remote access mode." });
-            if (!Enum.TryParse<RemoteSecurityMode>(input.SecurityMode, true, out var security)) return Results.BadRequest(new { error = "Invalid security mode." });
-            return Results.Json(_monitorService.UpdateProperties(id, input.Name, input.Title, input.Width, input.Height, input.RefreshRate, input.Portrait, remote, security, input.Password, input.RegenerateApiKey, input.CollaborationClipboard, input.CollaborationMouse, input.CollaborationKeyboard));
-        }
-        catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
-    }
-
-    private async Task<IResult> GetThumbnailAsync(string id, HttpContext context)
-    {
-        try
-        {
-            var monitor = _monitorService.Get(id);
-            if (monitor is null || !monitor.Connected || string.IsNullOrWhiteSpace(monitor.DeviceName)) return Results.NotFound();
-            var bytes = await _thumbnails.GetThumbnailAsync(monitor.Configuration.VmuId, monitor.DeviceName, context.RequestAborted);
-            context.Response.Headers.CacheControl = "no-store";
-            return Results.File(bytes, "image/jpeg");
-        }
-        catch (Exception ex)
-        {
-            LogStore.Write("WARN", "WEB", "THUMBNAIL_FAILED", ex.Message, id);
-            return Results.NotFound();
-        }
-    }
-
-    private IResult GetAvatar(string id)
-    {
-        var avatar = _monitorService.GetAvatar(id);
-        return avatar is null ? Results.NotFound() : Results.File(avatar.Value.Bytes, avatar.Value.ContentType);
-    }
-
-    private async Task<IResult> UploadAvatarAsync(HttpRequest request, string id)
-    {
-        try
-        {
-            var form = await request.ReadFormAsync();
-            var file = form.Files.GetFile("file");
-            if (file is null || file.Length == 0) return Results.BadRequest(new { error = "Avatar file is required." });
-            if (file.Length > 2 * 1024 * 1024) return Results.BadRequest(new { error = "Avatar file must be at most 2 MB." });
-            await using var stream = file.OpenReadStream();
-            return Results.Json(_monitorService.SetCustomAvatar(id, file.FileName, stream));
-        }
-        catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
-    }
-
-    private async Task<IResult> UpsertAccessRuleAsync(HttpRequest request, string id)
-    {
-        try
-        {
-            var input = await request.ReadFromJsonAsync<AccessRuleRequest>();
-            if (input is null || !Enum.TryParse<AccessPermission>(input.Permission, true, out var permission)) return Results.BadRequest(new { error = "Invalid access rule." });
-            return Results.Json(_monitorService.UpsertAccessRule(id, input.ClientId, input.IpAddress, input.MacAddress, input.ComputerName, input.UserName, permission));
-        }
-        catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
-    }
-
-    private IResult DeleteAccessRule(string id, long ruleId)
-    {
-        try { _monitorService.DeleteAccessRule(id, ruleId); return Results.NoContent(); }
-        catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
-    }
-
-    private static IResult RunMonitorAction(Func<MonitorSnapshot> action)
-    {
-        try { return Results.Json(action()); }
-        catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
-    }
-
-    private IResult RunMonitorUninstall(string id)
-    {
-        try { _monitorService.Uninstall(id); _thumbnails.Invalidate(id); return Results.NoContent(); }
-        catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
-    }
-
-    private async Task<IResult> SaveSettingsAsync(HttpRequest request)
-    {
-        var proposed = await request.ReadFromJsonAsync<ServerSettings>();
-        if (proposed is null) return Results.BadRequest(new { error = "Invalid settings payload." });
-        if (proposed.Vmu.Interface.Equals("any", StringComparison.OrdinalIgnoreCase) && !proposed.Web.Interface.Equals("any", StringComparison.OrdinalIgnoreCase))
-            return Results.Conflict(new { error = "Web Server interface must be 'any' while VMU Server interface is 'any'." });
-        var endpoints = new[] { ("VMU Server", proposed.Vmu.Port), ("Web Server", proposed.Web.Port), ("Web Socket", proposed.Socket.Port) };
-        if (endpoints.Any(x => x.Port is < 1 or > 65535)) return Results.Conflict(new { error = "Service ports must be between 1 and 65535." });
-        var duplicate = endpoints.GroupBy(x => x.Port).FirstOrDefault(x => x.Count() > 1);
-        if (duplicate is not null) return Results.Conflict(new { error = $"Port {duplicate.Key} is configured for more than one VMU service." });
-        var active = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Select(x => x.Port).ToHashSet();
-        var blocked = endpoints.FirstOrDefault(x => active.Contains(x.Port) && !_isOwnedListener(x.Port));
-        if (blocked != default) return Results.Conflict(new { error = $"{blocked.Item1} port {blocked.Port} is already used by another TCP listener on this computer." });
-        return Results.Json(await _settingsSaver(proposed));
-    }
-
-    private IResult LogPage()
-    {
-        const string body = """
-<div class="logpage"><div class="filters"><h3>Filters</h3><label><input type="checkbox" data-service="VMU" checked> VMU <span class="dot" id="s-VMU"></span></label><label><input type="checkbox" data-service="VMU_SERVER" checked> VMU Server <span class="dot" id="s-VMU_SERVER"></span></label><label><input type="checkbox" data-service="WEB" checked> Web Server <span class="dot" id="s-WEB"></span></label><label><input type="checkbox" data-service="SOCKET" checked> Socket Server <span class="dot" id="s-SOCKET"></span></label></div><div class="logmain"><div class="toolbar"><div class="searchbox"><input id="search" placeholder="Search..."><button id="clearSearch">×</button></div></div><div class="tablewrap"><table id="log"><thead><tr><th data-col="timestamp">Timecode <span class="sort"></span></th><th data-col="level">Level <span class="sort"></span></th><th data-col="service">Service <span class="sort"></span></th><th data-col="monitorId">Monitor <span class="sort"></span></th><th data-col="event">Event <span class="sort"></span></th><th data-col="message">Message <span class="sort"></span></th></tr></thead><tbody></tbody></table></div><div class="logfooter"><label><input id="tail" type="checkbox" checked> Always at end</label><div><button id="exportXlsx">Export XLSX</button><button id="exportCsv">Export CSV</button><button id="exportTxt">Export TXT</button><button id="clear">Clear</button></div></div></div></div><dialog id="detail"><pre id="detailText"></pre><button id="detailClose">Close</button></dialog>
-<script>
-const q=id=>document.getElementById(id);let rows=[],sortCol=null,sortDir=1,lastSelected=null;const tbody=document.querySelector('#log tbody');
-function selected(){return [...document.querySelectorAll('[data-service]:checked')].map(x=>x.dataset.service)}function query(){const p=new URLSearchParams();selected().forEach(x=>p.append('service',x));if(q('search').value)p.set('q',q('search').value);return p}function val(x,k){if(k==='timestamp')return new Date(x[k]).getTime();return String(x[k]??'').toLocaleLowerCase()}function esc(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML}
-async function refresh(){const [data,status]=await Promise.all([fetch('/api/log?'+query()).then(r=>r.json()),fetch('/api/status',{cache:'no-store'}).then(r=>r.json())]);rows=data;status.services.forEach(x=>{const d=q('s-'+x.key);if(d)d.className='dot '+(x.running?'on':'off')});render()}
-function render(){let data=[...rows];if(!q('tail').checked&&sortCol)data.sort((a,b)=>(val(a,sortCol)<val(b,sortCol)?-1:val(a,sortCol)>val(b,sortCol)?1:0)*sortDir);document.querySelectorAll('#log th .sort').forEach(x=>x.textContent='');if(!q('tail').checked&&sortCol)document.querySelector(`#log th[data-col="${sortCol}"] .sort`).textContent=sortDir===1?'▲':'▼';tbody.innerHTML=data.map(x=>`<tr data-id="${x.id}"><td>${new Date(x.timestamp).toLocaleString()}</td><td>${x.level}</td><td>${x.service}</td><td>${x.monitorId??''}</td><td>${x.event}</td><td>${esc(x.message)}</td></tr>`).join('');const target=q('tail').checked?tbody.lastElementChild:(lastSelected&&tbody.querySelector(`[data-id="${lastSelected}"]`));if(target){target.classList.add('selected');if(q('tail').checked)target.scrollIntoView({block:'nearest'});lastSelected=target.dataset.id;}}
-tbody.onclick=e=>{const tr=e.target.closest('tr');if(!tr)return;lastSelected=tr.dataset.id;tbody.querySelectorAll('tr').forEach(x=>x.classList.remove('selected'));tr.classList.add('selected')};tbody.ondblclick=async e=>{const tr=e.target.closest('tr');if(!tr)return;q('detailText').textContent=JSON.stringify(await fetch('/api/log/'+tr.dataset.id).then(r=>r.json()),null,2);q('detail').showModal()};document.querySelectorAll('[data-service]').forEach(x=>x.onchange=refresh);q('search').oninput=refresh;q('clearSearch').onclick=()=>{q('search').value='';refresh()};q('tail').onchange=()=>{if(!q('tail').checked){sortCol='timestamp';sortDir=1}else sortCol=null;render()};document.querySelectorAll('th[data-col]').forEach(th=>th.onclick=()=>{if(q('tail').checked)return;if(sortCol===th.dataset.col)sortDir*=-1;else{sortCol=th.dataset.col;sortDir=1}render()});q('clear').onclick=async()=>{if(confirm('Clear the log?')){await fetch('/api/log',{method:'DELETE'});refresh()}};function exp(f){location.href='/api/log/export/'+f+'?'+query()}q('exportXlsx').onclick=()=>exp('xlsx');q('exportCsv').onclick=()=>exp('csv');q('exportTxt').onclick=()=>exp('txt');q('detailClose').onclick=()=>q('detail').close();refresh();setInterval(refresh,1000);
-</script>
+        var common="""
+<script>window.vmuAnimalEmoji=n=>({fox:'🦊',owl:'🦉',panda:'🐼',cat:'🐱',dog:'🐶',rabbit:'🐰',bear:'🐻',koala:'🐨',tiger:'🐯',lion:'🦁',penguin:'🐧',frog:'🐸',mouse:'🐭',cow:'🐮',pig:'🐷',monkey:'🐵'}[n]||'🖥️');const nb=document.getElementById('navButton'),nm=document.getElementById('navMenu');nb.onclick=e=>{e.stopPropagation();nm.classList.toggle('open')};document.addEventListener('click',()=>nm.classList.remove('open'));window.vmuWaitForEndpoint=async function(target,waitMs,path){const o=document.getElementById('connectionOverlay');o.classList.add('show');const started=Date.now();while(Date.now()-started<waitMs){try{if((await fetch(target+'api/health',{cache:'no-store'})).ok){location.href=target+(path||'');return}}catch{}await new Promise(r=>setTimeout(r,400))}};</script>
 """;
-        return HtmlShell("View Log", body, "logbody");
-    }
-
-    private IReadOnlyList<LogEntry> ReadLog(HttpRequest request)
-    {
-        var services = request.Query["service"].Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).ToArray();
-        return LogStore.Read(request.Query["q"].FirstOrDefault(), services.Length == 0 ? ServiceKeys : services);
-    }
-
-    private IResult ExportLog(HttpRequest request, string format)
-    {
-        if (format is not ("xlsx" or "csv" or "txt")) return Results.BadRequest();
-        var bytes = LogExportService.ExportBytes(format, ReadLog(request));
-        var contentType = format == "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : format == "csv" ? "text/csv" : "text/plain";
-        return Results.File(bytes, contentType, $"vmu-log-{DateTime.Now:yyyyMMdd-HHmmss}.{format}");
-    }
-
-    private string MonitorNavigation()
-    {
-        try
-        {
-            return string.Join("", _monitorService.List().Select(m =>
-            {
-                var avatar = m.Configuration.AvatarKind.Equals("custom", StringComparison.OrdinalIgnoreCase)
-                    ? $"<img src=\"/api/monitors/{Uri.EscapeDataString(m.Configuration.Name)}/avatar\">"
-                    : $"<span>{System.Net.WebUtility.HtmlEncode(MonitorAvatarService.GetEmoji(m.Configuration.AvatarKind, m.Configuration.AvatarValue))}</span>";
-                return $"<a class=\"monitorNav\" href=\"/monitor/{Uri.EscapeDataString(m.Configuration.Name)}\">{avatar}<b>{System.Net.WebUtility.HtmlEncode(m.Configuration.Title)}</b></a>";
-            }));
-        }
-        catch { return string.Empty; }
-    }
-
-    private IResult HtmlShell(string title, string body, string bodyClass = "")
-    {
-        var css = """
-*{box-sizing:border-box}html,body{margin:0;font-family:Segoe UI,Arial,sans-serif;color:#202124;background:#f5f6f8}body.logbody{height:100vh;overflow:hidden}nav{height:60px;background:#202124;display:flex;align-items:stretch;padding:0 10px;overflow-x:auto}.navwrap{position:relative;display:flex;align-items:center;border-right:1px solid #555;padding-right:10px;flex:0 0 auto}.gear{width:40px;height:40px;border:0;background:transparent;color:white;font-size:20px;border-radius:5px;cursor:pointer}.gear:hover{background:#34373b}.navmenu{display:none;position:fixed;top:52px;left:10px;min-width:150px;background:white;border:1px solid #bbb;border-radius:6px;box-shadow:0 5px 18px #0004;padding:5px;z-index:1000}.navmenu.open{display:block}.navmenu a{display:block;color:#202124;text-decoration:none;padding:8px 10px;border-radius:4px}.navmenu a:hover{background:#eef1f5}.monitorNav{height:60px;display:flex;align-items:center;gap:7px;padding:0 14px;border-right:1px solid #555;color:#fff;text-decoration:none;white-space:nowrap;flex:0 0 auto}.monitorNav:hover{background:#34373b}.monitorNav img{width:24px;height:24px;object-fit:contain}.monitorNav span{font-size:21px}.page{max-width:1000px;margin:30px auto;padding:0 20px}.muted,.hint,.fieldhint{color:#687078}.fieldhint{font-size:12px;margin:-5px 0 6px 172px}.cards,.stats,.projecttiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.service,.stats>div,.stats>a,.projecttiles>a{background:white;border:1px solid #d9dde3;border-radius:7px;padding:14px;display:flex;gap:10px;align-items:center;text-align:center;justify-content:center;color:#202124;text-decoration:none}.stats>a,.stats>div{flex-direction:column}.stats strong{font-size:24px}.projecttiles>a{min-height:88px;flex-direction:column}.projecttiles b{font-size:24px}.dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:#aaa}.dot.on{background:#25a746}.settingsform{width:470px;max-width:100%}.settings{border-collapse:collapse;width:100%;background:transparent}.settings th,.settings td{padding:7px 10px;text-align:left}.settings input,.settings select,.properties input,.properties select{padding:6px}.formgrid{display:grid;grid-template-columns:150px 220px;gap:10px;align-items:center}.actions{display:flex;gap:8px;margin-top:18px;align-items:center;flex-wrap:wrap}.actions button,.logfooter button,dialog button,.buttonlink,.keyrow button,.ruleadd button{padding:7px 14px}.buttonlink{border:1px solid #aaa;border-radius:3px;text-decoration:none;color:#202124;background:#f4f4f4}.danger{color:#9b1c1c}.error{color:#b3261e;margin:10px 0}.hidden{display:none!important}.invalid{border:2px solid #b3261e!important;background:#fff5f5}.monitorgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}.monitorcard{background:white;border:1px solid #d9dde3;border-radius:8px;padding:18px;text-align:center;color:#202124;text-decoration:none;min-height:230px}.monitorcard:hover{box-shadow:0 3px 10px #0002}.monitorpic{height:115px;position:relative}.preview,.screen{width:125px;height:78px;border:7px solid #4b5563;border-radius:5px;margin:auto;object-fit:cover;background:#dceefa}.stand{width:45px;height:8px;background:#4b5563;margin:8px auto}.plus{font-size:92px;line-height:120px}.avatar{width:28px;height:28px;object-fit:contain;vertical-align:middle}.avatarEmoji{font-size:25px;vertical-align:middle}.avatarcontrols{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.properties{max-width:760px}.properties>label{display:grid;grid-template-columns:160px 1fr;gap:12px;align-items:center;margin:10px 0}.properties fieldset>label{display:grid;grid-template-columns:140px 1fr;gap:10px;align-items:center;margin:10px 0}.inlinechecks{display:flex;gap:18px;margin:8px 0 12px 150px}.inlinechecks label{display:flex;gap:5px}.keyrow{display:flex;gap:8px}.keyrow input{flex:1}.accessrules{border-collapse:collapse;width:100%;font-size:13px;margin-top:12px}.accessrules th,.accessrules td{border:1px solid #ddd;padding:5px}.ruleadd{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:8px}.operation,.terminalPlaceholder{background:white;border:1px solid #ccd1d8;border-radius:8px;padding:20px;margin-top:18px}.terminalPlaceholder img{max-width:100%;border:1px solid #555}.logpage{display:grid;grid-template-columns:190px minmax(0,1fr);height:calc(100vh - 60px);padding:10px;gap:8px;overflow:hidden}.filters{background:#eee;border:1px solid #ccc;padding:8px;overflow:auto}.filters label{display:flex;align-items:center;gap:5px;padding:4px}.filters .dot{margin-left:auto}.logmain{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0}.toolbar{display:flex;justify-content:flex-end;margin-bottom:6px}.searchbox{display:flex}.searchbox input{width:260px;padding:6px}.searchbox button{width:30px}.tablewrap{background:white;border:1px solid #bbb;overflow:auto;min-height:0}#log{border-collapse:collapse;width:100%;font:13px Consolas,monospace}#log th{position:sticky;top:0;background:#e1e6ec;border-bottom:1px solid #aaa;padding:6px;text-align:left;cursor:pointer;z-index:2}#log td{padding:5px;border-bottom:1px solid #eee;white-space:nowrap}#log tr.selected{background:#cfe4ff}.logfooter{display:flex;justify-content:space-between;align-items:center;padding-top:8px}.logfooter>div{display:flex;gap:6px}fieldset{border:1px solid #b8bec7;border-radius:4px;padding:12px;margin-top:14px}dialog{max-width:800px;width:70%;border:1px solid #888;border-radius:6px}.connection{display:none;position:fixed;inset:0;background:#f5f6f8f5;z-index:5000;align-items:center;justify-content:center}.connection.show{display:flex}.connectionbox{width:min(600px,90vw);text-align:center;background:white;border:1px solid #ccd1d8;border-radius:9px;padding:28px}.progress{height:16px;background:#ddd;border-radius:9px;overflow:hidden;margin:18px 0}.progress div{height:100%;width:0;background:#2d7dd2;transition:width .1s}@media(max-width:700px){.monitorNav b{display:none}.properties>label,.properties fieldset>label,.formgrid{grid-template-columns:1fr}.fieldhint,.inlinechecks{margin-left:0}.ruleadd{grid-template-columns:1fr}}
-""";
-        var commonScript = """
-<script>
-window.vmuAnimalEmoji=n=>({fox:'🦊',owl:'🦉',panda:'🐼',cat:'🐱',dog:'🐶',rabbit:'🐰',bear:'🐻',koala:'🐨',tiger:'🐯',lion:'🦁',penguin:'🐧',frog:'🐸'}[n]||'🖥️');
-const navButton=document.getElementById('navButton'),navMenu=document.getElementById('navMenu');navButton.onclick=e=>{e.stopPropagation();navMenu.classList.toggle('open')};document.addEventListener('click',()=>navMenu.classList.remove('open'));navMenu.onclick=e=>e.stopPropagation();
-let vmuHealthFailures=0,vmuRecoveryRunning=false;async function vmuHealth(){try{const r=await fetch('/api/health',{cache:'no-store'});if(!r.ok)throw new Error();vmuHealthFailures=0}catch{vmuHealthFailures++;if(vmuHealthFailures>=2&&!vmuRecoveryRunning)window.vmuWaitForEndpoint(location.origin+'/',10000,null)}}setInterval(vmuHealth,1000);
-window.vmuWaitForEndpoint=async function(target,waitMs,path){if(vmuRecoveryRunning)return;vmuRecoveryRunning=true;const overlay=document.getElementById('connectionOverlay'),bar=document.getElementById('connectionBar'),headline=document.getElementById('connectionHeadline'),message=document.getElementById('connectionMessage'),retry=document.getElementById('connectionRetry');overlay.classList.add('show');headline.textContent='Restarting Web Server...';message.textContent='Waiting for VMU to become available.';retry.classList.add('hidden');const started=Date.now(),timer=setInterval(()=>bar.style.width=Math.min(99,Math.round((Date.now()-started)/waitMs*100))+'%',100);while(Date.now()-started<waitMs){try{const r=await fetch(target+'api/health',{cache:'no-store'});if(r.ok){clearInterval(timer);bar.style.width='100%';setTimeout(()=>location.href=target+(path||location.pathname.replace(/^\//,'')),250);return}}catch{}await new Promise(r=>setTimeout(r,350))}clearInterval(timer);headline.textContent='Connection to VMU was lost';retry.classList.remove('hidden');retry.onclick=()=>{vmuRecoveryRunning=false;bar.style.width='0';window.vmuWaitForEndpoint(target,waitMs,path)}};
-</script>
-""";
-        var html = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>" + System.Net.WebUtility.HtmlEncode(title) + " - VMU</title><style>" + css + "</style></head><body class=\"" + bodyClass + "\"><nav><div class=\"navwrap\"><button id=\"navButton\" class=\"gear\" title=\"Navigation\">⚙</button><div id=\"navMenu\" class=\"navmenu\"><a href=\"/\">Status</a><a href=\"/monitors\">Monitors</a><a href=\"/settings\">Settings</a><a href=\"/log\">View Log</a></div></div>" + MonitorNavigation() + "</nav>" + body + "<div id=\"connectionOverlay\" class=\"connection\"><div class=\"connectionbox\"><h1 id=\"connectionHeadline\">Restarting Web Server...</h1><div class=\"progress\"><div id=\"connectionBar\"></div></div><p id=\"connectionMessage\"></p><button id=\"connectionRetry\" class=\"hidden\">Retry</button></div></div>" + commonScript + "</body></html>";
-        return Results.Content(html, "text/html; charset=utf-8");
+        return Results.Content("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>"+System.Net.WebUtility.HtmlEncode(title)+" - VMU</title><style>"+css+"</style></head><body class=\""+bodyClass+"\"><nav><div class=\"navwrap\"><button id=\"navButton\" class=\"gear\">⚙</button><div id=\"navMenu\" class=\"navmenu\"><a href=\"/\">Status</a><a href=\"/monitors\">Monitors</a><a href=\"/settings\">Settings</a><a href=\"/log\">View Log</a></div></div>"+MonitorNavigation()+"</nav>"+body+"<div id=\"connectionOverlay\" class=\"connection\"><h1>Waiting for VMU...</h1></div>"+common+"</body></html>","text/html; charset=utf-8");
     }
 }
 
 internal sealed class WebSocketServerService : NetworkService
 {
-    public WebSocketServerService(LogStore logStore) : base("Socket Server", "SOCKET", logStore) { }
-
-    protected override void ConfigureApplication(WebApplication application)
-    {
-        application.UseWebSockets();
-        application.Map("/", async context =>
-        {
-            if (!context.WebSockets.IsWebSocketRequest)
-            {
-                context.Response.StatusCode = StatusCodes.Status426UpgradeRequired;
-                await context.Response.WriteAsync("WebSocket endpoint");
-                return;
-            }
-
-            using var socket = await context.WebSockets.AcceptWebSocketAsync();
-            var buffer = new byte[4096];
-            while (socket.State == System.Net.WebSockets.WebSocketState.Open)
-            {
-                var result = await socket.ReceiveAsync(buffer, context.RequestAborted);
-                if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close)
-                {
-                    await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "Closing", context.RequestAborted);
-                    break;
-                }
-            }
-        });
-    }
+    public WebSocketServerService(LogStore logStore):base("Socket Server","SOCKET",logStore){}
+    protected override void ConfigureApplication(WebApplication app){app.UseWebSockets();app.Map("/",async context=>{if(!context.WebSockets.IsWebSocketRequest){context.Response.StatusCode=426;return;}using var socket=await context.WebSockets.AcceptWebSocketAsync();var buffer=new byte[4096];while(socket.State==System.Net.WebSockets.WebSocketState.Open){var r=await socket.ReceiveAsync(buffer,context.RequestAborted);if(r.MessageType==System.Net.WebSockets.WebSocketMessageType.Close){await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure,"Closing",context.RequestAborted);break;}}});}
 }
