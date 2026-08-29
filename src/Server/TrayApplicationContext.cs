@@ -48,7 +48,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _logStore = new LogStore(databasePath);
         _monitorService = new MonitorApplicationService(new MonitorStore(databasePath), _logStore, _dataRoot);
         _webService = new WebServerService(_logStore, _monitorService, GetStatusSnapshot, () => ServerSettings.Load(_settingsPath), SaveSettingsFromWebAsync, IsOwnedListener);
-        _socketService = new WebSocketServerService(_logStore);
+        var remoteActions = new RemoteActionRegistry(_monitorService, () => ServerSettings.Load(_settingsPath).Web.Port);
+        _socketService = new WebSocketServerService(_logStore, remoteActions);
 
         ApplyLogRetention();
         _logStore.Write("INFO", "VMU", "APPLICATION_START", $"{ProjectInfo.ProductName} {ProjectInfo.Version} started", detailsJson: JsonSerializer.Serialize(new
