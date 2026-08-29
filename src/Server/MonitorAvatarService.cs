@@ -5,15 +5,15 @@ namespace VirtualMonitorsUniverse.Server;
 
 internal static class MonitorAvatarService
 {
-    private static readonly string[] Animals = ["fox", "owl", "panda", "cat", "dog", "rabbit", "bear", "koala", "tiger", "lion", "penguin", "frog"];
+    private static readonly string[] Animals = ["fox", "owl", "panda", "cat", "dog", "rabbit", "bear", "koala", "tiger", "lion", "penguin", "frog", "mouse", "cow", "pig", "monkey"];
     private static readonly Dictionary<string, string> Emoji = new(StringComparer.OrdinalIgnoreCase)
     {
         ["fox"] = "🦊", ["owl"] = "🦉", ["panda"] = "🐼", ["cat"] = "🐱", ["dog"] = "🐶", ["rabbit"] = "🐰",
         ["bear"] = "🐻", ["koala"] = "🐨", ["tiger"] = "🐯", ["lion"] = "🦁", ["penguin"] = "🐧", ["frog"] = "🐸",
+        ["mouse"] = "🐭", ["cow"] = "🐮", ["pig"] = "🐷", ["monkey"] = "🐵",
     };
 
     public static string RandomAnimal() => Animals[RandomNumberGenerator.GetInt32(Animals.Length)];
-
     public static IReadOnlyList<string> AnimalNames => Animals;
 
     public static string GetEmoji(string? avatarKind, string? avatarValue)
@@ -26,11 +26,7 @@ internal static class MonitorAvatarService
             var path = Path.Combine(dataRoot, "avatars", monitor.AvatarValue);
             if (File.Exists(path))
             {
-                try
-                {
-                    using var source = Image.FromFile(path);
-                    return new Bitmap(source, new Size(20, 20));
-                }
+                try { using var source = Image.FromFile(path); return new Bitmap(source, new Size(20, 20)); }
                 catch { }
             }
         }
@@ -46,20 +42,22 @@ internal static class MonitorAvatarService
     public static string SaveCustom(string dataRoot, string vmuId, string fileName, Stream content)
     {
         var extension = Path.GetExtension(fileName).ToLowerInvariant();
-        if (extension is not (".png" or ".ico" or ".gif"))
-            throw new InvalidOperationException("Avatar must be a PNG, ICO or GIF file.");
-
+        if (extension is not (".png" or ".ico" or ".gif")) throw new InvalidOperationException("Avatar must be a PNG, ICO or GIF file.");
         var directory = Path.Combine(dataRoot, "avatars");
         Directory.CreateDirectory(directory);
-        foreach (var old in Directory.EnumerateFiles(directory, vmuId + ".*"))
-        {
-            try { File.Delete(old); } catch { }
-        }
-
+        DeleteCustom(dataRoot, vmuId);
         var storedName = vmuId + extension;
         using var output = File.Create(Path.Combine(directory, storedName));
         content.CopyTo(output);
         return storedName;
+    }
+
+    public static void DeleteCustom(string dataRoot, string vmuId)
+    {
+        var directory = Path.Combine(dataRoot, "avatars");
+        if (!Directory.Exists(directory)) return;
+        foreach (var old in Directory.EnumerateFiles(directory, vmuId + ".*"))
+            try { File.Delete(old); } catch { }
     }
 
     public static byte[]? ReadCustom(string dataRoot, string? avatarValue)
