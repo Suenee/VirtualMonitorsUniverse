@@ -126,7 +126,10 @@ internal sealed class MonitorThumbnailService
         var released = false;
         try
         {
-            var result = duplication.AcquireNextFrame(1000, out _, out resource);
+            // Desktop Duplication wakes immediately when the desktop changes. A longer
+            // idle timeout therefore reduces duplicate keepalive JPEG traffic without
+            // adding latency to real screen updates.
+            var result = duplication.AcquireNextFrame(5000, out _, out resource);
             if (result.Failure)
             {
                 if (result.Code == dxgiErrorWaitTimeout && previousFrame is not null) return previousFrame;
