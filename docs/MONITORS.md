@@ -5,28 +5,38 @@ Windows display numbers such as `DISPLAY1` and the Windows **Identify** number a
 
 ## Shared control path
 
-The tray application, Web Client, REST API and CLI must use the same .NET Core monitor-control implementation. The Web and tray layers must not reimplement display topology logic.
+The tray application, Web Client, REST API and CLI use the same .NET Core monitor-control implementation. The Web and tray layers do not reimplement display topology or VDD node lifecycle logic.
 
-The currently validated operations are based on the C# ports of the final ALPHA behavior:
+The production path is based on the C# port of the final ALPHA multi-VDD acceptance sequence:
 
-- CCD topology capture and replay for disconnect/reconnect
+- installation of an individual VDD PnP device node
+- stable discovery of its real PnP `InstanceId`
+- mapping of that `InstanceId` to the active CCD/GDI identity
+- isolated CCD disconnect/reconnect
 - anchor-aware resolution reflow
-- Windows virtual-display discovery
-- display-mode inspection
+- isolated uninstall of one VDD node by PnP `InstanceId`
+- verification that another VDD remains unaffected
 
-If a requested operation cannot be mapped safely to these Core APIs, VMU must fail with a useful diagnostic rather than fall back to unstable Windows monitor numbers.
+The same `WindowsVddNodeService` is used by the ALPHA CLI self-test and by VMU Server. VMU never selects a monitor for destructive operations by `DISPLAYxx` ordering.
 
-## Persistent metadata
+## Persistent identity and metadata
 
-Monitor metadata is stored in `data/vmu.db` and currently includes:
+Monitor metadata is stored in `data/vmu.db` and includes:
 
-- `vmu_id`
+- stable `vmu_id`
 - user-friendly name
-- observed Windows device binding
+- Windows GDI device name as an observed/runtime binding
+- stable VDD PnP `InstanceId`
 - resolution and refresh rate
 - orientation
 - remote-access mode
 - remote-access security settings
+
+On creation VMU snapshots the existing VDD PnP instance IDs, installs exactly one additional validated VDD node, verifies that exactly one new `InstanceId` appeared, resolves its live CCD identity and binds that identity to the new `vmu_id`.
+
+On uninstall VMU removes the selected VDD node by its persisted PnP `InstanceId`. This is the same isolation mechanism exercised by the final ALPHA multi-VDD self-test.
+
+## Remote access
 
 The remote-access mode is one of:
 
@@ -51,11 +61,3 @@ The White/Black List approval setting is reserved for the future remote-access c
 - Block
 
 `Defer` must not create a permanent rule.
-
-## Current provisioning boundary
-
-Existing Windows virtual displays are discovered and assigned a durable VMU record automatically.
-
-Creating or uninstalling one specific VDD target is intentionally not performed until Core exposes an operation that can prove it is acting on the requested `vmu_id`. VMU must not implement these operations by guessing from `DISPLAYxx` ordering.
-
-This limitation is visible in the Web Client instead of being hidden behind simulated success.
