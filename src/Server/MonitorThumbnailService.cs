@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
-using System.Runtime.CompilerServices;
 using SharpGen.Runtime;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
@@ -14,8 +13,9 @@ namespace VirtualMonitorsUniverse.Server;
 /// <summary>
 /// Captures exact monitor frames through DXGI Desktop Duplication.
 /// Thumbnail capture remains cached. Live Terminal capture runs as one shared,
-/// demand-driven producer per monitor and exposes only the newest frame to each
-/// viewer. Capture cadence is driven by DXGI changes, not by a fixed timer.
+/// demand-driven producer per monitor. Each HTTP client keeps its own sequence
+/// cursor so a slow sender skips stale frames and receives the newest frame.
+/// Capture cadence is driven by DXGI changes, not by a fixed timer.
 /// </summary>
 internal sealed class MonitorThumbnailService
 {
@@ -23,6 +23,7 @@ internal sealed class MonitorThumbnailService
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _thumbnailLocks = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, LiveFrameFeed> _liveFeeds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<CancellationToken, LiveClientCursor> _liveClients = new();
     private readonly TimeSpan _cacheLifetime = TimeSpan.FromSeconds(5);
 
     public async Task<byte[]> GetThumbnailAsync(string cacheKey, string deviceName, CancellationToken cancellationToken)
@@ -52,43 +53,48 @@ internal sealed class MonitorThumbnailService
         }
     }
 
-    public async IAsyncEnumerable<byte[]> StreamLiveFramesAsync(
-        string cacheKey,
-        string deviceName,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+    public async Task<byte[]> GetLiveFrameAsync(string cacheKey, string deviceName, CancellationToken cancellationToken)
     {
-        LiveFrameFeed feed;
-        while (true)
-        {
-            feed = _liveFeeds.GetOrAdd(cacheKey, _ => new LiveFrameFeed(deviceName));
-            if (feed.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase)) break;
+        var feed = GetOrCreateLiveFeed(cacheKey, deviceName);
+        feed.Touch();
 
-            if (_liveFeeds.TryRemove(cacheKey, out var stale)) await stale.DisposeAsync();
+        var cursor = _liveClients.GetOrAdd(cancellationToken, token =>
+        {
+            var created = new LiveClientCursor(feed);
+            if (token.CanBeCanceled)
+            {
+                created.Registration = token.Register(() =>
+                {
+                    if (_liveClients.TryRemove(token, out var removed)) removed.Registration.Dispose();
+                });
+            }
+            return created;
+        });
+
+        if (!ReferenceEquals(cursor.Feed, feed))
+        {
+            cursor.Registration.Dispose();
+            _liveClients.TryRemove(cancellationToken, out _);
+            return await GetLiveFrameAsync(cacheKey, deviceName, cancellationToken);
         }
 
-        feed.AddViewer();
-        long sequence = 0;
-        try
-        {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var frame = await feed.WaitNextAsync(sequence, cancellationToken);
-                sequence = frame.Sequence;
-                yield return frame.JpegBytes;
-            }
-        }
-        finally
-        {
-            if (feed.RemoveViewer() == 0)
-            {
-                if (_liveFeeds.TryGetValue(cacheKey, out var current) && ReferenceEquals(current, feed))
-                    _liveFeeds.TryRemove(cacheKey, out _);
-                await feed.DisposeAsync();
-            }
-        }
+        var frame = await feed.WaitNextAsync(cursor.Sequence, cancellationToken);
+        cursor.Sequence = frame.Sequence;
+        return frame.JpegBytes;
     }
 
     public void Invalidate(string cacheKey) => _cache.TryRemove(cacheKey, out _);
+
+    private LiveFrameFeed GetOrCreateLiveFeed(string cacheKey, string deviceName)
+    {
+        while (true)
+        {
+            var feed = _liveFeeds.GetOrAdd(cacheKey, _ => new LiveFrameFeed(deviceName));
+            if (feed.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase)) return feed;
+
+            if (_liveFeeds.TryRemove(cacheKey, out var stale)) _ = stale.DisposeAsync();
+        }
+    }
 
     private static byte[] CaptureFrame(string deviceName, int maximumWidth, long quality)
     {
@@ -264,8 +270,17 @@ internal sealed class MonitorThumbnailService
     private sealed record CaptureOutcome(byte[] JpegBytes, bool Changed, TimeSpan EncodeDuration);
     private sealed record LiveFrame(long Sequence, byte[] JpegBytes);
 
+    private sealed class LiveClientCursor
+    {
+        public LiveClientCursor(LiveFrameFeed feed) => Feed = feed;
+        public LiveFrameFeed Feed { get; }
+        public long Sequence { get; set; }
+        public CancellationTokenRegistration Registration { get; set; }
+    }
+
     private sealed class LiveFrameFeed : IAsyncDisposable
     {
+        private static readonly TimeSpan ActiveWindow = TimeSpan.FromSeconds(2);
         private readonly object _sync = new();
         private readonly CancellationTokenSource _stop = new();
         private readonly LiveCaptureSession _session;
@@ -274,7 +289,7 @@ internal sealed class MonitorThumbnailService
         private byte[]? _lastFrame;
         private Exception? _failure;
         private long _sequence;
-        private int _viewers;
+        private long _activeUntilTicks;
         private bool _completed;
 
         public LiveFrameFeed(string deviceName)
@@ -294,8 +309,7 @@ internal sealed class MonitorThumbnailService
             }
         }
 
-        public void AddViewer() => Interlocked.Increment(ref _viewers);
-        public int RemoveViewer() => Interlocked.Decrement(ref _viewers);
+        public void Touch() => Interlocked.Exchange(ref _activeUntilTicks, DateTime.UtcNow.Add(ActiveWindow).Ticks);
 
         public async Task<LiveFrame> WaitNextAsync(long afterSequence, CancellationToken cancellationToken)
         {
@@ -319,6 +333,12 @@ internal sealed class MonitorThumbnailService
             {
                 while (!_stop.IsCancellationRequested)
                 {
+                    if (DateTime.UtcNow.Ticks > Interlocked.Read(ref _activeUntilTicks))
+                    {
+                        await Task.Delay(100, _stop.Token);
+                        continue;
+                    }
+
                     var capture = await Task.Run(_session.CaptureFrame, _stop.Token);
                     if (!capture.Changed) continue;
 
