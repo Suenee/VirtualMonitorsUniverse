@@ -18,6 +18,7 @@ internal sealed record AccessRuleRequest(string ClientId, string? IpAddress, str
 internal sealed record MonitorOrderRequest(string[] Ids);
 internal sealed record ArrangementDisplayRequest(string DeviceName, int X, int Y);
 internal sealed record ArrangementApplyRequest(ArrangementDisplayRequest[] Displays);
+internal sealed record TerminalMouseRequest(string Type, double? X, double? Y, int Button, int Delta);
 
 internal abstract class NetworkService : IAsyncDisposable
 {
@@ -101,6 +102,7 @@ internal sealed class WebServerService : NetworkService
     private static readonly string[] ServiceKeys = ["VMU", "VMU_SERVER", "WEB", "SOCKET"];
     private readonly MonitorApplicationService _monitors;
     private readonly MonitorThumbnailService _capture = new();
+    private readonly TerminalMouseService _mouse = new();
     private readonly SystemResourceService _resources = new();
     private readonly DisplayArrangementCoordinator _arrangements;
     private readonly Func<IReadOnlyDictionary<string, bool>> _statusProvider;
@@ -163,6 +165,7 @@ internal sealed class WebServerService : NetworkService
         app.MapPost("/api/monitors/{id}/uninstall", Uninstall);
         app.MapGet("/api/monitors/{id}/thumbnail", ThumbnailAsync);
         app.MapGet("/api/monitors/{id}/live", LiveAsync);
+        app.MapPost("/api/monitors/{id}/mouse", TerminalMouseAsync);
         app.MapGet("/api/monitors/{id}/avatar", Avatar);
         app.MapPost("/api/monitors/{id}/avatar/animal/{animal}", (string id, string animal) => Action(() => _monitors.SetAnimalAvatar(id, animal)));
         app.MapPost("/api/monitors/{id}/avatar/upload", UploadAvatarAsync);
@@ -292,6 +295,34 @@ internal sealed class WebServerService : NetworkService
             return Results.NoContent();
         }
         catch (Exception ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private async Task<IResult> TerminalMouseAsync(HttpRequest request, HttpContext context, string id)
+    {
+        var remote = context.Connection.RemoteIpAddress;
+        if (remote is null || !IPAddress.IsLoopback(remote))
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
+        if (!IsVmuServerRunning())
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+
+        var monitor = _monitors.Get(id);
+        if (monitor is null) return Results.NotFound();
+        if (!monitor.Connected || monitor.Health.IsError)
+            return Results.Conflict(new { error = "The monitor is not connected and healthy." });
+        if (!monitor.Configuration.CollaborationMouse)
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
+
+        try
+        {
+            var payload = await request.ReadFromJsonAsync<TerminalMouseRequest>();
+            if (payload is null) return Results.BadRequest();
+            _mouse.Apply(monitor, payload);
+            return Results.NoContent();
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
         {
             return Results.BadRequest(new { error = ex.Message });
         }
