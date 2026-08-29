@@ -1,9 +1,10 @@
 using System.Security.Cryptography;
-using System.Text;
+using System.Text.Json.Serialization;
 using Microsoft.Data.Sqlite;
 
 namespace VirtualMonitorsUniverse.Server;
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
 internal enum RemoteAccessMode
 {
     Disabled,
@@ -102,33 +103,50 @@ internal sealed class MonitorStore
         bool approvalEnabled)
     {
         var existing = Get(vmuId) ?? throw new KeyNotFoundException($"Monitor '{vmuId}' was not found.");
-        var apiKey = existing.ApiKey;
-        if (apiKeyEnabled && (string.IsNullOrWhiteSpace(apiKey) || regenerateApiKey)) apiKey = GenerateUniqueApiKey();
-        if (!apiKeyEnabled) apiKey = null;
+        var requestedName = string.IsNullOrWhiteSpace(friendlyName) ? existing.FriendlyName : friendlyName.Trim();
+        var passwordHash = string.IsNullOrEmpty(password) ? null : HashPassword(password);
 
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            UPDATE monitors SET friendly_name=$name,width=$width,height=$height,refresh_rate=$refresh,portrait=$portrait,
-                remote_access=$remote,password_enabled=$password_enabled,
-                password_hash=CASE WHEN $password_hash IS NULL THEN password_hash ELSE $password_hash END,
-                api_key_enabled=$api_enabled,api_key=$api_key,approval_enabled=$approval
-            WHERE vmu_id=$id
-            """;
-        command.Parameters.AddWithValue("$id", vmuId);
-        command.Parameters.AddWithValue("$name", string.IsNullOrWhiteSpace(friendlyName) ? existing.FriendlyName : friendlyName.Trim());
-        command.Parameters.AddWithValue("$width", width);
-        command.Parameters.AddWithValue("$height", height);
-        command.Parameters.AddWithValue("$refresh", refreshRate);
-        command.Parameters.AddWithValue("$portrait", portrait ? 1 : 0);
-        command.Parameters.AddWithValue("$remote", remoteAccess.ToString());
-        command.Parameters.AddWithValue("$password_enabled", passwordEnabled ? 1 : 0);
-        command.Parameters.AddWithValue("$password_hash", string.IsNullOrEmpty(password) ? DBNull.Value : HashPassword(password));
-        command.Parameters.AddWithValue("$api_enabled", apiKeyEnabled ? 1 : 0);
-        command.Parameters.AddWithValue("$api_key", (object?)apiKey ?? DBNull.Value);
-        command.Parameters.AddWithValue("$approval", approvalEnabled ? 1 : 0);
-        command.ExecuteNonQuery();
-        return Get(vmuId)!;
+        for (var attempt = 0; attempt < 16; attempt++)
+        {
+            var apiKey = existing.ApiKey;
+            if (apiKeyEnabled && (string.IsNullOrWhiteSpace(apiKey) || regenerateApiKey || attempt > 0)) apiKey = GenerateUniqueApiKey();
+            if (!apiKeyEnabled) apiKey = null;
+
+            try
+            {
+                using var connection = Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    UPDATE monitors SET friendly_name=$name,width=$width,height=$height,refresh_rate=$refresh,portrait=$portrait,
+                        remote_access=$remote,password_enabled=$password_enabled,
+                        password_hash=CASE WHEN $password_hash IS NULL THEN password_hash ELSE $password_hash END,
+                        api_key_enabled=$api_enabled,api_key=$api_key,approval_enabled=$approval
+                    WHERE vmu_id=$id
+                    """;
+                command.Parameters.AddWithValue("$id", vmuId);
+                command.Parameters.AddWithValue("$name", requestedName);
+                command.Parameters.AddWithValue("$width", width);
+                command.Parameters.AddWithValue("$height", height);
+                command.Parameters.AddWithValue("$refresh", refreshRate);
+                command.Parameters.AddWithValue("$portrait", portrait ? 1 : 0);
+                command.Parameters.AddWithValue("$remote", remoteAccess.ToString());
+                command.Parameters.AddWithValue("$password_enabled", passwordEnabled ? 1 : 0);
+                command.Parameters.AddWithValue("$password_hash", (object?)passwordHash ?? DBNull.Value);
+                command.Parameters.AddWithValue("$api_enabled", apiKeyEnabled ? 1 : 0);
+                command.Parameters.AddWithValue("$api_key", (object?)apiKey ?? DBNull.Value);
+                command.Parameters.AddWithValue("$approval", approvalEnabled ? 1 : 0);
+                command.ExecuteNonQuery();
+                return Get(vmuId)!;
+            }
+            catch (SqliteException ex) when (apiKeyEnabled && ex.SqliteErrorCode == 19)
+            {
+                // A concurrent save may have claimed the same random key between the
+                // pre-check and UPDATE. The database UNIQUE constraint is authoritative;
+                // generate another key instead of ever accepting a duplicate.
+            }
+        }
+
+        throw new InvalidOperationException("Could not generate a unique API key after repeated attempts.");
     }
 
     private string GenerateUniqueApiKey()
