@@ -64,6 +64,9 @@ internal sealed class MonitorApplicationService
 
             var display = ResolveDisplay(identity.GdiName);
             var actualRefresh = checked((int)(display.Mode?.RefreshRate ?? (uint)refreshRate));
+            if (Math.Abs(actualRefresh - refreshRate) > 1)
+                throw new InvalidOperationException($"Requested {refreshRate} Hz, but Windows reports {actualRefresh} Hz for the new monitor.");
+
             var discovered = _store.EnsureForDevice(identity.GdiName, newInstanceId, targetWidth, targetHeight, actualRefresh);
             var record = _store.Update(
                 discovered.VmuId,
