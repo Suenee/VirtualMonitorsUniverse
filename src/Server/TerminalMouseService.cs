@@ -3,9 +3,10 @@ using System.Runtime.InteropServices;
 namespace VirtualMonitorsUniverse.Server;
 
 /// <summary>
-/// Applies local Terminal mouse input to the Windows desktop coordinates occupied
-/// by a connected VMU monitor. The browser sends normalized monitor coordinates;
-/// this service performs the final Windows coordinate translation and input call.
+/// Applies Terminal mouse input to the Windows desktop coordinates occupied by a
+/// connected VMU monitor. Localhost can use a portal hand-off: the real Windows
+/// cursor enters the virtual display and a lightweight watcher returns it to the
+/// browser-side entry point when it reaches a virtual-display edge.
 /// </summary>
 internal sealed class TerminalMouseService
 {
@@ -17,6 +18,8 @@ internal sealed class TerminalMouseService
     private const uint MouseeventfMiddledown = 0x0020;
     private const uint MouseeventfMiddleup = 0x0040;
     private const uint MouseeventfWheel = 0x0800;
+    private readonly object _portalSync = new();
+    private CancellationTokenSource? _portalCancellation;
 
     public void Apply(MonitorSnapshot monitor, TerminalMouseRequest request)
     {
@@ -42,6 +45,9 @@ internal sealed class TerminalMouseService
         {
             case "move":
                 return;
+            case "portal":
+                StartLocalPortalWatcher(monitor, request.Button, request.Delta);
+                return;
             case "down":
                 SendButton(request.Button, down: true);
                 return;
@@ -54,6 +60,56 @@ internal sealed class TerminalMouseService
             default:
                 throw new ArgumentException($"Unsupported Terminal mouse event '{request.Type}'.", nameof(request));
         }
+    }
+
+    private void StartLocalPortalWatcher(MonitorSnapshot monitor, int returnX, int returnY)
+    {
+        CancellationTokenSource cancellation;
+        lock (_portalSync)
+        {
+            _portalCancellation?.Cancel();
+            _portalCancellation?.Dispose();
+            cancellation = new CancellationTokenSource();
+            _portalCancellation = cancellation;
+        }
+
+        var left = monitor.PositionX!.Value;
+        var top = monitor.PositionY!.Value;
+        var right = left + Math.Max(1, monitor.Width) - 1;
+        var bottom = top + Math.Max(1, monitor.Height) - 1;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // Do not immediately interpret an entry close to an edge as an exit.
+                await Task.Delay(140, cancellation.Token);
+                while (!cancellation.IsCancellationRequested)
+                {
+                    if (!GetCursorPos(out var point)) return;
+                    if (point.X < left || point.X > right || point.Y < top || point.Y > bottom) return;
+                    if (point.X <= left + 1 || point.X >= right - 1 || point.Y <= top + 1 || point.Y >= bottom - 1)
+                    {
+                        SetCursorPos(returnX, returnY);
+                        return;
+                    }
+                    await Task.Delay(8, cancellation.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            finally
+            {
+                lock (_portalSync)
+                {
+                    if (ReferenceEquals(_portalCancellation, cancellation))
+                    {
+                        _portalCancellation.Dispose();
+                        _portalCancellation = null;
+                    }
+                }
+            }
+        });
     }
 
     private static void SendButton(int button, bool down)
@@ -94,8 +150,19 @@ internal sealed class TerminalMouseService
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetCursorPos(int x, int y);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out Point point);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint inputCount, Input[] inputs, int inputSize);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Point
+    {
+        public int X;
+        public int Y;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Input
