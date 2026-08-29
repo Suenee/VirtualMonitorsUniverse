@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using System.Drawing;
 using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using SharpGen.Runtime;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
@@ -12,29 +12,28 @@ namespace VirtualMonitorsUniverse.Server;
 
 /// <summary>
 /// Captures exact monitor frames through DXGI Desktop Duplication.
-/// Thumbnail capture remains cached, while live Terminal capture reuses its
-/// D3D11/Desktop Duplication objects between frames. If a live session already
-/// owns an output, its latest immutable JPEG frame is reused for preview instead
-/// of opening a competing Desktop Duplication session for the same monitor.
+/// Thumbnail capture remains cached. Live Terminal capture uses one shared,
+/// demand-driven producer per monitor so slow clients never block acquisition
+/// and every viewer receives the newest available immutable JPEG frame.
 /// </summary>
 internal sealed class MonitorThumbnailService
 {
     private static readonly FeatureLevel[] FeatureLevels = [FeatureLevel.Level_11_1, FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0];
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _captureLocks = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, LiveCaptureSession> _liveSessions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _thumbnailLocks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, LiveFrameFeed> _liveFeeds = new(StringComparer.OrdinalIgnoreCase);
     private readonly TimeSpan _cacheLifetime = TimeSpan.FromSeconds(5);
 
     public async Task<byte[]> GetThumbnailAsync(string cacheKey, string deviceName, CancellationToken cancellationToken)
     {
         if (_cache.TryGetValue(cacheKey, out var cached) && DateTime.UtcNow - cached.CreatedUtc < _cacheLifetime) return cached.JpegBytes;
-        var gate = _captureLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
+        var gate = _thumbnailLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken);
         try
         {
             if (_cache.TryGetValue(cacheKey, out cached) && DateTime.UtcNow - cached.CreatedUtc < _cacheLifetime) return cached.JpegBytes;
 
-            if (_liveSessions.TryGetValue(cacheKey, out var live)
+            if (_liveFeeds.TryGetValue(cacheKey, out var live)
                 && live.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase)
                 && live.LastFrame is { Length: > 0 } liveFrame)
             {
@@ -52,36 +51,39 @@ internal sealed class MonitorThumbnailService
         }
     }
 
-    public async Task<byte[]> GetLiveFrameAsync(string cacheKey, string deviceName, CancellationToken cancellationToken)
+    public async IAsyncEnumerable<byte[]> StreamLiveFramesAsync(
+        string cacheKey,
+        string deviceName,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var gate = _captureLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken);
+        LiveFrameFeed feed;
+        while (true)
+        {
+            feed = _liveFeeds.GetOrAdd(cacheKey, _ => new LiveFrameFeed(deviceName));
+            if (feed.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase)) break;
+
+            if (_liveFeeds.TryRemove(cacheKey, out var stale)) await stale.DisposeAsync();
+        }
+
+        feed.AddViewer();
+        long sequence = 0;
         try
         {
-            if (!_liveSessions.TryGetValue(cacheKey, out var session) || !session.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase))
+            while (!cancellationToken.IsCancellationRequested)
             {
-                if (session is not null)
-                {
-                    _liveSessions.TryRemove(cacheKey, out _);
-                    session.Dispose();
-                }
-                session = new LiveCaptureSession(deviceName);
-                _liveSessions[cacheKey] = session;
-            }
-
-            try
-            {
-                return await Task.Run(session.CaptureFrame, cancellationToken);
-            }
-            catch
-            {
-                if (_liveSessions.TryRemove(cacheKey, out var broken)) broken.Dispose();
-                throw;
+                var next = await feed.WaitNextAsync(sequence, cancellationToken);
+                sequence = next.Sequence;
+                yield return next.JpegBytes;
             }
         }
         finally
         {
-            gate.Release();
+            if (feed.RemoveViewer() == 0)
+            {
+                if (_liveFeeds.TryGetValue(cacheKey, out var current) && ReferenceEquals(current, feed))
+                    _liveFeeds.TryRemove(cacheKey, out _);
+                await feed.DisposeAsync();
+            }
         }
     }
 
@@ -124,6 +126,7 @@ internal sealed class MonitorThumbnailService
         const int dxgiErrorWaitTimeout = unchecked((int)0x887A0027);
         IDXGIResource? resource = null;
         var acquired = false;
+        var released = false;
         try
         {
             var result = duplication.AcquireNextFrame(1000, out _, out resource);
@@ -134,15 +137,21 @@ internal sealed class MonitorThumbnailService
             }
             if (resource is null) throw new InvalidOperationException($"DXGI returned no desktop resource for '{deviceName}'.");
             acquired = true;
-            using var source = resource.QueryInterface<ID3D11Texture2D>();
-            context.CopyResource(staging, source);
+
+            using (var source = resource.QueryInterface<ID3D11Texture2D>())
+            {
+                context.CopyResource(staging, source);
+            }
+
+            resource.Dispose();
+            resource = null;
+            duplication.ReleaseFrame();
+            released = true;
+
             context.Map(staging, 0, MapMode.Read, D3D11MapFlags.None, out var mapped).CheckError();
             try
             {
-                using var frame = CopyToBitmap(mapped.DataPointer, checked((int)mapped.RowPitch), width, height);
-                ApplyOutputRotation(frame, (int)description.Rotation);
-                using var resized = Resize(frame, maximumWidth);
-                return EncodeJpeg(resized, quality);
+                return EncodeMappedFrame(mapped.DataPointer, checked((int)mapped.RowPitch), width, height, (int)description.Rotation, maximumWidth, quality);
             }
             finally
             {
@@ -152,11 +161,30 @@ internal sealed class MonitorThumbnailService
         finally
         {
             resource?.Dispose();
-            if (acquired)
+            if (acquired && !released)
             {
                 try { duplication.ReleaseFrame(); } catch { }
             }
         }
+    }
+
+    private static byte[] EncodeMappedFrame(IntPtr source, int sourceStride, int width, int height, int rotation, int maximumWidth, long quality)
+    {
+        using var mappedFrame = new Bitmap(width, height, sourceStride, PixelFormat.Format32bppArgb, source);
+        if (rotation is 2 or 3 or 4)
+        {
+            using var rotated = new Bitmap(mappedFrame);
+            ApplyOutputRotation(rotated, rotation);
+            return EncodeScaledJpeg(rotated, maximumWidth, quality);
+        }
+        return EncodeScaledJpeg(mappedFrame, maximumWidth, quality);
+    }
+
+    private static byte[] EncodeScaledJpeg(Bitmap source, int maximumWidth, long quality)
+    {
+        if (source.Width <= maximumWidth) return EncodeJpeg(source, quality);
+        using var resized = Resize(source, maximumWidth);
+        return EncodeJpeg(resized, quality);
     }
 
     private static Texture2DDescription CreateStagingDescription(int width, int height) => new()
@@ -195,27 +223,6 @@ internal sealed class MonitorThumbnailService
         return null;
     }
 
-    private static Bitmap CopyToBitmap(IntPtr source, int sourceStride, int width, int height)
-    {
-        var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-        var data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-        try
-        {
-            var rowBytes = checked(width * 4);
-            var row = new byte[rowBytes];
-            for (var y = 0; y < height; y++)
-            {
-                Marshal.Copy(IntPtr.Add(source, checked(y * sourceStride)), row, 0, rowBytes);
-                Marshal.Copy(row, 0, IntPtr.Add(data.Scan0, checked(y * data.Stride)), rowBytes);
-            }
-        }
-        finally
-        {
-            bitmap.UnlockBits(data);
-        }
-        return bitmap;
-    }
-
     private static void ApplyOutputRotation(Bitmap bitmap, int rotation)
     {
         switch (rotation)
@@ -228,11 +235,12 @@ internal sealed class MonitorThumbnailService
 
     private static Bitmap Resize(Bitmap source, int maximumWidth)
     {
-        if (source.Width <= maximumWidth) return new Bitmap(source);
         var height = Math.Max(1, checked((int)Math.Round(source.Height * (maximumWidth / (double)source.Width))));
         var result = new Bitmap(maximumWidth, height, PixelFormat.Format24bppRgb);
         using var graphics = Graphics.FromImage(result);
-        graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+        graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+        graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+        graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
         graphics.DrawImage(source, 0, 0, result.Width, result.Height);
         return result;
     }
@@ -249,6 +257,106 @@ internal sealed class MonitorThumbnailService
     }
 
     private sealed record CacheEntry(DateTime CreatedUtc, byte[] JpegBytes);
+    private sealed record LiveFrame(long Sequence, byte[] JpegBytes);
+
+    private sealed class LiveFrameFeed : IAsyncDisposable
+    {
+        private readonly object _sync = new();
+        private readonly CancellationTokenSource _stop = new();
+        private readonly LiveCaptureSession _session;
+        private readonly Task _producer;
+        private TaskCompletionSource<bool> _nextFrame = NewSignal();
+        private byte[]? _lastFrame;
+        private Exception? _failure;
+        private long _sequence;
+        private int _viewers;
+        private bool _completed;
+
+        public LiveFrameFeed(string deviceName)
+        {
+            DeviceName = deviceName;
+            _session = new LiveCaptureSession(deviceName);
+            _producer = Task.Run(ProduceAsync);
+        }
+
+        public string DeviceName { get; }
+
+        public byte[]? LastFrame
+        {
+            get
+            {
+                lock (_sync) return _lastFrame;
+            }
+        }
+
+        public void AddViewer() => Interlocked.Increment(ref _viewers);
+        public int RemoveViewer() => Interlocked.Decrement(ref _viewers);
+
+        public async Task<LiveFrame> WaitNextAsync(long afterSequence, CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                Task waitTask;
+                lock (_sync)
+                {
+                    if (_failure is not null) throw new InvalidOperationException("Terminal capture producer failed.", _failure);
+                    if (_sequence > afterSequence && _lastFrame is not null) return new LiveFrame(_sequence, _lastFrame);
+                    if (_completed) throw new OperationCanceledException("Terminal capture producer stopped.");
+                    waitTask = _nextFrame.Task;
+                }
+                await waitTask.WaitAsync(cancellationToken);
+            }
+        }
+
+        private async Task ProduceAsync()
+        {
+            try
+            {
+                while (!_stop.IsCancellationRequested)
+                {
+                    var capture = await Task.Run(_session.CaptureFrame, _stop.Token);
+                    if (!capture.Changed) continue;
+
+                    TaskCompletionSource<bool> signal;
+                    lock (_sync)
+                    {
+                        _lastFrame = capture.JpegBytes;
+                        _sequence++;
+                        signal = _nextFrame;
+                        _nextFrame = NewSignal();
+                    }
+                    signal.TrySetResult(true);
+                }
+            }
+            catch (OperationCanceledException) when (_stop.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                lock (_sync) _failure = ex;
+            }
+            finally
+            {
+                TaskCompletionSource<bool> signal;
+                lock (_sync)
+                {
+                    _completed = true;
+                    signal = _nextFrame;
+                }
+                signal.TrySetResult(true);
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _stop.Cancel();
+            try { await _producer; } catch { }
+            _session.Dispose();
+            _stop.Dispose();
+        }
+
+        private static TaskCompletionSource<bool> NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
 
     private sealed class LiveCaptureSession : IDisposable
     {
@@ -284,12 +392,13 @@ internal sealed class MonitorThumbnailService
         }
 
         public string DeviceName { get; }
-        public byte[]? LastFrame => _lastFrame;
 
-        public byte[] CaptureFrame()
+        public (byte[] JpegBytes, bool Changed) CaptureFrame()
         {
-            _lastFrame = CaptureFromDuplication(DeviceName, _duplication, _context, _staging, _description, _width, _height, 1920, 68L, _lastFrame);
-            return _lastFrame;
+            var previous = _lastFrame;
+            var current = CaptureFromDuplication(DeviceName, _duplication, _context, _staging, _description, _width, _height, 1920, 68L, previous);
+            _lastFrame = current;
+            return (current, !ReferenceEquals(previous, current));
         }
 
         public void Dispose()
