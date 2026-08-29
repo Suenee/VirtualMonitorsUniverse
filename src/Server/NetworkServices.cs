@@ -200,7 +200,7 @@ internal sealed class WebServerService : NetworkService
 
     private IResult StatusPage() => Shell("Status", WebUiRenderer.StatusBody());
     private IResult SettingsPage() => Shell("Settings", WebUiRenderer.SettingsBody());
-    private IResult ArrangementPage() => Shell("Arrangement", WebUiRenderer.ArrangementBody(), "arrangementbody");
+    private IResult ArrangementPage() => Shell("Arrangement", WebUiRenderer.ArrangementBody() + ArrangementWebEnhancement.Script, "arrangementbody");
     private IResult MonitorsPage() => Shell("Monitors", WebUiRenderer.MonitorsBody(_settingsProvider().WebUi.MonitorPreviewRefreshSeconds));
     private IResult LogPage() => Shell("Log", WebUiRenderer.LogBody(), "logbody");
 
