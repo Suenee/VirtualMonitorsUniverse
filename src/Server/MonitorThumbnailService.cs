@@ -12,9 +12,10 @@ namespace VirtualMonitorsUniverse.Server;
 
 /// <summary>
 /// Captures exact monitor frames through DXGI Desktop Duplication.
-/// Thumbnail capture remains short lived and cached, while live Terminal capture
-/// reuses its D3D11/Desktop Duplication objects between frames to avoid the large
-/// per-frame setup cost of the original ALPHA implementation.
+/// Thumbnail capture remains cached, while live Terminal capture reuses its
+/// D3D11/Desktop Duplication objects between frames. If a live session already
+/// owns an output, its latest immutable JPEG frame is reused for preview instead
+/// of opening a competing Desktop Duplication session for the same monitor.
 /// </summary>
 internal sealed class MonitorThumbnailService
 {
@@ -32,6 +33,15 @@ internal sealed class MonitorThumbnailService
         try
         {
             if (_cache.TryGetValue(cacheKey, out cached) && DateTime.UtcNow - cached.CreatedUtc < _cacheLifetime) return cached.JpegBytes;
+
+            if (_liveSessions.TryGetValue(cacheKey, out var live)
+                && live.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase)
+                && live.LastFrame is { Length: > 0 } liveFrame)
+            {
+                _cache[cacheKey] = new CacheEntry(DateTime.UtcNow, liveFrame);
+                return liveFrame;
+            }
+
             var bytes = await Task.Run(() => CaptureFrame(deviceName, 360, 78L), cancellationToken);
             _cache[cacheKey] = new CacheEntry(DateTime.UtcNow, bytes);
             return bytes;
@@ -94,8 +104,7 @@ internal sealed class MonitorThumbnailService
             var width = description.DesktopCoordinates.Right - description.DesktopCoordinates.Left;
             var height = description.DesktopCoordinates.Bottom - description.DesktopCoordinates.Top;
             if (width <= 0 || height <= 0) throw new InvalidOperationException($"DXGI output '{deviceName}' has invalid desktop bounds.");
-            var stagingDescription = CreateStagingDescription(width, height);
-            using var staging = device.CreateTexture2D(stagingDescription);
+            using var staging = device.CreateTexture2D(CreateStagingDescription(width, height));
             return CaptureFromDuplication(deviceName, duplication, context, staging, description, width, height, maximumWidth, quality, null);
         }
     }
@@ -152,16 +161,9 @@ internal sealed class MonitorThumbnailService
 
     private static Texture2DDescription CreateStagingDescription(int width, int height) => new()
     {
-        Width = checked((uint)width),
-        Height = checked((uint)height),
-        MipLevels = 1,
-        ArraySize = 1,
-        Format = Format.B8G8R8A8_UNorm,
-        SampleDescription = new SampleDescription(1, 0),
-        Usage = ResourceUsage.Staging,
-        BindFlags = BindFlags.None,
-        CPUAccessFlags = CpuAccessFlags.Read,
-        MiscFlags = ResourceOptionFlags.None
+        Width = checked((uint)width), Height = checked((uint)height), MipLevels = 1, ArraySize = 1,
+        Format = Format.B8G8R8A8_UNorm, SampleDescription = new SampleDescription(1, 0), Usage = ResourceUsage.Staging,
+        BindFlags = BindFlags.None, CPUAccessFlags = CpuAccessFlags.Read, MiscFlags = ResourceOptionFlags.None
     };
 
     private static (IDXGIAdapter1 Adapter, IDXGIOutput Output)? FindOutput(IDXGIFactory1 factory, string deviceName)
@@ -282,6 +284,7 @@ internal sealed class MonitorThumbnailService
         }
 
         public string DeviceName { get; }
+        public byte[]? LastFrame => _lastFrame;
 
         public byte[] CaptureFrame()
         {
