@@ -61,6 +61,16 @@ When remote access is Disabled, security configuration remains stored but is ina
 
 Approval rules are normalized in `monitor_access_rules` and are scoped by `vmu_id`. A rule can carry Client/User ID, IP address, best-effort MAC address, best-effort computer name, user name, permission (`Deny`, `Deferred`, `Allow`) and last-seen metadata. Network metadata is informational and must not replace the stable client identity.
 
+## Terminal mouse control
+
+The first mouse-control implementation is intentionally local-only. The Web Client may send mouse input only from a loopback connection, the target monitor must be connected and healthy, and the monitor's `collaboration_mouse` capability must be enabled. Remote mouse control remains disabled until the remote-access authentication layer is complete.
+
+Clicking the live Terminal image captures the pointer with the browser Pointer Lock API. Relative movement is translated to normalized coordinates inside the rendered Terminal image, then mapped by VMU to the monitor's current Windows desktop coordinates. Left, middle and right buttons plus vertical wheel input are forwarded through Win32 `SendInput`.
+
+VMU draws a client-side cursor over the Terminal because Desktop Duplication does not guarantee that the hardware pointer is part of the captured image. Movement messages use a latest-value queue: while one move request is in flight, newer movement replaces any older unsent move instead of building a stale input backlog.
+
+Crossing any edge of the Terminal image releases Pointer Lock and returns control to the local desktop. `Esc`, browser focus loss, page hiding, Terminal reconnect and stream failure also release mouse capture. Browser security controls the physical cursor position after Pointer Lock is released, so VMU does not attempt to force the local cursor to a particular browser coordinate.
+
 ## Capture and Terminal foundation
 
 Monitor previews use the same `vmu_id -> GDI/DXGI output -> Desktop Duplication` capture path that will feed the Terminal. Capture is demand-driven. Web preview refresh is configurable from Manual only through 10 minutes and defaults to one minute.
