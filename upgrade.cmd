@@ -2,10 +2,20 @@
 cls
 setlocal EnableExtensions EnableDelayedExpansion
 
-set "UPGRADE_REV=2.0-powershell-runner-bootstrap"
+set "UPGRADE_REV=2.1-post-actions"
 set "REPO_DIR=%~dp0"
 if "!REPO_DIR:~-1!"=="\" set "REPO_DIR=!REPO_DIR:~0,-1!"
 cd /d "!REPO_DIR!"
+
+set "DO_TEST=0"
+set "DO_RUN=0"
+:parse_args
+if "%~1"=="" goto args_done
+if /I "%~1"=="--test" (set "DO_TEST=1"&shift&goto parse_args)
+if /I "%~1"=="--run" (set "DO_RUN=1"&shift&goto parse_args)
+echo ERROR: Unknown upgrade option: %~1
+exit /b 2
+:args_done
 
 if not exist "!REPO_DIR!\logs" mkdir "!REPO_DIR!\logs" >nul 2>nul
 set "BOOTSTRAP_LOG=!REPO_DIR!\logs\upgrade.log"
@@ -41,13 +51,36 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem IMPORTANT: this entire final block is parsed by CMD before PowerShell starts.
-rem upgrade.ps1 may update upgrade.cmd on disk while it runs; the already-parsed
-rem EXIT command therefore cannot accidentally continue in a newly replaced file.
+rem The runner may update this file while executing, so keep post-actions in this
+rem already parsed block. They run only after a completely successful upgrade.
 (
     set "VMU_UPGRADE_REPO=!REPO_DIR!"
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "!RUNNER_TEMP!"
     set "UPGRADE_RC=!ERRORLEVEL!"
     del /q "!RUNNER_TEMP!" >nul 2>nul
-    exit /b !UPGRADE_RC!
+    if not "!UPGRADE_RC!"=="0" exit /b !UPGRADE_RC!
+
+    if "!DO_TEST!"=="1" (
+        echo.
+        echo ============================================
+        echo Running VMU CLI selftest
+        echo ============================================
+        call "!REPO_DIR!\vmu.cmd" selftest
+        set "TEST_RC=!ERRORLEVEL!"
+        if not "!TEST_RC!"=="0" (
+            powershell.exe -NoProfile -Command "Write-Host 'CLI selftest failed. --run will not be executed.' -ForegroundColor Red"
+            exit /b !TEST_RC!
+        )
+    )
+
+    if "!DO_RUN!"=="1" (
+        tasklist /FI "IMAGENAME eq VirtualMonitorsUniverse.Server.exe" 2>nul | find /I "VirtualMonitorsUniverse.Server.exe" >nul
+        if errorlevel 1 (
+            echo Starting VMU Server...
+            start "" "!REPO_DIR!\vmu-server.cmd"
+        ) else (
+            echo VMU Server is already running; --run skipped.
+        )
+    )
+    exit /b 0
 )
