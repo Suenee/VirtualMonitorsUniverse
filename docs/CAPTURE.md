@@ -4,7 +4,7 @@ VMU captures monitor pixels through the Windows DXGI Desktop Duplication API. Ca
 
 ## Current scope
 
-Version 0.34 provides two demand-driven capture surfaces for connected, healthy VMU monitors:
+Version 0.35 provides two demand-driven capture surfaces for connected, healthy VMU monitors:
 
 ```text
 GET /api/monitors/{name}/thumbnail
@@ -21,19 +21,24 @@ Version 0.30 reduced per-frame latency inside the capture path. After `AcquireNe
 
 Versions 0.31 through 0.33 experimented with a separate producer/feed model, per-client cursors, adaptive JPEG profiles, persistent Terminal stream preferences, and additional reconnect recovery logic. Practical testing exposed nondeterministic first-start and reconnect regressions, including stale single frames and streams that required repeated browser reloads before motion resumed.
 
-Version 0.34 deliberately restores the complete Terminal streaming core and client behavior from the practically verified 0.30 baseline. This is a targeted rollback only: unrelated VMU improvements remain in place. The experimental producer/feed and adaptive-streaming path is temporarily removed from the active Terminal route so that further work can proceed from a known-good capture implementation.
+Version 0.34 deliberately restored the complete Terminal streaming core and client behavior from the practically verified 0.30 baseline. This was a targeted rollback only: unrelated VMU improvements remained in place. The experimental producer/feed and adaptive-streaming path was removed from the active Terminal route so that further work could proceed from a known-good capture implementation.
+
+Version 0.35 keeps that 0.34 capture baseline unchanged. The only Terminal-streaming change is client-side recovery: the browser now tracks authoritative VMU/monitor readiness and recreates the MJPEG request only after a real not-ready to ready transition. The same check runs after browser online, pageshow, and visibility-return events. No DXGI, JPEG, live-session, or MJPEG server-loop code is changed by this step.
+
+Version 0.35 also adds a Terminal screenshot helper for diagnostics. The button uses the browser screen-capture API to capture a browser surface selected by the user, encodes the captured frame as PNG, writes it to the clipboard, and emits a short confirmation tone. Browsers intentionally require explicit user permission/surface selection for this capability; VMU does not attempt to bypass that security boundary.
 
 ## Verified baseline policy
 
-The 0.30 Terminal behavior is the acceptance baseline for the next development steps. Before adding another transport or adaptation feature, practical verification must confirm all of the following:
+The 0.30/0.34 Terminal behavior remains the acceptance baseline for the next development steps. Before adding another transport or adaptation feature, practical verification must confirm all of the following:
 
 - the first Terminal open after VMU startup produces a live moving image without browser reload;
 - a normal browser reload produces a live moving image on the first attempt;
 - sustained motion such as video playback remains responsive and does not freeze on a historical frame;
+- a VMU/Web service interruption recovers by recreating the browser media request after readiness returns;
 - fullscreen behavior remains unchanged;
 - thumbnail capture must not interfere with a working Terminal stream.
 
-Reconnect behavior will be rebuilt as a separate layer after this baseline is reconfirmed. Capture lifecycle, reconnect state handling, quality adaptation, and future codec work must be introduced independently so a regression can be attributed to one change instead of several interacting mechanisms.
+Capture lifecycle, reconnect state handling, quality adaptation, and future codec work must continue to be introduced independently so a regression can be attributed to one change instead of several interacting mechanisms.
 
 ## Service ownership
 
@@ -47,7 +52,7 @@ AND monitor healthy
 
 Stopping VMU Server must terminate live delivery and prevent direct use of the media URL. Web Server may remain running so that Status, Settings, monitor properties, and a useful "VMU Server is stopped" Terminal state remain available.
 
-The current browser reconnect helper is the same simple behavior that accompanied the verified 0.30 capture path. More advanced reconnect state-machine work is intentionally deferred until the restored baseline passes repeated practical tests.
+The 0.35 browser reconnect helper is intentionally small and independent from capture. It does not maintain a second server-side producer or frame queue. A failed readiness check marks the client not-ready and clears the current image request; when readiness returns, the browser issues a new request against the unchanged 0.34 live endpoint.
 
 The production WebRTC implementation may use negotiated media ports rather than the VMU control port. Service ownership is therefore a logical lifecycle rule, not an assertion that every video byte must pass through one fixed TCP port.
 
@@ -68,13 +73,13 @@ vmu_id / canonical name
 
 VMU uses `Vortice.Direct3D11` 3.8.3 as the maintained .NET binding for D3D11/DXGI. No custom capture driver is introduced.
 
-If a live capture call fails, the current persistent capture session is removed and disposed. A later live request creates a new session. No producer/feed layer or client cursor is active in 0.34.
+If a live capture call fails, the current persistent capture session is removed and disposed. A later live request creates a new session. No producer/feed layer or client cursor is active in 0.35.
 
 ## Resource and latency policy
 
 Thumbnail capture is requested only for connected monitors and browser refresh stops while the Monitors page is hidden. Live capture occurs only while a Terminal HTTP client is requesting frames and VMU Server remains running.
 
-The restored 0.30 baseline intentionally uses a fixed current MJPEG profile of 1920 px maximum width and JPEG quality 68. Adaptive quality controls introduced after 0.30 are not active in 0.34. Their persisted settings implementation may remain in the source tree for future redesign, but the live route and Monitor Properties page do not expose or consume it in this baseline version.
+The restored baseline intentionally uses a fixed current MJPEG profile of 1920 px maximum width and JPEG quality 68. Adaptive quality controls introduced after 0.30 are not active in 0.35. Their persisted settings implementation may remain in the source tree for future redesign, but the live route and Monitor Properties page do not expose or consume it in this baseline version.
 
 Future adaptation must preserve low latency and must not cause the visible Terminal viewport to resize. Localhost must remain full quality. Network-aware adaptation belongs primarily to the future WebRTC transport, where actual congestion feedback can change bitrate, resolution, or frame rate without building a latency queue.
 
