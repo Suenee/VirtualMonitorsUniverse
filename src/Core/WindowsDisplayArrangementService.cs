@@ -51,6 +51,8 @@ public sealed class WindowsDisplayArrangementService
         if (requested.Count != active.Count || active.Any(x => !requested.ContainsKey(x)))
             throw new InvalidOperationException("Arrangement must contain exactly the currently active Windows displays.");
 
+        ValidateConnectedDesktop(requested.Values);
+
         foreach (var entry in requested.Values)
         {
             var mode = ReadMode(entry.DeviceName);
@@ -72,6 +74,40 @@ public sealed class WindowsDisplayArrangementService
             throw new InvalidOperationException("Windows changed the active display set while applying positions. The arrangement operation was rejected.");
     }
 
+    private static void ValidateConnectedDesktop(IEnumerable<DisplayArrangementEntry> entries)
+    {
+        var nodes = entries.Select(entry =>
+        {
+            var mode = ReadMode(entry.DeviceName);
+            return new DisplayRect(entry.DeviceName, entry.X, entry.Y, checked((int)mode.dmPelsWidth), checked((int)mode.dmPelsHeight));
+        }).ToArray();
+        if (nodes.Length <= 1) return;
+
+        var visited = new HashSet<int> { 0 };
+        var queue = new Queue<int>();
+        queue.Enqueue(0);
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            for (var i = 0; i < nodes.Length; i++)
+            {
+                if (visited.Contains(i) || !Touches(nodes[current], nodes[i])) continue;
+                visited.Add(i);
+                queue.Enqueue(i);
+            }
+        }
+
+        if (visited.Count != nodes.Length)
+            throw new InvalidOperationException("Display arrangement contains an isolated monitor. Every active monitor must touch the connected desktop area.");
+    }
+
+    private static bool Touches(DisplayRect a, DisplayRect b)
+    {
+        var horizontalGap = Math.Max(0, Math.Max(a.X - (b.X + b.Width), b.X - (a.X + a.Width)));
+        var verticalGap = Math.Max(0, Math.Max(a.Y - (b.Y + b.Height), b.Y - (a.Y + a.Height)));
+        return horizontalGap <= 1 && verticalGap <= 1;
+    }
+
     private static void RestoreUnexpectedlyActivatedDisplays(HashSet<string> expectedActive)
     {
         var afterApply = GetActiveScreenNames();
@@ -79,8 +115,7 @@ public sealed class WindowsDisplayArrangementService
         if (unexpected.Length == 0) return;
 
         var modes = new WindowsDisplayModeService();
-        foreach (var deviceName in unexpected)
-            modes.Disconnect(deviceName);
+        foreach (var deviceName in unexpected) modes.Disconnect(deviceName);
     }
 
     private static DevMode ReadMode(string deviceName)
@@ -113,6 +148,7 @@ public sealed class WindowsDisplayArrangementService
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Display arrangement is available only on Windows.");
     }
 
+    private sealed record DisplayRect(string DeviceName, int X, int Y, int Width, int Height);
     private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, IntPtr lprcMonitor, IntPtr dwData);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
