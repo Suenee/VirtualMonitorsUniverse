@@ -1,3 +1,5 @@
+using System.ComponentModel;
+
 namespace VirtualMonitorsUniverse.Server;
 
 internal sealed class LogForm : Form
@@ -38,6 +40,8 @@ internal sealed class LogForm : Form
     private FlowLayoutPanel? _tailHost;
     private LogDetailForm? _detailForm;
     private long _lastId = -1;
+    private string _sortColumnName = "Time";
+    private ListSortDirection _sortDirection = ListSortDirection.Ascending;
 
     public LogForm(LogStore store, Icon icon, Func<IReadOnlyDictionary<string, bool>> statusProvider)
     {
@@ -57,9 +61,20 @@ internal sealed class LogForm : Form
         _clearSearch.Click += (_, _) => _search.Clear();
         _tail.CheckedChanged += (_, _) =>
         {
-            _grid.SortModeForAll(_tail.Checked ? DataGridViewColumnSortMode.NotSortable : DataGridViewColumnSortMode.Automatic);
-            if (_tail.Checked) SelectEnd();
+            _grid.SortModeForAll(_tail.Checked ? DataGridViewColumnSortMode.NotSortable : DataGridViewColumnSortMode.Programmatic);
+            if (_tail.Checked)
+            {
+                ClearSortGlyphs();
+                SelectEnd();
+            }
+            else
+            {
+                _sortColumnName = "Time";
+                _sortDirection = ListSortDirection.Ascending;
+                ApplySort();
+            }
         };
+        _grid.ColumnHeaderMouseClick += (_, e) => SortByColumn(e.ColumnIndex);
         _grid.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0) OpenDetail(); };
         _grid.SelectionChanged += (_, _) => UpdateOpenDetail();
         _timer.Tick += (_, _) => { RefreshStatusLights(); Render(false); };
@@ -147,6 +162,35 @@ internal sealed class LogForm : Form
         _grid.SortModeForAll(DataGridViewColumnSortMode.NotSortable);
     }
 
+    private void SortByColumn(int columnIndex)
+    {
+        if (_tail.Checked || columnIndex < 0 || columnIndex >= _grid.Columns.Count) return;
+        var column = _grid.Columns[columnIndex];
+        if (_sortColumnName == column.Name)
+            _sortDirection = _sortDirection == ListSortDirection.Ascending ? ListSortDirection.Descending : ListSortDirection.Ascending;
+        else
+        {
+            _sortColumnName = column.Name;
+            _sortDirection = ListSortDirection.Ascending;
+        }
+        ApplySort();
+    }
+
+    private void ApplySort()
+    {
+        if (_tail.Checked || _grid.Rows.Count == 0) return;
+        var column = _grid.Columns[_sortColumnName];
+        if (column is null) return;
+        _grid.Sort(column, _sortDirection);
+        ClearSortGlyphs();
+        column.HeaderCell.SortGlyphDirection = _sortDirection == ListSortDirection.Ascending ? SortOrder.Ascending : SortOrder.Descending;
+    }
+
+    private void ClearSortGlyphs()
+    {
+        foreach (DataGridViewColumn column in _grid.Columns) column.HeaderCell.SortGlyphDirection = SortOrder.None;
+    }
+
     private IReadOnlyCollection<string> SelectedServices() => _filters.Where(x => x.Value.Checked).Select(x => x.Key).ToArray();
 
     private void Render(bool force)
@@ -166,6 +210,7 @@ internal sealed class LogForm : Form
                 if (!_tail.Checked && selectedId == entry.Id) _grid.Rows[index].Selected = true;
             }
             if (_tail.Checked) SelectEnd();
+            else ApplySort();
             UpdateOpenDetail();
         }
         catch
@@ -196,14 +241,8 @@ internal sealed class LogForm : Form
             FileName = $"vmu-log-{DateTime.Now:yyyyMMdd-HHmmss}.xlsx",
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        try
-        {
-            LogExportService.Export(dialog.FileName, _store.Read(_search.Text, SelectedServices()));
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Could not export the log.\r\n\r\n{ex.Message}", "VMU Log", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+        try { LogExportService.Export(dialog.FileName, _store.Read(_search.Text, SelectedServices())); }
+        catch (Exception ex) { MessageBox.Show($"Could not export the log.\r\n\r\n{ex.Message}", "VMU Log", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
     private void ApplyInitialSplitterDistance()
@@ -255,7 +294,7 @@ internal sealed class LogForm : Form
 
     private void ClearLog()
     {
-        if (MessageBox.Show("Clear the log?", "Clear log", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        if (MessageBox.Show("Clear the log?", "Clear Log", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         _store.Clear();
         _lastId = -1;
         Render(true);
