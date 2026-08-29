@@ -40,9 +40,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     public TrayApplicationContext()
     {
         var repoRoot = Environment.GetEnvironmentVariable("VMU_REPO_ROOT");
-        _dataRoot = !string.IsNullOrWhiteSpace(repoRoot)
-            ? Path.Combine(repoRoot, "data")
-            : Path.Combine(AppContext.BaseDirectory, "data");
+        _dataRoot = !string.IsNullOrWhiteSpace(repoRoot) ? Path.Combine(repoRoot, "data") : Path.Combine(AppContext.BaseDirectory, "data");
 
         var databasePath = Path.Combine(_dataRoot, "vmu.db");
         _settingsPath = Path.Combine(_dataRoot, "settings.json");
@@ -109,7 +107,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             Icon = _icon,
             Text = $"{ProjectInfo.ProductName} {ProjectInfo.Version}",
-            ContextMenuStrip = _menu,
             Visible = true
         };
         _notifyIcon.MouseClick += OnNotifyIconMouseClick;
@@ -121,13 +118,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     public void LogCrash(Exception ex)
     {
-        try
-        {
-            _logStore.Write("ERROR", "VMU", "APPLICATION_CRASH", $"VMU crashed: {ex.Message}", detailsJson: JsonSerializer.Serialize(new { exception = ex.ToString() }));
-        }
-        catch
-        {
-        }
+        try { _logStore.Write("ERROR", "VMU", "APPLICATION_CRASH", $"VMU crashed: {ex.Message}", detailsJson: JsonSerializer.Serialize(new { exception = ex.ToString() })); }
+        catch { }
     }
 
     protected override void Dispose(bool disposing)
@@ -187,10 +179,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         _monitorsMenu.DropDownItems.Clear();
         IReadOnlyList<MonitorSnapshot> monitors;
-        try
-        {
-            monitors = _monitorService.List();
-        }
+        try { monitors = _monitorService.List(); }
         catch (Exception ex)
         {
             _monitorsMenu.DropDownItems.Add(new ToolStripMenuItem($"Unavailable: {ex.Message}") { Enabled = false });
@@ -206,10 +195,23 @@ internal sealed class TrayApplicationContext : ApplicationContext
         foreach (var monitor in monitors)
         {
             var terminal = _vmuServerRunning && monitor.Connected && !monitor.Health.IsError;
-            var item = new ToolStripMenuItem(monitor.Configuration.Title, MonitorAvatarService.CreateTrayImage(monitor.Configuration, _dataRoot))
+            var customAvatar = monitor.Configuration.AvatarKind.Equals("custom", StringComparison.OrdinalIgnoreCase);
+            var label = customAvatar
+                ? monitor.Configuration.Title
+                : $"{MonitorAvatarService.GetEmoji(monitor.Configuration.AvatarKind, monitor.Configuration.AvatarValue)}  {monitor.Configuration.Title}";
+            var item = new ToolStripMenuItem(label, customAvatar ? MonitorAvatarService.CreateTrayImage(monitor.Configuration, _dataRoot) : null)
             {
-                ShortcutKeyDisplayString = terminal ? "🟢" : monitor.Health.IsError ? "🔴" : "⚪",
+                ShortcutKeyDisplayString = "     ",
                 ToolTipText = terminal ? "Connected — open Terminal" : "Open monitor properties"
+            };
+            var statusColor = monitor.Health.IsError ? Color.Firebrick : terminal ? Color.SeaGreen : Color.DarkGray;
+            item.Paint += (_, e) =>
+            {
+                var diameter = 9;
+                var x = Math.Max(2, item.Width - 18);
+                var y = Math.Max(2, (item.Height - diameter) / 2);
+                using var brush = new SolidBrush(statusColor);
+                e.Graphics.FillEllipse(brush, x, y, diameter, diameter);
             };
             item.Click += (_, _) => CloseMenuThen(() => OpenMonitor(monitor.Configuration.Name, terminal));
             _monitorsMenu.DropDownItems.Add(item);
@@ -301,7 +303,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         RefreshServiceMenuStates();
         _menu.Show(Cursor.Position);
-        _menu.Focus();
     }
 
     private void CloseMenuThen(Action action)
@@ -312,6 +313,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void OnNotifyIconMouseClick(object? sender, MouseEventArgs eventArgs)
     {
+        if (eventArgs.Button == MouseButtons.Right)
+        {
+            _singleClickTimer.Stop();
+            ShowTrayMenu();
+            return;
+        }
         if (eventArgs.Button != MouseButtons.Left) return;
         _singleClickTimer.Stop();
         _singleClickTimer.Start();
@@ -414,8 +421,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _ = Task.Run(async () =>
             {
                 await Task.Delay(400);
-                try { await _webService.RestartAsync(proposed.Web); }
-                catch { }
+                try { await _webService.RestartAsync(proposed.Web); } catch { }
             });
         }
         if (_socketService.IsRunning && EndpointChanged(current.Socket, proposed.Socket)) _ = _socketService.RestartAsync(proposed.Socket);
@@ -431,17 +437,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var result = _logStore.CleanupOlderThan(settings.Logging.RetentionMinutes);
         var details = JsonSerializer.Serialize(result);
         if (result.SafetyBlocked)
-        {
             _logStore.Write("WARN", "VMU", "LOG_RETENTION_SAFETY_BLOCK", $"Retention cleanup was blocked because it would delete {result.Candidates} of {result.TotalBefore} log records.", detailsJson: details);
-        }
         else if (result.Deleted > 0)
-        {
             _logStore.Write("INFO", "VMU", "LOG_RETENTION_CLEANUP", $"Retention cleanup deleted {result.Deleted} old log records; {result.TotalAfter} remained.", detailsJson: details);
-        }
         else
-        {
             _logStore.Write("INFO", "VMU", "LOG_RETENTION_CHECK", $"Retention cleanup checked {result.TotalBefore} records; none were deleted.", detailsJson: details);
-        }
     }
 
     private async Task RestoreServicesAsync()
@@ -486,6 +486,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
         settings.Save(_settingsPath);
     }
 
+    private void ApplyMonitorExitPolicy()
+    {
+        var settings = ServerSettings.Load(_settingsPath);
+        if (settings.Exit.MonitorAction != MonitorExitAction.Disconnect) return;
+
+        foreach (var monitor in _monitorService.List().Where(x => x.Connected))
+        {
+            try { _monitorService.Disconnect(monitor.Configuration.VmuId); }
+            catch (Exception ex)
+            {
+                _logStore.Write("ERROR", "VMU", "MONITOR_EXIT_DISCONNECT_FAILED", $"Could not disconnect {monitor.Configuration.Title} during application exit: {ex.Message}", monitor.Configuration.VmuId, JsonSerializer.Serialize(new { exception = ex.ToString() }));
+            }
+        }
+    }
+
     private void CloseOwnedWindows()
     {
         try { _logForm?.Close(); } catch { }
@@ -508,6 +523,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _menu.Close();
         CloseOwnedWindows();
         SaveServiceState();
+        ApplyMonitorExitPolicy();
         try { await _webService.StopAsync(); } catch { }
         try { await _socketService.StopAsync(); } catch { }
         LogStopOnce();
