@@ -21,6 +21,14 @@ Automated C# tests live in `tests/Core.Tests`.
 
 Windows display changes requested by a web page must pass through a reusable service in `src/Core`. The web/API layer may validate and coordinate requests, but must not grow an independent Windows display-management implementation.
 
+## Regression safety
+
+Previously validated behavior is part of the acceptance baseline. A new feature, refactor, visual adjustment, or bug fix must preserve behavior that has already been verified in practice unless the change intentionally replaces that behavior and the replacement has been explicitly agreed.
+
+Prefer local changes over broad rewrites when both approaches can satisfy the requirement. Before changing a shared renderer, lifecycle path, monitor state transition, capture pipeline, or Windows topology service, identify the existing workflows that depend on it and preserve those workflows. A change that fixes one surface while silently breaking another is not complete.
+
+Automated build and unit tests are necessary but not sufficient for Windows/VDD behavior. The end-to-end self-test and the previously validated user workflows remain regression gates for monitor installation, connect/disconnect, properties, Terminal, arrangement, service restoration, and persistent identity.
+
 ## Technology baseline
 
 DEVEL targets .NET 10. `upgrade.cmd` verifies that a .NET 10 SDK is installed, restores dependencies, builds the solution, runs automated tests, publishes the CLI into `.runtime/cli`, and publishes the tray/server application into `.runtime/server`.
@@ -38,6 +46,8 @@ Touch targets should be comfortably usable, layouts must reflow on tablet-sized 
 ## Safe display-topology changes
 
 Interactive display arrangement follows the Windows safety model. VMU captures the original topology before applying a requested arrangement. The new arrangement remains provisional until the user confirms it. If confirmation does not arrive within the server-side timeout, VMU restores the original topology automatically. The rollback timer must live on the server, not only in browser JavaScript, so loss of the web session cannot strand the host with an unusable display layout.
+
+Arrangement is position-only. Applying a position change must not activate a display that was inactive before the operation or otherwise change the active display set. Windows remains the authoritative source of the current topology; if native Windows Display Settings changes that topology while the VMU editor is open, a clean editor should refresh automatically, while an editor with local unsaved changes must require an explicit reload rather than overwrite the user's work.
 
 ## Operational log retention
 
