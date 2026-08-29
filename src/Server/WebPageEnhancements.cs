@@ -7,6 +7,15 @@ namespace VirtualMonitorsUniverse.Server;
 /// </summary>
 internal static class WebPageEnhancements
 {
+    public static string ForTitle(string title) => title switch
+    {
+        "Settings" => Settings,
+        "Monitors" => Monitors,
+        "Log" => Log,
+        _ when title.StartsWith("Terminal ", StringComparison.Ordinal) => Terminal,
+        _ => string.Empty
+    };
+
     public const string Settings = """
 <script>
 (() => {
