@@ -18,7 +18,7 @@ internal sealed class AboutForm : Form
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Padding = new Padding(18);
 
-        _aboutIcon = new Icon(icon, new Size(96, 96));
+        _aboutIcon = LoadAboutIcon(icon);
 
         var root = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2 };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
@@ -55,6 +55,20 @@ internal sealed class AboutForm : Form
         CancelButton = close;
         Controls.Add(root);
         FormClosed += (_, _) => _aboutIcon.Dispose();
+    }
+
+    private static Icon LoadAboutIcon(Icon fallback)
+    {
+        try
+        {
+            if (File.Exists(Application.ExecutablePath))
+                return new Icon(Application.ExecutablePath, new Size(96, 96));
+        }
+        catch
+        {
+            // Fall back to the already loaded application icon.
+        }
+        return (Icon)fallback.Clone();
     }
 
     private static LinkLabel CreateLink(string text, string url)
