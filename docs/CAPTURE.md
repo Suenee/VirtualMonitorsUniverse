@@ -4,7 +4,7 @@ VMU captures monitor pixels through the Windows DXGI Desktop Duplication API. Ca
 
 ## Current scope
 
-Version 0.31 provides two demand-driven capture surfaces for connected, healthy VMU monitors:
+Version 0.32 provides two demand-driven capture surfaces for connected, healthy VMU monitors:
 
 ```text
 GET /api/monitors/{name}/thumbnail
@@ -19,13 +19,25 @@ Version 0.28 removed the largest avoidable setup cost by keeping the DXGI factor
 
 Version 0.30 reduced per-frame latency inside the capture path. After `AcquireNextFrame`, VMU issues the GPU copy into its staging texture and releases the Desktop Duplication frame before CPU-side mapping and JPEG encoding. The mapped D3D11 staging texture is wrapped directly by the Windows bitmap encoder instead of first copying every pixel row into a second full-size managed bitmap.
 
-Version 0.31 separates frame production from the effective pace of each HTTP client. One demand-driven producer captures the newest frame for a monitor while each Terminal connection keeps its own sequence cursor. If a client is temporarily slower than capture, intermediate stale frames are skipped rather than queued; the next send uses the newest available frame. This explicitly favors low interaction latency over preservation of every intermediate frame.
+Version 0.31 separated frame production from the effective pace of each HTTP client. One demand-driven producer captures the newest frame for a monitor while each Terminal connection keeps its own sequence cursor. If a client is temporarily slower than capture, intermediate stale frames are skipped rather than queued; the next send uses the newest available frame. This explicitly favors low interaction latency over preservation of every intermediate frame.
 
-The 0.31 MJPEG encoder also adapts its profile to measured JPEG encode pressure. The normal profile remains 1920 px maximum width at JPEG quality 68. Sustained expensive encoding first lowers JPEG quality in small steps; continued pressure may reduce maximum width to 1600 or 1280 px. After sustained fast encoding, the profile recovers progressively toward full width and quality. DXGI itself remains the frame clock, so a static desktop does not generate a synthetic 60 FPS stream. Live acquisition pauses after a short period with no Terminal frame requests while the reusable DXGI objects remain available for fast resume.
+Version 0.32 adds persistent per-monitor Terminal adaptation preferences and restores reconnect behavior after VMU/Web Server interruption. The Terminal client now treats transition from an unavailable monitor/server state back to a ready state as an explicit stream restart condition, rather than relying only on the browser image element to emit an error. Transport resolution is also decoupled from viewport size, so changing transport quality never visually shrinks the Terminal surface.
+
+## Adaptation modes
+
+Each monitor exposes a Terminal Streaming section in its web Properties page. Preferences are stored in `terminal-stream-settings.json` under the VMU data root and are keyed by stable `vmu_id`.
+
+Three modes are available:
+
+- `Automatic`: starts at 1920 px maximum width and JPEG quality 68. Sustained encode pressure first lowers JPEG quality and may later reduce transport width to 1600 or 1280 px. Recovery is intentionally slower than degradation to avoid oscillation.
+- `Prefer Quality`: holds 1920 px maximum width and JPEG quality 68. VMU skips stale frames when necessary rather than lowering image quality.
+- `Fixed`: uses the selected maximum width (1280, 1600, or 1920 px) and JPEG quality (45-90). VMU still follows latest-frame-wins and does not build a queue of obsolete frames.
+
+A client connected through the loopback interface (`127.0.0.1` or `::1`) always uses the full current MJPEG profile of 1920 px maximum width and JPEG quality 68. Local encode pressure must not be misclassified as network congestion. Localhost therefore never triggers automatic transport-quality degradation.
 
 MJPEG still requires full-frame GPU readback, CPU JPEG encoding, HTTP transfer, and browser JPEG decoding. It cannot provide true codec-level congestion control or bitrate negotiation. Those remain primary reasons why MJPEG is not the production transport.
 
-## Service ownership
+## Service ownership and reconnect
 
 Terminal is a VMU Server capability even though the current ALPHA media endpoint is hosted by the Web Server process. A live stream is available only when all of these conditions are true:
 
@@ -36,7 +48,9 @@ AND monitor healthy
 AND at least one live HTTP client connected
 ```
 
-Stopping VMU Server must terminate live capture and prevent direct use of the media URL. Web Server may remain running so that Status, Settings, monitor properties, and a useful "VMU Server is stopped" Terminal state remain available. When the application/web connection returns, an already-open Terminal page re-evaluates its monitor and VMU Server state and restarts the live stream automatically when the monitor is still eligible.
+Stopping VMU Server must terminate live capture and prevent direct use of the media URL. Web Server may remain running so that Status, Settings, monitor properties, and a useful "VMU Server is stopped" Terminal state remain available.
+
+An already-open Terminal page must recover automatically when VMU returns. The client polls authoritative VMU Server and monitor state; whenever readiness changes from false to true it explicitly clears and recreates the MJPEG request. The same check runs after browser `online`, `pageshow`, and visibility-return events. Manual refresh must not be required for a normal VMU restart.
 
 The production WebRTC implementation may use negotiated media ports rather than the VMU control port. Service ownership is therefore a logical lifecycle rule, not an assertion that every video byte must pass through one fixed TCP port.
 
@@ -51,7 +65,7 @@ vmu_id / canonical name
   -> GPU copy to D3D11 staging texture
   -> early ReleaseFrame
   -> mapped staging texture
-  -> adaptive JPEG encode
+  -> JPEG encode
   -> latest-frame slot / per-client sequence cursor
   -> multipart MJPEG transport
 ```
@@ -64,7 +78,7 @@ Thumbnail capture is requested only for connected monitors and browser refresh s
 
 For an interactive desktop, stale frames are less valuable than the newest frame. The governing rule is therefore **latest frame wins**: when capture, encoding, or transport cannot keep up, VMU should drop obsolete intermediate frames rather than accumulate delay. Static content should cost almost nothing, interactive desktop changes should resume immediately, and sustained motion such as video playback should be allowed to use the maximum sustainable cadence.
 
-The current MJPEG stage adapts to local encode pressure. Network-aware bitrate adaptation belongs to WebRTC, where congestion feedback can change bitrate, resolution, or frame rate without building a latency queue.
+The current MJPEG stage can react to local encode pressure only in `Automatic` mode. Network-aware bitrate adaptation belongs to WebRTC, where congestion feedback can change bitrate, resolution, or frame rate without building a latency queue.
 
 ## Planned production video transport
 
