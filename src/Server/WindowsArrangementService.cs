@@ -1,20 +1,72 @@
+using System.Runtime.InteropServices;
+
 namespace VirtualMonitorsUniverse.Server;
 
 internal sealed record WindowsArrangementDisplay(int WindowsNumber, string DeviceName, int X, int Y, int Width, int Height, bool Primary);
 
 /// <summary>
-/// Provides the active Windows desktop arrangement. Windows does not expose the Settings
-/// app's Identify label as a documented property; Screen enumeration is used as the
-/// best-effort public ordering while GDI names remain diagnostic only.
+/// Reads the active Windows desktop arrangement directly from User32 so browser
+/// polling sees native Settings changes immediately rather than depending on any
+/// process-local Screen cache. Windows does not expose the Settings app Identify
+/// label as a documented stable identifier; enumeration order remains best effort.
 /// </summary>
 internal static class WindowsArrangementService
 {
+    private const uint MonitorInfoPrimary = 0x00000001;
+
     public static IReadOnlyList<WindowsArrangementDisplay> GetActive()
     {
         if (!OperatingSystem.IsWindows()) return [];
-        return Screen.AllScreens.Select((screen,index)=>new WindowsArrangementDisplay(index+1,screen.DeviceName,screen.Bounds.X,screen.Bounds.Y,screen.Bounds.Width,screen.Bounds.Height,screen.Primary)).ToArray();
+
+        var displays = new List<WindowsArrangementDisplay>();
+        var callback = new MonitorEnumProc((monitor, _, _, _) =>
+        {
+            var info = new MonitorInfoEx { cbSize = Marshal.SizeOf<MonitorInfoEx>() };
+            if (!GetMonitorInfo(monitor, ref info) || string.IsNullOrWhiteSpace(info.szDevice)) return true;
+            displays.Add(new WindowsArrangementDisplay(
+                displays.Count + 1,
+                info.szDevice,
+                info.rcMonitorRight - info.rcMonitorLeft,
+                info.rcMonitorBottom - info.rcMonitorTop,
+                info.rcMonitorLeft,
+                info.rcMonitorTop,
+                (info.dwFlags & MonitorInfoPrimary) != 0));
+            return true;
+        });
+
+        if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero))
+            throw new InvalidOperationException("Windows active display enumeration failed.");
+
+        GC.KeepAlive(callback);
+        return displays.Select(x => new WindowsArrangementDisplay(x.WindowsNumber, x.DeviceName, x.Width, x.Height, x.X, x.Y, x.Primary))
+            .Select(x => new WindowsArrangementDisplay(x.WindowsNumber, x.DeviceName, x.X, x.Y, x.Width, x.Height, x.Primary))
+            .ToArray();
     }
 
     public static int? GetWindowsNumber(string? deviceName)
-        => string.IsNullOrWhiteSpace(deviceName) ? null : GetActive().FirstOrDefault(x=>x.DeviceName.Equals(deviceName,StringComparison.OrdinalIgnoreCase))?.WindowsNumber;
+        => string.IsNullOrWhiteSpace(deviceName) ? null : GetActive().FirstOrDefault(x => x.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase))?.WindowsNumber;
+
+    private delegate bool MonitorEnumProc(IntPtr monitor, IntPtr hdc, IntPtr rect, IntPtr data);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MonitorInfoEx
+    {
+        public int cbSize;
+        public int rcMonitorLeft;
+        public int rcMonitorTop;
+        public int rcMonitorRight;
+        public int rcMonitorBottom;
+        public int rcWorkLeft;
+        public int rcWorkTop;
+        public int rcWorkRight;
+        public int rcWorkBottom;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szDevice;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc callback, IntPtr data);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfoEx info);
 }
