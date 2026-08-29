@@ -341,7 +341,7 @@ internal sealed class WebServerService : NetworkService
         {
             var monitor = _monitors.Get(id);
             if (monitor is null || !monitor.Connected || monitor.DeviceName is null) return Results.NotFound();
-            if (context.Request.Query.TryGetValue("force", out var force) && force.Any(x => x == "1" || x.Equals("true", StringComparison.OrdinalIgnoreCase)))
+            if (context.Request.Query.TryGetValue("force", out var force) && force.Any(x => string.Equals(x, "1", StringComparison.OrdinalIgnoreCase) || string.Equals(x, "true", StringComparison.OrdinalIgnoreCase)))
                 _capture.Invalidate(monitor.Configuration.VmuId);
             return Results.File(await _capture.GetThumbnailAsync(monitor.Configuration.VmuId, monitor.DeviceName, context.RequestAborted), "image/jpeg");
         }
