@@ -122,8 +122,8 @@ internal sealed class MonitorApplicationService
             true,
             display.IsAttached,
             display.DeviceName,
-            checked((int)(mode?.Width ?? record.Width)),
-            checked((int)(mode?.Height ?? record.Height)),
-            checked((int)(mode?.RefreshRate ?? record.RefreshRate)));
+            mode is null ? record.Width : checked((int)mode.Width),
+            mode is null ? record.Height : checked((int)mode.Height),
+            mode is null ? record.RefreshRate : checked((int)mode.RefreshRate));
     }
 }
