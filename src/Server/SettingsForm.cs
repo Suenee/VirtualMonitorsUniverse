@@ -51,7 +51,7 @@ internal sealed class SettingsForm : Form
         _tips.SetToolTip(_restoreServices, "Remember running service states on a normal exit and restore them on the next VMU start. When disabled, services start stopped.");
 
         var layout = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(12), ColumnCount = 3 };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
 
@@ -64,12 +64,12 @@ internal sealed class SettingsForm : Form
         var groupRow = layout.RowCount++;
         var exitGroup = new GroupBox { Text = "On Exit", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 8), Margin = new Padding(0, 10, 0, 2) };
         var exitLayout = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, Dock = DockStyle.Fill };
-        exitLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
-        exitLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        exitLayout.Controls.Add(new Label { Text = "Monitors", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 12, 3) }, 0, 0);
+        exitLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+        exitLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
+        exitLayout.Controls.Add(CreateExitLabel("Monitors"), 0, 0);
         _monitorExit.Margin = new Padding(0, 1, 0, 3);
         exitLayout.Controls.Add(_monitorExit, 1, 0);
-        exitLayout.Controls.Add(new Label { Text = "Restore Services", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 12, 0) }, 0, 1);
+        exitLayout.Controls.Add(CreateExitLabel("Restore Services"), 0, 1);
         _restoreServices.Margin = new Padding(0, 3, 0, 0);
         exitLayout.Controls.Add(_restoreServices, 1, 1);
         exitGroup.Controls.Add(exitLayout);
@@ -104,6 +104,7 @@ internal sealed class SettingsForm : Form
 
     private static NumericUpDown CreatePortBox() => new() { Minimum = 1, Maximum = 65535, Width = 96, Margin = Padding.Empty };
     private static Label CreateLabel(string text) => new() { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 12, 0) };
+    private static Label CreateExitLabel(string text) => new() { Text = text, AutoSize = false, Width = 112, Height = 22, TextAlign = ContentAlignment.MiddleLeft, Anchor = AnchorStyles.Left, Margin = Padding.Empty };
 
     private static void AddHeader(TableLayoutPanel layout, string service, string iface, string port)
     {
