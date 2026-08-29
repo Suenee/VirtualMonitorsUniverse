@@ -103,6 +103,7 @@ internal sealed class WebServerService : NetworkService
     private readonly MonitorThumbnailService _capture = new();
     private readonly SystemResourceService _resources = new();
     private readonly DisplayArrangementCoordinator _arrangements;
+    private readonly TerminalStreamSettingsStore _streamSettings;
     private readonly Func<IReadOnlyDictionary<string, bool>> _statusProvider;
     private readonly Func<ServerSettings> _settingsProvider;
     private readonly Func<ServerSettings, Task<WebSettingsSaveResult>> _settingsSaver;
@@ -122,6 +123,7 @@ internal sealed class WebServerService : NetworkService
         _settingsSaver = saver;
         _isOwnedListener = owned;
         _arrangements = new DisplayArrangementCoordinator(logs);
+        _streamSettings = new TerminalStreamSettingsStore(monitors.DataRoot);
     }
 
     protected override void ConfigureApplication(WebApplication app)
@@ -163,6 +165,8 @@ internal sealed class WebServerService : NetworkService
         app.MapPost("/api/monitors/{id}/uninstall", Uninstall);
         app.MapGet("/api/monitors/{id}/thumbnail", ThumbnailAsync);
         app.MapGet("/api/monitors/{id}/live", LiveAsync);
+        app.MapGet("/api/monitors/{id}/stream-settings", StreamSettings);
+        app.MapPut("/api/monitors/{id}/stream-settings", SaveStreamSettingsAsync);
         app.MapGet("/api/monitors/{id}/avatar", Avatar);
         app.MapPost("/api/monitors/{id}/avatar/animal/{animal}", (string id, string animal) => Action(() => _monitors.SetAnimalAvatar(id, animal)));
         app.MapPost("/api/monitors/{id}/avatar/upload", UploadAvatarAsync);
@@ -220,7 +224,7 @@ internal sealed class WebServerService : NetworkService
 
         var rates = BuildRefreshRateOptions(monitor.Configuration.RefreshRate);
         var picker = WebUiRenderer.AvatarPicker(monitor.Configuration.AvatarKind, monitor.Configuration.AvatarValue, monitor.Configuration.Name);
-        return Shell("Monitor " + monitor.Configuration.Title, WebUiRenderer.MonitorPropertiesBody(monitor.Configuration.Name, picker, rates));
+        return Shell("Monitor " + monitor.Configuration.Title, WebUiRenderer.MonitorPropertiesBody(monitor.Configuration.Name, picker, rates) + WebPageEnhancements.MonitorProperties);
     }
 
     private IResult TerminalPage(string id)
@@ -311,12 +315,15 @@ internal sealed class WebServerService : NetworkService
             return;
         }
 
+        var remoteAddress = context.Connection.RemoteIpAddress;
+        var isLocalhost = remoteAddress is not null && IPAddress.IsLoopback(remoteAddress);
+        var streamSettings = _streamSettings.Get(monitor.Configuration.VmuId);
         context.Response.ContentType = "multipart/x-mixed-replace; boundary=vmu";
         try
         {
             while (!context.RequestAborted.IsCancellationRequested && IsVmuServerRunning())
             {
-                var frame = await _capture.GetLiveFrameAsync(monitor.Configuration.VmuId, monitor.DeviceName, context.RequestAborted);
+                var frame = await _capture.GetLiveFrameAsync(monitor.Configuration.VmuId, monitor.DeviceName, streamSettings, isLocalhost, context.RequestAborted);
                 var header = Encoding.ASCII.GetBytes($"--vmu\r\nContent-Type: image/jpeg\r\nContent-Length: {frame.Length}\r\n\r\n");
                 await context.Response.Body.WriteAsync(header, context.RequestAborted);
                 await context.Response.Body.WriteAsync(frame, context.RequestAborted);
@@ -331,6 +338,30 @@ internal sealed class WebServerService : NetworkService
         catch (Exception ex)
         {
             LogStore.Write("WARN", "WEB", "TERMINAL_STREAM_FAILED", ex.Message, monitor.Configuration.VmuId);
+        }
+    }
+
+    private IResult StreamSettings(string id)
+    {
+        var monitor = _monitors.Get(id);
+        return monitor is null ? Results.NotFound() : Results.Json(_streamSettings.Get(monitor.Configuration.VmuId));
+    }
+
+    private async Task<IResult> SaveStreamSettingsAsync(HttpRequest request, string id)
+    {
+        try
+        {
+            var monitor = _monitors.Get(id);
+            if (monitor is null) return Results.NotFound();
+            var proposed = await request.ReadFromJsonAsync<TerminalStreamSettings>();
+            if (proposed is null) return Results.BadRequest();
+            var saved = _streamSettings.Set(monitor.Configuration.VmuId, proposed);
+            _capture.InvalidateLive(monitor.Configuration.VmuId);
+            return Results.Json(saved);
+        }
+        catch (Exception ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
         }
     }
 
@@ -427,7 +458,11 @@ internal sealed class WebServerService : NetworkService
     {
         try
         {
+            var monitor = _monitors.Get(id);
+            if (monitor is null) return Results.NotFound();
             _monitors.Uninstall(id);
+            _streamSettings.Delete(monitor.Configuration.VmuId);
+            _capture.InvalidateLive(monitor.Configuration.VmuId);
             return Results.NoContent();
         }
         catch (Exception ex)
