@@ -53,9 +53,15 @@ internal sealed class MonitorThumbnailService
         }
     }
 
-    public async Task<byte[]> GetLiveFrameAsync(string cacheKey, string deviceName, CancellationToken cancellationToken)
+    public async Task<byte[]> GetLiveFrameAsync(
+        string cacheKey,
+        string deviceName,
+        TerminalStreamSettings settings,
+        bool localhost,
+        CancellationToken cancellationToken)
     {
-        var feed = GetOrCreateLiveFeed(cacheKey, deviceName);
+        var profile = LiveStreamProfile.Create(settings, localhost);
+        var feed = GetOrCreateLiveFeed(cacheKey, deviceName, profile);
         feed.Touch();
 
         var cursor = _liveClients.GetOrAdd(cancellationToken, token =>
@@ -75,7 +81,7 @@ internal sealed class MonitorThumbnailService
         {
             cursor.Registration.Dispose();
             _liveClients.TryRemove(cancellationToken, out _);
-            return await GetLiveFrameAsync(cacheKey, deviceName, cancellationToken);
+            return await GetLiveFrameAsync(cacheKey, deviceName, settings, localhost, cancellationToken);
         }
 
         var frame = await feed.WaitNextAsync(cursor.Sequence, cancellationToken);
@@ -85,12 +91,17 @@ internal sealed class MonitorThumbnailService
 
     public void Invalidate(string cacheKey) => _cache.TryRemove(cacheKey, out _);
 
-    private LiveFrameFeed GetOrCreateLiveFeed(string cacheKey, string deviceName)
+    public void InvalidateLive(string cacheKey)
+    {
+        if (_liveFeeds.TryRemove(cacheKey, out var feed)) _ = feed.DisposeAsync();
+    }
+
+    private LiveFrameFeed GetOrCreateLiveFeed(string cacheKey, string deviceName, LiveStreamProfile profile)
     {
         while (true)
         {
-            var feed = _liveFeeds.GetOrAdd(cacheKey, _ => new LiveFrameFeed(deviceName));
-            if (feed.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase)) return feed;
+            var feed = _liveFeeds.GetOrAdd(cacheKey, _ => new LiveFrameFeed(deviceName, profile));
+            if (feed.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase) && feed.Profile == profile) return feed;
 
             if (_liveFeeds.TryRemove(cacheKey, out var stale)) _ = stale.DisposeAsync();
         }
@@ -269,6 +280,20 @@ internal sealed class MonitorThumbnailService
     private sealed record CacheEntry(DateTime CreatedUtc, byte[] JpegBytes);
     private sealed record CaptureOutcome(byte[] JpegBytes, bool Changed, TimeSpan EncodeDuration);
     private sealed record LiveFrame(long Sequence, byte[] JpegBytes);
+    private sealed record LiveStreamProfile(TerminalAdaptationMode Mode, int MaximumWidth, long Quality)
+    {
+        public static LiveStreamProfile Create(TerminalStreamSettings settings, bool localhost)
+        {
+            if (localhost) return new(TerminalAdaptationMode.Fixed, 1920, 68);
+            settings = settings.Normalize();
+            return settings.Mode switch
+            {
+                TerminalAdaptationMode.PreferQuality => new(TerminalAdaptationMode.PreferQuality, 1920, 68),
+                TerminalAdaptationMode.Fixed => new(TerminalAdaptationMode.Fixed, settings.FixedMaximumWidth, settings.FixedJpegQuality),
+                _ => new(TerminalAdaptationMode.Automatic, 1920, 68)
+            };
+        }
+    }
 
     private sealed class LiveClientCursor
     {
@@ -292,14 +317,16 @@ internal sealed class MonitorThumbnailService
         private long _activeUntilTicks;
         private bool _completed;
 
-        public LiveFrameFeed(string deviceName)
+        public LiveFrameFeed(string deviceName, LiveStreamProfile profile)
         {
             DeviceName = deviceName;
-            _session = new LiveCaptureSession(deviceName);
+            Profile = profile;
+            _session = new LiveCaptureSession(deviceName, profile);
             _producer = Task.Run(ProduceAsync);
         }
 
         public string DeviceName { get; }
+        public LiveStreamProfile Profile { get; }
 
         public byte[]? LastFrame
         {
@@ -402,16 +429,20 @@ internal sealed class MonitorThumbnailService
         private readonly OutputDescription _description;
         private readonly int _width;
         private readonly int _height;
+        private readonly TerminalAdaptationMode _mode;
         private byte[]? _lastFrame;
-        private int _maximumWidth = FullWidth;
-        private long _quality = MaximumQuality;
+        private int _maximumWidth;
+        private long _quality;
         private int _pressureScore;
         private int _stableFrames;
 
-        public LiveCaptureSession(string deviceName)
+        public LiveCaptureSession(string deviceName, LiveStreamProfile profile)
         {
             if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("DXGI monitor capture requires Windows.");
             DeviceName = deviceName;
+            _mode = profile.Mode;
+            _maximumWidth = profile.MaximumWidth;
+            _quality = profile.Quality;
             _factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
             var target = FindOutput(_factory, deviceName) ?? throw new InvalidOperationException($"DXGI output '{deviceName}' was not found.");
             _adapter = target.Adapter;
@@ -434,7 +465,7 @@ internal sealed class MonitorThumbnailService
             if (!capture.Changed) return capture;
 
             _lastFrame = capture.JpegBytes;
-            UpdateAdaptiveProfile(capture.EncodeDuration);
+            if (_mode == TerminalAdaptationMode.Automatic) UpdateAdaptiveProfile(capture.EncodeDuration);
             return capture;
         }
 
