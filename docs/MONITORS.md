@@ -28,6 +28,14 @@ Supported UI refresh-rate choices are `60`, `75`, `90`, `120`, `144`, `165` and 
 
 If both `name` and `title` are omitted, VMU chooses the first available `virtual-monitor-N` / `Virtual Monitor N` pair. If only title is provided, VMU derives a canonical slug. If only name is provided, VMU derives a spaced title.
 
+## Connect and disconnect lifecycle
+
+VMU first uses the saved CCD topology for exact reconnect/disconnect behavior. The validated ALPHA DEVMODE lifecycle remains the fallback path.
+
+A reconnect can occasionally be rejected by Windows after a process restart even though the virtual display device still exists. If the normal DEVMODE reconnect is rejected, Core performs one conservative staged recovery: it writes the same reconnect mode with `CDS_UPDATEREGISTRY | CDS_NORESET`, then asks Windows to apply all pending display changes in a single global `ChangeDisplaySettingsEx` operation. The staged path is only a recovery fallback and does not replace the exact CCD or validated ALPHA paths.
+
+Reconnect diagnostics include the direct result, staged-write result or global-apply result, source mode, position, refresh rate and `dmFields`. A successful reconnect is still accepted only after Windows reports the display as attached.
+
 ## Avatars
 
 Each monitor has an avatar. VMU ships with built-in animal avatars and assigns one randomly when no avatar is selected. The avatar can be changed later in Monitor Properties. Custom PNG, ICO and GIF files are stored under the VMU data directory; tray rendering uses a static image representation.
