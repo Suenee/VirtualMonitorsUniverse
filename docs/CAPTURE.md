@@ -4,7 +4,7 @@ VMU captures monitor pixels through the Windows DXGI Desktop Duplication API. Ca
 
 ## Current scope
 
-Version 0.32 provides two demand-driven capture surfaces for connected, healthy VMU monitors:
+Version 0.33 provides two demand-driven capture surfaces for connected, healthy VMU monitors:
 
 ```text
 GET /api/monitors/{name}/thumbnail
@@ -21,7 +21,9 @@ Version 0.30 reduced per-frame latency inside the capture path. After `AcquireNe
 
 Version 0.31 separated frame production from the effective pace of each HTTP client. One demand-driven producer captures the newest frame for a monitor while each Terminal connection keeps its own sequence cursor. If a client is temporarily slower than capture, intermediate stale frames are skipped rather than queued; the next send uses the newest available frame. This explicitly favors low interaction latency over preservation of every intermediate frame.
 
-Version 0.32 adds persistent per-monitor Terminal adaptation preferences and restores reconnect behavior after VMU/Web Server interruption. The Terminal client now treats transition from an unavailable monitor/server state back to a ready state as an explicit stream restart condition, rather than relying only on the browser image element to emit an error. Transport resolution is also decoupled from viewport size, so changing transport quality never visually shrinks the Terminal surface.
+Version 0.32 added persistent per-monitor Terminal adaptation preferences and explicit browser-side reconnect behavior after VMU/Web Server interruption. Transport resolution was decoupled from viewport size, so changing transport quality never visually shrinks the Terminal surface.
+
+Version 0.33 hardens the server-side capture lifecycle. A failed or completed live producer is no longer reusable. Its last JPEG is cleared, client cursors bound to the failed producer are discarded, the stale feed is removed, and a subsequent live request creates a fresh DXGI Desktop Duplication session. A live request retries a failed producer recreation briefly before surfacing the failure to the browser. Thumbnail reuse is allowed only from a healthy live producer, preventing historical frames from surviving a broken capture session.
 
 ## Adaptation modes
 
@@ -51,6 +53,8 @@ AND at least one live HTTP client connected
 Stopping VMU Server must terminate live capture and prevent direct use of the media URL. Web Server may remain running so that Status, Settings, monitor properties, and a useful "VMU Server is stopped" Terminal state remain available.
 
 An already-open Terminal page must recover automatically when VMU returns. The client polls authoritative VMU Server and monitor state; whenever readiness changes from false to true it explicitly clears and recreates the MJPEG request. The same check runs after browser `online`, `pageshow`, and visibility-return events. Manual refresh must not be required for a normal VMU restart.
+
+Browser reconnect alone is insufficient if the underlying DXGI duplication object was invalidated. Therefore server-side recovery is also mandatory: any failed/completed producer is considered poisoned and must be discarded rather than reused. The next request must start from a fresh capture session and must not expose the old producer's cached image.
 
 The production WebRTC implementation may use negotiated media ports rather than the VMU control port. Service ownership is therefore a logical lifecycle rule, not an assertion that every video byte must pass through one fixed TCP port.
 
