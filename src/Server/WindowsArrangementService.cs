@@ -26,10 +26,10 @@ internal static class WindowsArrangementService
             displays.Add(new WindowsArrangementDisplay(
                 displays.Count + 1,
                 info.szDevice,
-                info.rcMonitorRight - info.rcMonitorLeft,
-                info.rcMonitorBottom - info.rcMonitorTop,
                 info.rcMonitorLeft,
                 info.rcMonitorTop,
+                info.rcMonitorRight - info.rcMonitorLeft,
+                info.rcMonitorBottom - info.rcMonitorTop,
                 (info.dwFlags & MonitorInfoPrimary) != 0));
             return true;
         });
@@ -38,9 +38,7 @@ internal static class WindowsArrangementService
             throw new InvalidOperationException("Windows active display enumeration failed.");
 
         GC.KeepAlive(callback);
-        return displays.Select(x => new WindowsArrangementDisplay(x.WindowsNumber, x.DeviceName, x.Width, x.Height, x.X, x.Y, x.Primary))
-            .Select(x => new WindowsArrangementDisplay(x.WindowsNumber, x.DeviceName, x.X, x.Y, x.Width, x.Height, x.Primary))
-            .ToArray();
+        return displays.ToArray();
     }
 
     public static int? GetWindowsNumber(string? deviceName)
