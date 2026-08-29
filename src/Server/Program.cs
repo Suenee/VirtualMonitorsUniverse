@@ -8,8 +8,9 @@ internal static class Program
     private const string SingleInstanceMutexName = @"Local\VirtualMonitorsUniverse.Server";
 
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        ApplyCommandLineEnvironment(args);
         ApplicationConfiguration.Initialize();
 
         using var singleInstanceMutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var isFirstInstance);
@@ -19,10 +20,10 @@ internal static class Program
         try
         {
             context = new TrayApplicationContext();
-            Application.ThreadException += (_, args) => context.LogCrash(args.Exception);
-            AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            Application.ThreadException += (_, eventArgs) => context.LogCrash(eventArgs.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
             {
-                if (args.ExceptionObject is Exception exception) context.LogCrash(exception);
+                if (eventArgs.ExceptionObject is Exception exception) context.LogCrash(exception);
             };
             Application.Run(context);
         }
@@ -34,6 +35,20 @@ internal static class Program
         finally
         {
             context?.Dispose();
+        }
+    }
+
+    private static void ApplyCommandLineEnvironment(IReadOnlyList<string> args)
+    {
+        for (var i = 0; i < args.Count; i++)
+        {
+            if (!args[i].Equals("--repo-root", StringComparison.OrdinalIgnoreCase)) continue;
+            if (i + 1 >= args.Count || string.IsNullOrWhiteSpace(args[i + 1]))
+                throw new ArgumentException("--repo-root requires a repository path.");
+
+            var repoRoot = Path.GetFullPath(args[i + 1]);
+            Environment.SetEnvironmentVariable("VMU_REPO_ROOT", repoRoot);
+            return;
         }
     }
 }
