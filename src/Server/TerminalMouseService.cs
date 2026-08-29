@@ -6,7 +6,7 @@ namespace VirtualMonitorsUniverse.Server;
 /// Applies Terminal mouse input to the Windows desktop coordinates occupied by a
 /// connected VMU monitor. Localhost can use a portal hand-off: the real Windows
 /// cursor enters the virtual display and a lightweight watcher returns it to the
-/// browser-side entry point when it reaches a virtual-display edge.
+/// corresponding edge of the browser-side Terminal image.
 /// </summary>
 internal sealed class TerminalMouseService
 {
@@ -20,6 +20,8 @@ internal sealed class TerminalMouseService
     private const uint MouseeventfWheel = 0x0800;
     private readonly object _portalSync = new();
     private CancellationTokenSource? _portalCancellation;
+    private int? _pendingPortalLeft;
+    private int? _pendingPortalTop;
 
     public void Apply(MonitorSnapshot monitor, TerminalMouseRequest request)
     {
@@ -29,6 +31,13 @@ internal sealed class TerminalMouseService
             throw new InvalidOperationException("The monitor must be connected and healthy before mouse input can be applied.");
         if (!monitor.Configuration.CollaborationMouse)
             throw new InvalidOperationException("Mouse collaboration is disabled for this monitor.");
+
+        var type = request.Type.ToLowerInvariant();
+        if (type == "portalbounds")
+        {
+            SetPortalBoundsStart(request.Button, request.Delta);
+            return;
+        }
 
         if (request.X is not null || request.Y is not null)
         {
@@ -41,7 +50,7 @@ internal sealed class TerminalMouseService
                 throw new InvalidOperationException($"Windows rejected cursor positioning at {x},{y}.");
         }
 
-        switch (request.Type.ToLowerInvariant())
+        switch (type)
         {
             case "move":
                 return;
@@ -62,11 +71,26 @@ internal sealed class TerminalMouseService
         }
     }
 
-    private void StartLocalPortalWatcher(MonitorSnapshot monitor, int returnX, int returnY)
+    private void SetPortalBoundsStart(int left, int top)
     {
-        CancellationTokenSource cancellation;
         lock (_portalSync)
         {
+            _pendingPortalLeft = left;
+            _pendingPortalTop = top;
+        }
+    }
+
+    private void StartLocalPortalWatcher(MonitorSnapshot monitor, int browserRight, int browserBottom)
+    {
+        CancellationTokenSource cancellation;
+        int browserLeft;
+        int browserTop;
+        lock (_portalSync)
+        {
+            browserLeft = _pendingPortalLeft ?? browserRight;
+            browserTop = _pendingPortalTop ?? browserBottom;
+            _pendingPortalLeft = null;
+            _pendingPortalTop = null;
             _portalCancellation?.Cancel();
             _portalCancellation?.Dispose();
             cancellation = new CancellationTokenSource();
@@ -89,6 +113,36 @@ internal sealed class TerminalMouseService
                     if (point.X < left || point.X > right || point.Y < top || point.Y > bottom) return;
                     if (point.X <= left + 1 || point.X >= right - 1 || point.Y <= top + 1 || point.Y >= bottom - 1)
                     {
+                        var width = Math.Max(1, right - left);
+                        var height = Math.Max(1, bottom - top);
+                        var nx = Math.Clamp((point.X - left) / (double)width, 0, 1);
+                        var ny = Math.Clamp((point.Y - top) / (double)height, 0, 1);
+                        var browserWidth = Math.Max(1, browserRight - browserLeft);
+                        var browserHeight = Math.Max(1, browserBottom - browserTop);
+
+                        int returnX;
+                        int returnY;
+                        if (point.X <= left + 1)
+                        {
+                            returnX = browserLeft;
+                            returnY = browserTop + (int)Math.Round(ny * browserHeight);
+                        }
+                        else if (point.X >= right - 1)
+                        {
+                            returnX = browserRight;
+                            returnY = browserTop + (int)Math.Round(ny * browserHeight);
+                        }
+                        else if (point.Y <= top + 1)
+                        {
+                            returnX = browserLeft + (int)Math.Round(nx * browserWidth);
+                            returnY = browserTop;
+                        }
+                        else
+                        {
+                            returnX = browserLeft + (int)Math.Round(nx * browserWidth);
+                            returnY = browserBottom;
+                        }
+
                         SetCursorPos(returnX, returnY);
                         return;
                     }
