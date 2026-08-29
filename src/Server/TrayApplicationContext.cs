@@ -126,7 +126,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             var item = new ToolStripMenuItem(monitor.Configuration.Title, MonitorAvatarService.CreateTrayImage(monitor.Configuration, _dataRoot))
             {
-                ShortcutKeyDisplayString = monitor.Connected ? "●" : "○",
+                ShortcutKeyDisplayString = monitor.Connected ? "🟢" : "⚪",
                 ToolTipText = monitor.Connected ? "Connected — open Terminal" : "Disconnected — open Terminal",
             };
             item.Click += (_, _) => CloseMenuThen(() => OpenMonitorTerminal(monitor.Configuration.Name));
