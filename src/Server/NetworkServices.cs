@@ -154,6 +154,8 @@ internal sealed class WebServerService : NetworkService
         app.MapDelete("/api/log", () => { LogStore.Clear(); return Results.NoContent(); });
         app.MapGet("/api/log/export/{format}", ExportLog);
 
+        app.MapGet("/api/avatars", () => Results.Json(new { revision = MonitorAvatarService.Revision, ids = MonitorAvatarService.AnimalNames }));
+        app.MapGet("/api/avatars/{id}", BuiltInAvatar);
         app.MapGet("/api/monitors", () => Results.Json(_monitors.List()));
         app.MapPost("/api/monitors/order", ReorderAsync);
         app.MapGet("/api/monitors/name-available/{name}", (string name, string? except) => Results.Json(new { available = _monitors.NameAvailable(name, except) }));
@@ -166,6 +168,7 @@ internal sealed class WebServerService : NetworkService
         app.MapGet("/api/monitors/{id}/thumbnail", ThumbnailAsync);
         app.MapGet("/api/monitors/{id}/live", LiveAsync);
         app.MapPost("/api/monitors/{id}/mouse", TerminalMouseAsync);
+        app.MapGet("/api/monitors/{id}/mouse/portal", TerminalMousePortalStatus);
         app.MapGet("/api/monitors/{id}/avatar", Avatar);
         app.MapPost("/api/monitors/{id}/avatar/animal/{animal}", (string id, string animal) => Action(() => _monitors.SetAnimalAvatar(id, animal)));
         app.MapPost("/api/monitors/{id}/avatar/upload", UploadAvatarAsync);
@@ -235,7 +238,7 @@ internal sealed class WebServerService : NetworkService
 
         var vmuRunning = IsVmuServerRunning();
         var ready = monitor.Connected && !monitor.Health.IsError;
-        return Shell("Terminal " + monitor.Configuration.Title, WebUiRenderer.TerminalBody(monitor.Configuration.Name, ready, vmuRunning) + WebPageEnhancements.Terminal, "terminalbody", WebUiRenderer.FullscreenNavButton);
+        return Shell("Terminal " + monitor.Configuration.Title, WebUiRenderer.TerminalBody(monitor.Configuration.Name, ready, vmuRunning) + WebPageEnhancements.Terminal, "terminalbody");
     }
 
     private object ArrangementModel()
@@ -328,6 +331,14 @@ internal sealed class WebServerService : NetworkService
         }
     }
 
+    private IResult TerminalMousePortalStatus(HttpContext context, string id)
+    {
+        var remote = context.Connection.RemoteIpAddress;
+        if (remote is null || !IPAddress.IsLoopback(remote)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+        var monitor = _monitors.Get(id);
+        return monitor is null ? Results.NotFound() : Results.Json(new { active = _mouse.IsPortalActive(monitor.Configuration.VmuId) });
+    }
+
     private async Task LiveAsync(string id, HttpContext context)
     {
         var monitor = _monitors.Get(id);
@@ -380,6 +391,12 @@ internal sealed class WebServerService : NetworkService
             LogStore.Write("WARN", "WEB", "MONITOR_THUMBNAIL_FAILED", ex.Message, id);
             return Results.NotFound();
         }
+    }
+
+    private IResult BuiltInAvatar(string id)
+    {
+        var bytes = MonitorAvatarService.ReadBuiltIn(id);
+        return bytes is null ? Results.NotFound() : Results.File(bytes, "image/png");
     }
 
     private async Task<IResult> CreateAsync(HttpRequest request)
@@ -510,7 +527,7 @@ internal sealed class WebServerService : NetworkService
     }
 
     private IResult Shell(string title, string body, string bodyClass = "", string extraNav = "") =>
-        Results.Content(WebUiRenderer.Shell(title, body, Navigation(), bodyClass, extraNav), "text/html; charset=utf-8");
+        Results.Content(WebUiRenderer.Shell(title, body + WebPageEnhancements.Global, Navigation(), bodyClass, WebPageEnhancements.GlobalNavButtons + extraNav), "text/html; charset=utf-8");
 
     private bool IsVmuServerRunning() => _statusProvider().GetValueOrDefault("VMU_SERVER");
 
