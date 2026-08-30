@@ -7,10 +7,8 @@ namespace VirtualMonitorsUniverse.Server;
 /// <summary>
 /// Provides VMU monitor avatars. Built-in avatars are discovered from the
 /// Assets/Avatars directory, validated once, cached in memory and refreshed in
-/// the background when files change. The PNG file itself is the authoritative
-/// built-in representation: VMU does not map avatar IDs through system emoji.
-/// Cosmetic avatar work must never block capture/input paths or make the UI
-/// dependent on a malformed image file.
+/// the background when files change. Cosmetic avatar work must never block the
+/// capture/input paths or make the UI dependent on a malformed image file.
 /// </summary>
 internal static partial class MonitorAvatarService
 {
@@ -24,6 +22,15 @@ internal static partial class MonitorAvatarService
     private static FileSystemWatcher? _watcher;
     private static int _reloadScheduled;
     private static long _revision;
+
+    // Kept only as a compatibility/fallback label for old database values and
+    // places that have not yet been upgraded to image-based rendering.
+    private static readonly Dictionary<string, string> Emoji = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["dog"] = "🐶", ["cat"] = "🐱", ["mouse"] = "🐭", ["hamster"] = "🐹", ["rabbit"] = "🐰", ["fox"] = "🦊",
+        ["bear"] = "🐻", ["panda"] = "🐼", ["koala"] = "🐨", ["tiger"] = "🐯", ["lion"] = "🦁", ["frog"] = "🐸",
+        ["cow"] = "🐮", ["pig"] = "🐷", ["monkey"] = "🐵", ["penguin"] = "🐧"
+    };
 
     public static IReadOnlyList<string> AnimalNames => GetCatalog().Ids;
     public static long Revision => GetCatalog().Revision;
@@ -44,17 +51,8 @@ internal static partial class MonitorAvatarService
         return GetCatalog().Images.TryGetValue(id, out var bytes) ? bytes : null;
     }
 
-    // Kept under the historical method name so older renderer call sites remain
-    // binary/source compatible. It now emits the authoritative PNG directly.
     public static string GetEmoji(string? avatarKind, string? avatarValue)
-    {
-        if (avatarKind?.Equals("animal", StringComparison.OrdinalIgnoreCase) != true ||
-            string.IsNullOrWhiteSpace(avatarValue) || !BuiltInExists(avatarValue))
-            return "<span class=\"avatarFallback\" aria-hidden=\"true\">▣</span>";
-
-        var id = Uri.EscapeDataString(avatarValue);
-        return $"<img class=\"builtInAvatar\" src=\"/api/avatars/{id}?v={Revision}\" alt=\"\">";
-    }
+        => avatarKind?.Equals("animal", StringComparison.OrdinalIgnoreCase) == true && avatarValue is not null && Emoji.TryGetValue(avatarValue, out var emoji) ? emoji : "🖥️";
 
     public static Image CreateTrayImage(MonitorRecord monitor, string dataRoot)
     {
@@ -172,6 +170,8 @@ internal static partial class MonitorAvatarService
             if (source.RawFormat.Guid != ImageFormat.Png.Guid || source.Width != BuiltInWidth || source.Height != BuiltInHeight) return false;
 
             using var bitmap = new Bitmap(source);
+            // Require actual transparency somewhere in the image. This prevents
+            // opaque backgrounds from unexpectedly changing the layout's visual form.
             for (var y = 0; y < bitmap.Height; y += 4)
             {
                 for (var x = 0; x < bitmap.Width; x += 4)
