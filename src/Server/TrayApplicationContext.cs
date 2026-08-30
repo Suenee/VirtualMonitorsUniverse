@@ -320,8 +320,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void CloseMenuThen(Action action)
     {
+        foreach (ToolStripItem item in _menu.Items)
+        {
+            if (item is ToolStripDropDownItem dropDownItem && dropDownItem.DropDown.Visible)
+                dropDownItem.HideDropDown();
+        }
         if (_menu.Visible) _menu.Close(ToolStripDropDownCloseReason.ItemClicked);
-        action();
+
+        // Opening a browser can immediately transfer foreground ownership away
+        // from WinForms. Defer the action until the ToolStrip has processed its
+        // close messages so no tray menu is left painted above the new window.
+        if (_menu.IsHandleCreated && !_menu.IsDisposed)
+            _menu.BeginInvoke(action);
+        else
+            action();
     }
 
     private void OnNotifyIconMouseClick(object? sender, MouseEventArgs eventArgs)
@@ -340,7 +352,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     {
         if (eventArgs.Button != MouseButtons.Left) return;
         _singleClickTimer.Stop();
-        OpenWebClient();
+        CloseMenuThen(OpenWebClient);
     }
 
     private void OpenWebClient()
