@@ -2,7 +2,10 @@
 cls
 setlocal EnableExtensions EnableDelayedExpansion
 
-set "UPGRADE_REV=2.2-post-actions-report"
+set "UPGRADE_REV=2.3-bootstrap-git"
+set "REPOSITORY_URL=https://github.com/Suenee/VirtualMonitorsUniverse.git"
+set "REPOSITORY_BRANCH=devel"
+set "ORIGINAL_ARGS=%*"
 set "REPO_DIR=%~dp0"
 if "!REPO_DIR:~-1!"=="\" set "REPO_DIR=!REPO_DIR:~0,-1!"
 cd /d "!REPO_DIR!"
@@ -26,20 +29,95 @@ echo Requested post actions: test=!TEST_LABEL!, run=!RUN_LABEL!
 if not exist "!REPO_DIR!\logs" mkdir "!REPO_DIR!\logs" >nul 2>nul
 set "BOOTSTRAP_LOG=!REPO_DIR!\logs\upgrade.log"
 
+rem ---------------------------------------------------------------------------
+rem Git bootstrap
+rem ---------------------------------------------------------------------------
+rem A copied upgrade.cmd can bootstrap a new Windows computer. Prefer the
+rem standard Windows package manager instead of downloading an installer from an
+rem unversioned URL. After installation, refresh the common Git PATH locations
+rem because the current cmd.exe process does not inherit environment changes.
 where git.exe >nul 2>nul
 if errorlevel 1 (
-    > "!BOOTSTRAP_LOG!" echo ERROR: Git was not found in PATH.
-    powershell.exe -NoProfile -Command "Write-Host 'ERROR: Git was not found in PATH.' -ForegroundColor Red"
-    exit /b 1
+    echo Git was not found. Installing Git for Windows...
+    >> "!BOOTSTRAP_LOG!" echo INFO: Git was not found in PATH. Starting winget bootstrap.
+
+    where winget.exe >nul 2>nul
+    if errorlevel 1 (
+        >> "!BOOTSTRAP_LOG!" echo ERROR: Neither Git nor winget was found.
+        powershell.exe -NoProfile -Command "Write-Host 'ERROR: Git is missing and Windows Package Manager (winget) is unavailable.' -ForegroundColor Red"
+        powershell.exe -NoProfile -Command "Write-Host 'Install Microsoft App Installer / winget, then run upgrade.cmd again.' -ForegroundColor Yellow"
+        exit /b 1
+    )
+
+    winget install --id Git.Git --exact --source winget --silent --disable-interactivity --accept-source-agreements --accept-package-agreements
+    set "GIT_INSTALL_RC=!ERRORLEVEL!"
+    if not "!GIT_INSTALL_RC!"=="0" (
+        >> "!BOOTSTRAP_LOG!" echo ERROR: winget failed to install Git. Exit code !GIT_INSTALL_RC!.
+        powershell.exe -NoProfile -Command "Write-Host 'ERROR: winget could not install Git for Windows.' -ForegroundColor Red"
+        exit /b !GIT_INSTALL_RC!
+    )
+
+    if exist "%ProgramFiles%\Git\cmd\git.exe" set "PATH=%ProgramFiles%\Git\cmd;!PATH!"
+    if exist "%ProgramFiles(x86)%\Git\cmd\git.exe" set "PATH=%ProgramFiles(x86)%\Git\cmd;!PATH!"
+    if exist "%LocalAppData%\Programs\Git\cmd\git.exe" set "PATH=%LocalAppData%\Programs\Git\cmd;!PATH!"
+
+    where git.exe >nul 2>nul
+    if errorlevel 1 (
+        >> "!BOOTSTRAP_LOG!" echo ERROR: Git installation completed but git.exe is still unavailable.
+        powershell.exe -NoProfile -Command "Write-Host 'ERROR: Git was installed but git.exe is not available to this process.' -ForegroundColor Red"
+        powershell.exe -NoProfile -Command "Write-Host 'Open a new Command Prompt and run upgrade.cmd again.' -ForegroundColor Yellow"
+        exit /b 1
+    )
+
+    for /f "delims=" %%G in ('git --version 2^>nul') do set "GIT_VERSION=%%G"
+    echo Git installed successfully: !GIT_VERSION!
+    >> "!BOOTSTRAP_LOG!" echo INFO: Git bootstrap completed: !GIT_VERSION!.
 )
 
+rem ---------------------------------------------------------------------------
+rem Repository bootstrap
+rem ---------------------------------------------------------------------------
 git rev-parse --is-inside-work-tree >nul 2>nul
 if errorlevel 1 (
-    > "!BOOTSTRAP_LOG!" echo ERROR: This folder is not a Git working tree.
-    powershell.exe -NoProfile -Command "Write-Host 'ERROR: This folder is not a Git working tree.' -ForegroundColor Red"
-    exit /b 1
+    rem This mode is intended for a standalone copy of upgrade.cmd. Put the file
+    rem in the parent directory where the VMU folder should be created.
+    set "CLONE_DIR=!REPO_DIR!\VirtualMonitorsUniverse"
+    echo.
+    echo No VMU Git working tree was found.
+    echo Cloning !REPOSITORY_BRANCH! into:
+    echo   !CLONE_DIR!
+    >> "!BOOTSTRAP_LOG!" echo INFO: No working tree found. Cloning !REPOSITORY_URL! branch !REPOSITORY_BRANCH! to !CLONE_DIR!.
+
+    if exist "!CLONE_DIR!\.git" (
+        powershell.exe -NoProfile -Command "Write-Host 'ERROR: Target folder already contains a Git repository.' -ForegroundColor Red"
+        exit /b 1
+    )
+    if exist "!CLONE_DIR!" (
+        dir /b "!CLONE_DIR!" 2>nul | findstr . >nul
+        if not errorlevel 1 (
+            powershell.exe -NoProfile -Command "Write-Host 'ERROR: Target folder already exists and is not empty:' -ForegroundColor Red"
+            echo !CLONE_DIR!
+            exit /b 1
+        )
+    )
+
+    git clone --branch "!REPOSITORY_BRANCH!" --single-branch "!REPOSITORY_URL!" "!CLONE_DIR!"
+    if errorlevel 1 (
+        >> "!BOOTSTRAP_LOG!" echo ERROR: Repository clone failed.
+        powershell.exe -NoProfile -Command "Write-Host 'ERROR: VMU repository clone failed.' -ForegroundColor Red"
+        exit /b 1
+    )
+
+    echo.
+    echo Repository cloned successfully.
+    echo Continuing with the repository upgrade script...
+    call "!CLONE_DIR!\upgrade.cmd" !ORIGINAL_ARGS!
+    exit /b !ERRORLEVEL!
 )
 
+rem ---------------------------------------------------------------------------
+rem Normal in-repository upgrade
+rem ---------------------------------------------------------------------------
 git fetch origin >nul 2>nul
 if errorlevel 1 (
     > "!BOOTSTRAP_LOG!" echo ERROR: git fetch origin failed before PowerShell runner bootstrap.
