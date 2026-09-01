@@ -2,7 +2,7 @@
 cls
 setlocal EnableExtensions EnableDelayedExpansion
 
-set "UPGRADE_REV=2.4-network-safe"
+set "UPGRADE_REV=2.5-repo-cache"
 set "REPOSITORY_URL=https://github.com/Suenee/VirtualMonitorsUniverse.git"
 set "REPOSITORY_BRANCH=devel"
 set "ORIGINAL_ARGS=%*"
@@ -18,21 +18,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem Keep .NET/NuGet caches on the local computer even when the source tree is on
-rem a NAS or mapped network drive. NUGET_PACKAGES is an officially supported
-rem override for the global packages folder and avoids unnecessary network I/O.
-if defined LOCALAPPDATA (
-    set "VMU_LOCAL_STATE=%LOCALAPPDATA%\VirtualMonitorsUniverse"
-) else (
-    set "VMU_LOCAL_STATE=%TEMP%\VirtualMonitorsUniverse"
-)
-set "DOTNET_CLI_HOME=!VMU_LOCAL_STATE!\dotnet-home"
-set "NUGET_PACKAGES=!VMU_LOCAL_STATE!\nuget\packages"
-set "NUGET_HTTP_CACHE_PATH=!VMU_LOCAL_STATE!\nuget\http-cache"
-set "NUGET_SCRATCH=!VMU_LOCAL_STATE!\nuget\scratch"
+rem VMU-owned persistent state stays with the repository. Windows TEMP may be
+rem used for genuinely temporary files such as the transient upgrade.ps1 runner,
+rem but AppData and other persistent C: locations are not used for VMU caches.
+set "VMU_CACHE_ROOT=!REPO_DIR!\.cache"
+set "DOTNET_CLI_HOME=!VMU_CACHE_ROOT!\dotnet-home"
+set "NUGET_PACKAGES=!VMU_CACHE_ROOT!\nuget\packages"
+set "NUGET_HTTP_CACHE_PATH=!VMU_CACHE_ROOT!\nuget\http-cache"
+set "NUGET_SCRATCH=!VMU_CACHE_ROOT!\nuget\scratch"
 set "DOTNET_CLI_TELEMETRY_OPTOUT=1"
 set "DOTNET_NOLOGO=1"
 for %%D in ("!DOTNET_CLI_HOME!" "!NUGET_PACKAGES!" "!NUGET_HTTP_CACHE_PATH!" "!NUGET_SCRATCH!") do if not exist "%%~D" mkdir "%%~D" >nul 2>nul
+
+rem Remove the legacy VMU-specific AppData cache created by older revisions.
+if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\VirtualMonitorsUniverse" (
+    echo Removing legacy VMU cache from LocalAppData...
+    rmdir /s /q "%LOCALAPPDATA%\VirtualMonitorsUniverse" >nul 2>nul
+)
 
 rem Trust only this explicitly selected working tree for this process. This
 rem prevents Git's dubious-ownership protection from breaking a repository that
@@ -57,7 +59,7 @@ set "RUN_LABEL=no"
 if "!DO_TEST!"=="1" set "TEST_LABEL=yes"
 if "!DO_RUN!"=="1" set "RUN_LABEL=yes"
 echo Requested post actions: test=!TEST_LABEL!, run=!RUN_LABEL!
-echo Local build cache: !VMU_LOCAL_STATE!
+echo VMU build cache: !VMU_CACHE_ROOT!
 
 if not exist "!REPO_DIR!\logs" mkdir "!REPO_DIR!\logs" >nul 2>nul
 set "BOOTSTRAP_LOG=!REPO_DIR!\logs\upgrade.log"
@@ -168,6 +170,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem This file is intentionally transient, so Windows TEMP is the correct place.
 set "RUNNER_TEMP=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.ps1"
 git show origin/devel:upgrade.ps1 > "!RUNNER_TEMP!" 2>nul
 if errorlevel 1 (
