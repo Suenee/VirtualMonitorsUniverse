@@ -14,10 +14,6 @@ fetch('/api/settings', { cache: 'no-store' }).then(r => r.json()).then(s => {
   arrangementSnapTolerance = Math.min(50, Math.max(5, s.webUi?.arrangementSnapTolerancePx ?? 15));
 }).catch(() => {});
 
-// The arrangement page does not need the redundant VMU home shortcut in the
-// monitor navigation strip. Primary navigation remains available from the menu.
-document.querySelector('.vmuAppHome')?.remove();
-
 // Override the first-pass snap function with the configured tolerance expressed
 // in real Windows desktop pixels, independent of browser zoom or workspace scale.
 snap = function (i, nx, ny) {
