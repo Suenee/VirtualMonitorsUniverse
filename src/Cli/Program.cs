@@ -1,3 +1,4 @@
+using Microsoft.Win32;
 using System.Reflection;
 using System.Security.Principal;
 using VirtualMonitorsUniverse.Core;
@@ -52,7 +53,7 @@ internal static class Program
         if (!OperatingSystem.IsWindows())
             return AlphaSelfTestRunner.Run();
 
-        if (IsAdministrator())
+        if (IsAdministrator() || ElevationIsConfiguredWithoutPrompt())
         {
             CliConsole.WriteStatusLine("SELFTEST PRIVILEGES .... ", "PASS", " - direct Windows path");
             return AlphaSelfTestRunner.Run();
@@ -68,6 +69,16 @@ internal static class Program
 
         using var identity = WindowsIdentity.GetCurrent();
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private static bool ElevationIsConfiguredWithoutPrompt()
+    {
+        if (!OperatingSystem.IsWindows())
+            return false;
+
+        const string key = @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
+        var value = Registry.GetValue(key, "ConsentPromptBehaviorAdmin", null);
+        return value is int promptBehavior && promptBehavior == 0;
     }
 
     private static int RunDriverCommand(string[] args)
