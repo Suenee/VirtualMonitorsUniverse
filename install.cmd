@@ -8,7 +8,7 @@ rem
 rem This file is intentionally self-contained so it can be copied to a new
 rem Windows computer and executed from any local or network location.
 rem ---------------------------------------------------------------------------
-set "INSTALL_REV=1.1-network-safe"
+set "INSTALL_REV=1.2-repo-cache"
 set "REPOSITORY_URL=https://github.com/Suenee/VirtualMonitorsUniverse.git"
 set "REPOSITORY_BRANCH=devel"
 set "TARGET_DIR=N:\WORK\GitHub\VirtualMonitorsUniverse"
@@ -21,20 +21,22 @@ echo Branch: %REPOSITORY_BRANCH%
 echo Installer: %INSTALL_REV%
 echo.
 
-rem Keep build caches and temporary .NET state on the local computer. This is
-rem important when the repository itself lives on a mapped network drive.
-if defined LOCALAPPDATA (
-    set "VMU_LOCAL_STATE=%LOCALAPPDATA%\VirtualMonitorsUniverse"
-) else (
-    set "VMU_LOCAL_STATE=%TEMP%\VirtualMonitorsUniverse"
-)
-set "DOTNET_CLI_HOME=!VMU_LOCAL_STATE!\dotnet-home"
-set "NUGET_PACKAGES=!VMU_LOCAL_STATE!\nuget\packages"
-set "NUGET_HTTP_CACHE_PATH=!VMU_LOCAL_STATE!\nuget\http-cache"
-set "NUGET_SCRATCH=!VMU_LOCAL_STATE!\nuget\scratch"
+rem VMU-owned persistent state must stay with the repository. The Windows TEMP
+rem directory may be used for genuinely temporary files, but AppData and other
+rem persistent locations on C: must not be used for VMU caches or state.
+set "VMU_CACHE_ROOT=%TARGET_DIR%\.cache"
+set "DOTNET_CLI_HOME=!VMU_CACHE_ROOT!\dotnet-home"
+set "NUGET_PACKAGES=!VMU_CACHE_ROOT!\nuget\packages"
+set "NUGET_HTTP_CACHE_PATH=!VMU_CACHE_ROOT!\nuget\http-cache"
+set "NUGET_SCRATCH=!VMU_CACHE_ROOT!\nuget\scratch"
 set "DOTNET_CLI_TELEMETRY_OPTOUT=1"
 set "DOTNET_NOLOGO=1"
-for %%D in ("!DOTNET_CLI_HOME!" "!NUGET_PACKAGES!" "!NUGET_HTTP_CACHE_PATH!" "!NUGET_SCRATCH!") do if not exist "%%~D" mkdir "%%~D" >nul 2>nul
+
+rem Remove the legacy VMU-specific AppData cache created by older installers.
+if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\VirtualMonitorsUniverse" (
+    echo Removing legacy VMU cache from LocalAppData...
+    rmdir /s /q "%LOCALAPPDATA%\VirtualMonitorsUniverse" >nul 2>nul
+)
 
 rem ---------------------------------------------------------------------------
 rem Git bootstrap
@@ -116,6 +118,8 @@ if not exist "%TARGET_DIR%\upgrade.cmd" (
 )
 
 :run_upgrade
+for %%D in ("!DOTNET_CLI_HOME!" "!NUGET_PACKAGES!" "!NUGET_HTTP_CACHE_PATH!" "!NUGET_SCRATCH!") do if not exist "%%~D" mkdir "%%~D" >nul 2>nul
+
 rem Process-local safe.directory avoids changing the user's global Git config,
 rem while allowing a trusted working tree hosted by a NAS/network share.
 set "GIT_CONFIG_COUNT=1"
@@ -150,7 +154,7 @@ echo INSTALL COMPLETED SUCCESSFULLY
 echo ============================================
 echo Location: %TARGET_DIR%
 echo Branch: %REPOSITORY_BRANCH%
-echo Local build cache: !VMU_LOCAL_STATE!
+echo VMU build cache: !VMU_CACHE_ROOT!
 echo.
 echo Start CLI:    %TARGET_DIR%\vmu.cmd
 echo Start server: %TARGET_DIR%\vmu-server.cmd
