@@ -11,36 +11,52 @@ namespace VirtualMonitorsUniverse.Cli;
 /// task when Windows would otherwise require repeated elevation prompts.
 /// </summary>
 /// <remarks>
-/// The task is intentionally limited to the VMU self-test worker command. It is
-/// not a generic elevated command runner. To avoid Windows 10 elevated-task
-/// access problems with mapped/network drives, the executable payload is staged
-/// in the current user's TEMP directory before the task is started. Repository
-/// data, logs, runtime output and caches remain in the repository itself.
+/// The normal CLI is launched through <c>dotnet vmu.dll</c>. The privileged task
+/// therefore stages only the published VMU CLI payload in the user's TEMP folder
+/// and executes the real installed dotnet host against that staged DLL. This
+/// avoids copying an incomplete .NET installation and also avoids relying on a
+/// mapped network drive in the elevated Task Scheduler context.
 /// </remarks>
 internal static class PrivilegedSelfTestLauncher
 {
     private const int NoError = 0;
-    private const string TaskPrefix = "VirtualMonitorsUniverse-SelfTest-v2-";
+    private const string TaskPrefix = "VirtualMonitorsUniverse-SelfTest-v3-";
+    private const string OldTaskPattern = "VirtualMonitorsUniverse-SelfTest-*";
 
     public static int Run()
+    {
+        try
+        {
+            return RunCore();
+        }
+        catch (Exception ex)
+        {
+            CliConsole.WriteStatusLine("SELFTEST ELEVATED ...... ", "FAIL", $" - {ex.Message}");
+            CliConsole.WriteFinalStatus(false);
+            return 1;
+        }
+    }
+
+    private static int RunCore()
     {
         if (!OperatingSystem.IsWindows())
             return AlphaSelfTestRunner.Run();
 
-        var executable = Environment.ProcessPath
-            ?? throw new InvalidOperationException("Could not resolve the VMU executable path.");
-        var repoRoot = ResolveRepositoryRoot(executable);
+        var dotnetExecutable = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Could not resolve the active dotnet host path.");
+        var repoRoot = ResolveRepositoryRoot();
         var taskRepoRoot = ResolveMappedPath(repoRoot);
-        var stagedExecutable = StageRuntimeToTemp(executable);
+        var stagedDll = StageCliRuntimeToTemp(repoRoot);
         var taskName = BuildTaskName(taskRepoRoot);
-        var resultFile = Path.Combine(Path.GetTempPath(), $"VMU-selftest-{BuildStableId(taskRepoRoot)}.result");
-        var startedFile = Path.Combine(Path.GetTempPath(), $"VMU-selftest-{BuildStableId(taskRepoRoot)}.started");
+        var stableId = BuildStableId(taskRepoRoot);
+        var resultFile = Path.Combine(Path.GetTempPath(), $"VMU-selftest-{stableId}.result");
+        var startedFile = Path.Combine(Path.GetTempPath(), $"VMU-selftest-{stableId}.started");
 
         if (!TaskExists(taskName))
         {
             CliConsole.WriteStatusLine("SELFTEST PRIVILEGES .... ", "SETUP", " - one-time Windows permission helper");
             Console.WriteLine("                         Windows should ask for approval once");
-            RegisterTaskElevated(taskName, stagedExecutable, taskRepoRoot, resultFile, startedFile);
+            RegisterTaskElevated(taskName, dotnetExecutable, stagedDll, taskRepoRoot, resultFile, startedFile);
             CliConsole.WriteStatusLine("SELFTEST PRIVILEGES .... ", "PASS", " - persistent helper registered");
         }
         else
@@ -85,9 +101,9 @@ internal static class PrivilegedSelfTestLauncher
         var startedFile = ReadOption(args, "--started-file")
             ?? throw new ArgumentException("Missing --started-file for privileged self-test worker.");
 
-        Environment.SetEnvironmentVariable("VMU_REPO_ROOT", repoRoot);
         Directory.CreateDirectory(Path.GetDirectoryName(startedFile)!);
         File.WriteAllText(startedFile, DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+        Environment.SetEnvironmentVariable("VMU_REPO_ROOT", repoRoot);
 
         var exitCode = 1;
         try
@@ -118,40 +134,39 @@ internal static class PrivilegedSelfTestLauncher
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
     }
 
-    private static string ResolveRepositoryRoot(string executable)
+    private static string ResolveRepositoryRoot()
     {
         var repoRoot = Environment.GetEnvironmentVariable("VMU_REPO_ROOT");
-        if (!string.IsNullOrWhiteSpace(repoRoot))
-            return Path.GetFullPath(repoRoot);
-
-        var directory = new DirectoryInfo(Path.GetDirectoryName(executable)!);
-        while (directory is not null)
-        {
-            if (File.Exists(Path.Combine(directory.FullName, "VirtualMonitorsUniverse.sln")))
-                return directory.FullName;
-            directory = directory.Parent;
-        }
-
-        throw new InvalidOperationException("Could not resolve the VMU repository root.");
+        if (string.IsNullOrWhiteSpace(repoRoot))
+            throw new InvalidOperationException("VMU_REPO_ROOT is not set. Start the CLI through vmu.cmd.");
+        return Path.GetFullPath(repoRoot);
     }
 
-    private static string StageRuntimeToTemp(string executable)
+    private static string StageCliRuntimeToTemp(string repoRoot)
     {
-        var sourceDirectory = Path.GetDirectoryName(executable)
-            ?? throw new InvalidOperationException("Could not resolve the VMU runtime directory.");
-        var stageDirectory = Path.Combine(Path.GetTempPath(), "VirtualMonitorsUniverse", "privileged-selftest-v2");
-        Directory.CreateDirectory(stageDirectory);
+        var sourceDirectory = Path.Combine(repoRoot, ".runtime", "cli");
+        if (!Directory.Exists(sourceDirectory))
+            throw new DirectoryNotFoundException($"Published VMU CLI runtime is missing: {sourceDirectory}");
 
-        foreach (var sourceFile in Directory.EnumerateFiles(sourceDirectory))
-        {
-            var destination = Path.Combine(stageDirectory, Path.GetFileName(sourceFile));
-            File.Copy(sourceFile, destination, overwrite: true);
-        }
+        var stageDirectory = Path.Combine(Path.GetTempPath(), "VirtualMonitorsUniverse", "privileged-selftest-v3");
+        if (Directory.Exists(stageDirectory))
+            Directory.Delete(stageDirectory, recursive: true);
+        CopyDirectory(sourceDirectory, stageDirectory);
 
-        var stagedExecutable = Path.Combine(stageDirectory, Path.GetFileName(executable));
-        if (!File.Exists(stagedExecutable))
-            throw new FileNotFoundException("The staged VMU privileged helper executable is missing.", stagedExecutable);
-        return stagedExecutable;
+        var stagedDll = Path.Combine(stageDirectory, "vmu.dll");
+        if (!File.Exists(stagedDll))
+            throw new FileNotFoundException("The staged VMU CLI entry DLL is missing.", stagedDll);
+        return stagedDll;
+    }
+
+    private static void CopyDirectory(string sourceDirectory, string destinationDirectory)
+    {
+        Directory.CreateDirectory(destinationDirectory);
+        foreach (var file in Directory.EnumerateFiles(sourceDirectory))
+            File.Copy(file, Path.Combine(destinationDirectory, Path.GetFileName(file)), overwrite: true);
+
+        foreach (var directory in Directory.EnumerateDirectories(sourceDirectory))
+            CopyDirectory(directory, Path.Combine(destinationDirectory, Path.GetFileName(directory)));
     }
 
     private static string BuildTaskName(string repoRoot) => TaskPrefix + BuildStableId(repoRoot);
@@ -179,7 +194,8 @@ internal static class PrivilegedSelfTestLauncher
 
     private static void RegisterTaskElevated(
         string taskName,
-        string executable,
+        string dotnetExecutable,
+        string stagedDll,
         string repoRoot,
         string resultFile,
         string startedFile)
@@ -191,12 +207,13 @@ internal static class PrivilegedSelfTestLauncher
             ?? throw new InvalidOperationException("Could not resolve the current Windows user SID.");
 
         var workerArguments =
-            $"selftest --privileged-worker --repo-root {QuoteArgument(repoRoot)} " +
+            $"{QuoteArgument(stagedDll)} selftest --privileged-worker --repo-root {QuoteArgument(repoRoot)} " +
             $"--result-file {QuoteArgument(resultFile)} --started-file {QuoteArgument(startedFile)}";
-        var workingDirectory = Path.GetDirectoryName(executable)!;
+        var workingDirectory = Path.GetDirectoryName(stagedDll)!;
         var script = string.Join("; ",
             "$ErrorActionPreference='Stop'",
-            $"$action=New-ScheduledTaskAction -Execute {PsQuote(executable)} -Argument {PsQuote(workerArguments)} -WorkingDirectory {PsQuote(workingDirectory)}",
+            $"Get-ScheduledTask -TaskName {PsQuote(OldTaskPattern)} -ErrorAction SilentlyContinue | Where-Object {{$_.TaskName -ne {PsQuote(taskName)}}} | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue",
+            $"$action=New-ScheduledTaskAction -Execute {PsQuote(dotnetExecutable)} -Argument {PsQuote(workerArguments)} -WorkingDirectory {PsQuote(workingDirectory)}",
             $"$principal=New-ScheduledTaskPrincipal -UserId {PsQuote(sid)} -LogonType Interactive -RunLevel Highest",
             "$trigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)",
             $"Register-ScheduledTask -TaskName {PsQuote(taskName)} -Action $action -Principal $principal -Trigger $trigger -Force | Out-Null");
