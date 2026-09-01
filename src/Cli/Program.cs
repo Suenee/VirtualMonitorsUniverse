@@ -13,7 +13,7 @@ internal static class Program
         {
             "help" or "--help" or "-h" => ShowHelp(),
             "version" or "--version" => ShowVersion(),
-            "selftest" => RunSelfTest(),
+            "selftest" => RunSelfTest(args.Skip(1).ToArray()),
             "driver" => RunDriverCommand(args.Skip(1).ToArray()),
             "monitor" => MonitorCli.Run(args.Skip(1).ToArray()),
             _ => UnknownCommand(command)
@@ -27,7 +27,7 @@ internal static class Program
         Console.WriteLine("Commands:");
         Console.WriteLine("  vmu help                         Show this help");
         Console.WriteLine("  vmu version                      Show CLI version");
-        Console.WriteLine("  vmu selftest                     Run final ALPHA multi-VDD acceptance diagnostics (Administrator terminal required)");
+        Console.WriteLine("  vmu selftest                     Run final ALPHA multi-VDD acceptance diagnostics");
         Console.WriteLine("  vmu driver status                Show read-only VDD dependency diagnostics");
         Console.WriteLine("  vmu driver install               Install the pinned ALPHA-validated VDD dependency");
         Console.WriteLine("  vmu driver purge                 Emergency: remove VDD device nodes and all virtual monitors");
@@ -44,24 +44,21 @@ internal static class Program
         return 0;
     }
 
-    private static int RunSelfTest()
+    private static int RunSelfTest(string[] args)
     {
+        if (args.Any(value => string.Equals(value, "--privileged-worker", StringComparison.OrdinalIgnoreCase)))
+            return PrivilegedSelfTestLauncher.RunWorker(args);
+
         if (!OperatingSystem.IsWindows())
             return AlphaSelfTestRunner.Run();
 
-        if (!IsAdministrator())
+        if (IsAdministrator())
         {
-            CliConsole.WriteStatusLine("SELFTEST PRIVILEGES .... ", "FAIL", " - Administrator terminal required");
-            Console.WriteLine("The hardware acceptance test installs and removes Windows display-class device nodes.");
-            Console.WriteLine("Open Command Prompt or Windows Terminal once with 'Run as administrator', then run:");
-            Console.WriteLine("  vmu selftest");
-            Console.WriteLine();
-            Console.WriteLine("VMU does not auto-elevate the whole process because the repository may be on a mapped network drive.");
-            CliConsole.WriteFinalStatus(false);
-            return 1;
+            CliConsole.WriteStatusLine("SELFTEST PRIVILEGES .... ", "PASS", " - direct Windows path");
+            return AlphaSelfTestRunner.Run();
         }
 
-        return AlphaSelfTestRunner.Run();
+        return PrivilegedSelfTestLauncher.Run();
     }
 
     private static bool IsAdministrator()
