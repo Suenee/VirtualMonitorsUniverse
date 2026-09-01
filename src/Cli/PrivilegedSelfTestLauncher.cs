@@ -8,17 +8,19 @@ namespace VirtualMonitorsUniverse.Cli;
 
 /// <summary>
 /// Runs the hardware self-test through a persistent, narrowly scoped scheduled
-/// task when the current process does not already have an elevated Windows token.
+/// task when Windows would otherwise require repeated elevation prompts.
 /// </summary>
 /// <remarks>
 /// The task is intentionally limited to the VMU self-test worker command. It is
-/// not a generic elevated command runner. The task is registered once with the
-/// highest run level and can then be started without additional UAC prompts.
+/// not a generic elevated command runner. To avoid Windows 10 elevated-task
+/// access problems with mapped/network drives, the executable payload is staged
+/// in the current user's TEMP directory before the task is started. Repository
+/// data, logs, runtime output and caches remain in the repository itself.
 /// </remarks>
 internal static class PrivilegedSelfTestLauncher
 {
     private const int NoError = 0;
-    private const string TaskPrefix = "VirtualMonitorsUniverse-SelfTest-";
+    private const string TaskPrefix = "VirtualMonitorsUniverse-SelfTest-v2-";
 
     public static int Run()
     {
@@ -28,16 +30,17 @@ internal static class PrivilegedSelfTestLauncher
         var executable = Environment.ProcessPath
             ?? throw new InvalidOperationException("Could not resolve the VMU executable path.");
         var repoRoot = ResolveRepositoryRoot(executable);
-        var taskExecutable = ResolveMappedPath(executable);
         var taskRepoRoot = ResolveMappedPath(repoRoot);
-        var taskName = BuildTaskName(taskExecutable, taskRepoRoot);
-        var resultFile = Path.Combine(Path.GetTempPath(), $"VMU-selftest-{Environment.UserName}.result");
+        var stagedExecutable = StageRuntimeToTemp(executable);
+        var taskName = BuildTaskName(taskRepoRoot);
+        var resultFile = Path.Combine(Path.GetTempPath(), $"VMU-selftest-{BuildStableId(taskRepoRoot)}.result");
+        var startedFile = Path.Combine(Path.GetTempPath(), $"VMU-selftest-{BuildStableId(taskRepoRoot)}.started");
 
         if (!TaskExists(taskName))
         {
             CliConsole.WriteStatusLine("SELFTEST PRIVILEGES .... ", "SETUP", " - one-time Windows permission helper");
             Console.WriteLine("                         Windows should ask for approval once");
-            RegisterTaskElevated(taskName, taskExecutable, taskRepoRoot, resultFile);
+            RegisterTaskElevated(taskName, stagedExecutable, taskRepoRoot, resultFile, startedFile);
             CliConsole.WriteStatusLine("SELFTEST PRIVILEGES .... ", "PASS", " - persistent helper registered");
         }
         else
@@ -46,8 +49,17 @@ internal static class PrivilegedSelfTestLauncher
         }
 
         TryDelete(resultFile);
+        TryDelete(startedFile);
         CliConsole.WriteStatusLine("SELFTEST ELEVATED ...... ", "RUN");
         RunSchtasks($"/Run /TN \"{taskName}\"");
+
+        if (!WaitForFile(startedFile, TimeSpan.FromSeconds(15)))
+        {
+            var diagnostic = ReadTaskDiagnostic(taskName);
+            throw new InvalidOperationException(
+                "Privileged self-test helper did not start within 15 seconds." +
+                (string.IsNullOrWhiteSpace(diagnostic) ? string.Empty : $" Task Scheduler: {diagnostic}"));
+        }
 
         var exitCode = WaitForResult(resultFile, TimeSpan.FromMinutes(10));
         var selfTestLog = Path.Combine(repoRoot, "logs", "vmu-selftest.log");
@@ -70,8 +82,13 @@ internal static class PrivilegedSelfTestLauncher
             ?? throw new ArgumentException("Missing --repo-root for privileged self-test worker.");
         var resultFile = ReadOption(args, "--result-file")
             ?? throw new ArgumentException("Missing --result-file for privileged self-test worker.");
+        var startedFile = ReadOption(args, "--started-file")
+            ?? throw new ArgumentException("Missing --started-file for privileged self-test worker.");
 
         Environment.SetEnvironmentVariable("VMU_REPO_ROOT", repoRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(startedFile)!);
+        File.WriteAllText(startedFile, DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+
         var exitCode = 1;
         try
         {
@@ -87,7 +104,7 @@ internal static class PrivilegedSelfTestLauncher
             }
             catch
             {
-                // The caller has a timeout and will report an explicit helper failure.
+                // The caller has a timeout and reports an explicit helper failure.
             }
         }
     }
@@ -118,10 +135,31 @@ internal static class PrivilegedSelfTestLauncher
         throw new InvalidOperationException("Could not resolve the VMU repository root.");
     }
 
-    private static string BuildTaskName(string executable, string repoRoot)
+    private static string StageRuntimeToTemp(string executable)
     {
-        var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(executable + "|" + repoRoot));
-        return TaskPrefix + Convert.ToHexString(bytes.AsSpan(0, 6));
+        var sourceDirectory = Path.GetDirectoryName(executable)
+            ?? throw new InvalidOperationException("Could not resolve the VMU runtime directory.");
+        var stageDirectory = Path.Combine(Path.GetTempPath(), "VirtualMonitorsUniverse", "privileged-selftest-v2");
+        Directory.CreateDirectory(stageDirectory);
+
+        foreach (var sourceFile in Directory.EnumerateFiles(sourceDirectory))
+        {
+            var destination = Path.Combine(stageDirectory, Path.GetFileName(sourceFile));
+            File.Copy(sourceFile, destination, overwrite: true);
+        }
+
+        var stagedExecutable = Path.Combine(stageDirectory, Path.GetFileName(executable));
+        if (!File.Exists(stagedExecutable))
+            throw new FileNotFoundException("The staged VMU privileged helper executable is missing.", stagedExecutable);
+        return stagedExecutable;
+    }
+
+    private static string BuildTaskName(string repoRoot) => TaskPrefix + BuildStableId(repoRoot);
+
+    private static string BuildStableId(string value)
+    {
+        var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        return Convert.ToHexString(bytes.AsSpan(0, 6));
     }
 
     private static bool TaskExists(string taskName)
@@ -139,7 +177,12 @@ internal static class PrivilegedSelfTestLauncher
         return process.ExitCode == 0;
     }
 
-    private static void RegisterTaskElevated(string taskName, string executable, string repoRoot, string resultFile)
+    private static void RegisterTaskElevated(
+        string taskName,
+        string executable,
+        string repoRoot,
+        string resultFile,
+        string startedFile)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Privileged self-test helper registration is supported only on Windows.");
@@ -147,10 +190,13 @@ internal static class PrivilegedSelfTestLauncher
         var sid = WindowsIdentity.GetCurrent().User?.Value
             ?? throw new InvalidOperationException("Could not resolve the current Windows user SID.");
 
-        var workerArguments = $"selftest --privileged-worker --repo-root {QuoteArgument(repoRoot)} --result-file {QuoteArgument(resultFile)}";
+        var workerArguments =
+            $"selftest --privileged-worker --repo-root {QuoteArgument(repoRoot)} " +
+            $"--result-file {QuoteArgument(resultFile)} --started-file {QuoteArgument(startedFile)}";
+        var workingDirectory = Path.GetDirectoryName(executable)!;
         var script = string.Join("; ",
             "$ErrorActionPreference='Stop'",
-            $"$action=New-ScheduledTaskAction -Execute {PsQuote(executable)} -Argument {PsQuote(workerArguments)} -WorkingDirectory {PsQuote(repoRoot)}",
+            $"$action=New-ScheduledTaskAction -Execute {PsQuote(executable)} -Argument {PsQuote(workerArguments)} -WorkingDirectory {PsQuote(workingDirectory)}",
             $"$principal=New-ScheduledTaskPrincipal -UserId {PsQuote(sid)} -LogonType Interactive -RunLevel Highest",
             "$trigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddYears(10)",
             $"Register-ScheduledTask -TaskName {PsQuote(taskName)} -Action $action -Principal $principal -Trigger $trigger -Force | Out-Null");
@@ -203,6 +249,18 @@ internal static class PrivilegedSelfTestLauncher
         }
     }
 
+    private static bool WaitForFile(string path, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (File.Exists(path))
+                return true;
+            Thread.Sleep(200);
+        }
+        return File.Exists(path);
+    }
+
     private static int WaitForResult(string path, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
@@ -221,6 +279,31 @@ internal static class PrivilegedSelfTestLauncher
         }
 
         throw new TimeoutException("Privileged self-test helper did not return a result within 10 minutes.");
+    }
+
+    private static string ReadTaskDiagnostic(string taskName)
+    {
+        var script =
+            $"$t=Get-ScheduledTask -TaskName {PsQuote(taskName)} -ErrorAction SilentlyContinue; " +
+            "if($null -eq $t){'task missing'; exit}; " +
+            $"$i=Get-ScheduledTaskInfo -TaskName {PsQuote(taskName)}; " +
+            "'state=' + $t.State + ', lastResult=0x' + ([uint32]$i.LastTaskResult).ToString('X8')";
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = GetPowerShellPath(),
+            Arguments = $"-NoProfile -NonInteractive -EncodedCommand {encoded}",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        });
+        if (process is null)
+            return string.Empty;
+        var stdout = process.StandardOutput.ReadToEnd().Trim();
+        var stderr = process.StandardError.ReadToEnd().Trim();
+        process.WaitForExit();
+        return string.IsNullOrWhiteSpace(stdout) ? stderr : stdout;
     }
 
     private static string ResolveMappedPath(string path)
