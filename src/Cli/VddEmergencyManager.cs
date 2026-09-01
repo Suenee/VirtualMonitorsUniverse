@@ -125,7 +125,21 @@ internal static class VddEmergencyManager
 
     private static IReadOnlyList<PnpDisplayDevice> QueryDisplayDevices()
     {
-        var output = RunPnPUtilCapture("/enum-devices /class Display /properties");
+        // /properties is available only on newer PnPUtil implementations. VMU only
+        // needs Instance ID + description for normal discovery, so gracefully fall
+        // back to the older command form. DriverInf becomes optional in that case;
+        // purge can still recover the exact MttVDD package through /enum-drivers.
+        string output;
+        if (!TryRunPnPUtilCapture("/enum-devices /class Display /properties", out output, out var propertiesError))
+        {
+            if (!TryRunPnPUtilCapture("/enum-devices /class Display", out output, out var basicError))
+            {
+                throw new InvalidOperationException(
+                    "Could not enumerate Display-class devices with pnputil.exe. " +
+                    $"With /properties: {propertiesError} Fallback: {basicError}");
+            }
+        }
+
         var blocks = Regex.Split(output, @"(?:\r?\n){2,}");
         var result = new List<PnpDisplayDevice>();
 
@@ -187,6 +201,16 @@ internal static class VddEmergencyManager
 
     private static string RunPnPUtilCapture(string arguments)
     {
+        if (TryRunPnPUtilCapture(arguments, out var stdout, out var error))
+        {
+            return stdout;
+        }
+
+        throw new InvalidOperationException(error);
+    }
+
+    private static bool TryRunPnPUtilCapture(string arguments, out string stdout, out string error)
+    {
         var startInfo = new ProcessStartInfo
         {
             FileName = GetPnPUtilPath(),
@@ -199,16 +223,19 @@ internal static class VddEmergencyManager
 
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Could not start pnputil.exe.");
-        var stdout = process.StandardOutput.ReadToEnd();
+        stdout = process.StandardOutput.ReadToEnd();
         var stderr = process.StandardError.ReadToEnd();
         process.WaitForExit();
-        if (process.ExitCode != 0)
+        if (process.ExitCode == 0)
         {
-            throw new InvalidOperationException(
-                $"pnputil.exe {arguments} failed with exit code {process.ExitCode}: {stderr.Trim()}");
+            error = string.Empty;
+            return true;
         }
 
-        return stdout;
+        var diagnostic = !string.IsNullOrWhiteSpace(stderr) ? stderr.Trim() : stdout.Trim();
+        error = $"pnputil.exe {arguments} failed with exit code {process.ExitCode}" +
+                (string.IsNullOrWhiteSpace(diagnostic) ? "." : $": {diagnostic}");
+        return false;
     }
 
     private static void RunElevatedPnPUtil(string arguments)
