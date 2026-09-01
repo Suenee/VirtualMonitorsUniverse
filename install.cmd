@@ -8,11 +8,10 @@ rem
 rem This file is intentionally self-contained so it can be copied to a new
 rem Windows computer and executed from any local or network location.
 rem ---------------------------------------------------------------------------
-set "INSTALL_REV=1.0-network-safe"
+set "INSTALL_REV=1.1-network-safe"
 set "REPOSITORY_URL=https://github.com/Suenee/VirtualMonitorsUniverse.git"
 set "REPOSITORY_BRANCH=devel"
 set "TARGET_DIR=N:\WORK\GitHub\VirtualMonitorsUniverse"
-set "ORIGINAL_ARGS=%*"
 
 echo ============================================
 echo Virtual Monitors Universe - FRESH INSTALL
@@ -123,8 +122,12 @@ set "GIT_CONFIG_COUNT=1"
 set "GIT_CONFIG_KEY_0=safe.directory"
 set "GIT_CONFIG_VALUE_0=%TARGET_DIR%"
 
-echo [4/5] Running dependency, build, test and publish pipeline...
-call "%TARGET_DIR%\upgrade.cmd" --test
+echo [4/5] Running dependency, build, unit-test and publish pipeline...
+rem Do not run "vmu selftest" here. VMU selftest is an invasive final ALPHA
+rem hardware acceptance test: it requires a clean VDD baseline and installs and
+rem removes real display-class device nodes. Installation success is determined
+rem by upgrade.ps1, which already performs restore, build, unit tests and publish.
+call "%TARGET_DIR%\upgrade.cmd"
 set "INSTALL_RC=!ERRORLEVEL!"
 if not "!INSTALL_RC!"=="0" (
     echo ERROR: VMU upgrade/build validation failed.
@@ -151,6 +154,9 @@ echo Local build cache: !VMU_LOCAL_STATE!
 echo.
 echo Start CLI:    %TARGET_DIR%\vmu.cmd
 echo Start server: %TARGET_DIR%\vmu-server.cmd
+echo.
+echo Optional hardware acceptance test:
+echo   %TARGET_DIR%\vmu.cmd selftest
 exit /b 0
 
 :failed
