@@ -2,8 +2,9 @@
 **/bin/
 **/obj/
 
-# Local runtime, persistent data, and logs
+# Local runtime, cache, persistent data, and logs
 .runtime/
+.cache/
 data/
 logs/
 
