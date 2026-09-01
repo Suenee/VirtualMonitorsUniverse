@@ -45,7 +45,7 @@ public sealed class WindowsVddNodeService
             foreach (var file in new[] { inf, cat, nefcon })
                 if (!File.Exists(file)) throw new FileNotFoundException("Required validated VDD payload is missing.", file);
 
-            ImportCatalogCertificates(cat);
+            ImportCatalogCertificates(cat, root);
             return new PreparedPayload(root, inf, nefcon);
         }
         catch
@@ -95,7 +95,16 @@ public sealed class WindowsVddNodeService
 
     private static IReadOnlyList<PnpDisplayDevice> QueryDisplayDevices()
     {
-        var output = RunPnPUtilCapture("/enum-devices /class Display /properties");
+        string output;
+        try
+        {
+            output = RunPnPUtilCapture("/enum-devices /class Display /properties");
+        }
+        catch (InvalidOperationException)
+        {
+            output = RunPnPUtilCapture("/enum-devices /class Display");
+        }
+
         var blocks = Regex.Split(output, @"(?:\r?\n){2,}");
         var result = new List<PnpDisplayDevice>();
         foreach (var block in blocks)
@@ -124,7 +133,10 @@ public sealed class WindowsVddNodeService
         var stderr = process.StandardError.ReadToEnd();
         process.WaitForExit();
         if (process.ExitCode != 0)
-            throw new InvalidOperationException($"pnputil.exe {arguments} failed with exit code {process.ExitCode}: {stderr.Trim()}");
+        {
+            var details = string.IsNullOrWhiteSpace(stderr) ? stdout.Trim() : stderr.Trim();
+            throw new InvalidOperationException($"pnputil.exe {arguments} failed with exit code {process.ExitCode}: {details}");
+        }
         return stdout;
     }
 
@@ -152,15 +164,27 @@ public sealed class WindowsVddNodeService
             throw new InvalidDataException($"SHA-256 mismatch for {Path.GetFileName(path)}.");
     }
 
-    private static void ImportCatalogCertificates(string catalogPath)
+    private static void ImportCatalogCertificates(string catalogPath, string workDirectory)
     {
         var signedCms = new SignedCms();
         signedCms.Decode(File.ReadAllBytes(catalogPath));
+
         using var store = new X509Store(StoreName.TrustedPublisher, StoreLocation.LocalMachine);
-        store.Open(OpenFlags.ReadWrite);
+        store.Open(OpenFlags.ReadOnly);
+
+        var index = 0;
         foreach (var certificate in signedCms.Certificates)
-            if (store.Certificates.Find(X509FindType.FindByThumbprint, certificate.Thumbprint, false).Count == 0)
-                store.Add(certificate);
+        {
+            if (store.Certificates.Find(X509FindType.FindByThumbprint, certificate.Thumbprint, false).Count != 0)
+                continue;
+
+            var certificatePath = Path.Combine(workDirectory, $"publisher-{index++}.cer");
+            File.WriteAllBytes(certificatePath, certificate.Export(X509ContentType.Cert));
+            RunElevated(
+                GetCertUtilPath(),
+                $"-f -addstore TrustedPublisher \"{certificatePath}\"",
+                "certutil TrustedPublisher import");
+        }
     }
 
     private static void RunElevated(string fileName, string arguments, string label)
@@ -186,6 +210,8 @@ public sealed class WindowsVddNodeService
     }
 
     private static string GetPnPUtilPath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "pnputil.exe");
+    private static string GetCertUtilPath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "certutil.exe");
+
     private static void EnsureWindows()
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("VDD node management is supported only on Windows.");
