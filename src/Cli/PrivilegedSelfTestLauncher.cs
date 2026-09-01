@@ -141,6 +141,9 @@ internal static class PrivilegedSelfTestLauncher
 
     private static void RegisterTaskElevated(string taskName, string executable, string repoRoot, string resultFile)
     {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Privileged self-test helper registration is supported only on Windows.");
+
         var sid = WindowsIdentity.GetCurrent().User?.Value
             ?? throw new InvalidOperationException("Could not resolve the current Windows user SID.");
 
