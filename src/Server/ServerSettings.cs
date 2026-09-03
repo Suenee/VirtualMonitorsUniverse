@@ -58,6 +58,7 @@ internal sealed class ServerSettings
         Logging.RetentionMinutes = Math.Max(1, Logging.RetentionMinutes);
         if (!AllowedPreviewRefreshSeconds.Contains(WebUi.MonitorPreviewRefreshSeconds)) WebUi.MonitorPreviewRefreshSeconds = 60;
         WebUi.ArrangementSnapTolerancePx = Math.Clamp(WebUi.ArrangementSnapTolerancePx, 5, 50);
+        TerminalInput.Normalize();
         Hotkeys.Normalize();
         if (!Enum.IsDefined(Exit.MonitorAction) || Exit.MonitorAction == MonitorExitAction.Uninstall) Exit.MonitorAction = MonitorExitAction.Disconnect;
     }
@@ -106,7 +107,17 @@ internal sealed class HotkeySettings
 
 internal sealed class TerminalInputSettings
 {
-    public bool MousePassthroughImmediately { get; set; }
+    public Dictionary<string, bool> MousePassthroughImmediatelyByMonitor { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public void Normalize()
+    {
+        MousePassthroughImmediatelyByMonitor = MousePassthroughImmediatelyByMonitor is null
+            ? new(StringComparer.OrdinalIgnoreCase)
+            : new(MousePassthroughImmediatelyByMonitor, StringComparer.OrdinalIgnoreCase);
+    }
+
+    public bool MousePassthroughImmediately(string vmuId)
+        => MousePassthroughImmediatelyByMonitor.GetValueOrDefault(vmuId);
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
