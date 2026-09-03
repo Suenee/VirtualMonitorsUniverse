@@ -95,8 +95,9 @@ internal static class TerminalStartupProgressEnhancement
         terminalSettings=settings;
         socketPort=Number(settings.socket?.port)||8182;
         terminalF11Hotkey=settings.hotkeys?.terminalF11Forward||settings.hotkeys?.fullscreenExit||'Win+Alt+F11';
-        mouseImmediate=settings.terminalInput?.mousePassthroughImmediately===true;
       }
+      const immediateMap=terminalSettings?.terminalInput?.mousePassthroughImmediatelyByMonitor||{};
+      mouseImmediate=monitorConfiguration?.vmuId?immediateMap[monitorConfiguration.vmuId]===true:false;
     }catch{}
   }
   async function placementTick(){
@@ -127,6 +128,11 @@ internal static class TerminalStartupProgressEnhancement
     if(!rect||clientX<rect.left||clientX>rect.right||clientY<rect.top||clientY>rect.bottom)return null;
     return {x:Math.max(0,Math.min(1,(clientX-rect.left)/rect.width)),y:Math.max(0,Math.min(1,(clientY-rect.top)/rect.height))};
   }
+  function browserImageScreenRect(event){
+    const rect=activeImageRect();if(!rect)return null;
+    const offsetX=event.screenX-event.clientX,offsetY=event.screenY-event.clientY;
+    return {left:rect.left+offsetX,top:rect.top+offsetY,right:rect.right+offsetX,bottom:rect.bottom+offsetY};
+  }
   function pulse(clientX,clientY){
     const old=document.querySelector('.terminalPortalPulse');old?.remove();
     const ring=document.createElement('div');ring.className='terminalPortalPulse';ring.style.left=clientX+'px';ring.style.top=clientY+'px';document.body.appendChild(ring);ring.addEventListener('animationend',()=>ring.remove(),{once:true});
@@ -154,23 +160,24 @@ internal static class TerminalStartupProgressEnhancement
     }catch(error){console.warn('VMU Terminal input failed:',error);return false;}
   }
   function mouseButton(button){return button===2?'right':button===1?'middle':'left';}
-  async function enterMouse(point,clientX,clientY,button='none'){
+  async function enterMouse(point,event,button='none'){
     if(guardActive||!monitorConfiguration?.collaborationMouse||!document.hasFocus())return false;
-    pulse(clientX,clientY);
-    return await sendTerminalAction('terminal_mouse_enter',{monitor:monitorName,x:point.x,y:point.y,button});
+    const browserRect=browserImageScreenRect(event);if(!browserRect)return false;
+    pulse(event.clientX,event.clientY);
+    return await sendTerminalAction('terminal_mouse_enter',{monitor:monitorName,x:point.x,y:point.y,button,browserLeft:browserRect.left,browserTop:browserRect.top,browserRight:browserRect.right,browserBottom:browserRect.bottom});
   }
 
   page?.addEventListener('pointerdown',event=>{
     if(mouseImmediate||guardActive||!monitorConfiguration?.collaborationMouse||!document.hasFocus())return;
     const point=pointInImage(event.clientX,event.clientY);if(!point)return;
     event.preventDefault();event.stopPropagation();
-    enterMouse(point,event.clientX,event.clientY,mouseButton(event.button));
+    enterMouse(point,event,mouseButton(event.button));
   },true);
   page?.addEventListener('contextmenu',event=>{if(!mouseImmediate&&monitorConfiguration?.collaborationMouse&&pointInImage(event.clientX,event.clientY)){event.preventDefault();event.stopPropagation();}},true);
   document.addEventListener('pointermove',event=>{
     const point=pointInImage(event.clientX,event.clientY);
     const inside=!!point&&!guardActive;
-    if(mouseImmediate&&inside&&!insideActiveImage&&monitorConfiguration?.collaborationMouse&&document.hasFocus())enterMouse(point,event.clientX,event.clientY,'none');
+    if(mouseImmediate&&inside&&!insideActiveImage&&monitorConfiguration?.collaborationMouse&&document.hasFocus())enterMouse(point,event,'none');
     insideActiveImage=inside;
   },{passive:true});
   window.addEventListener('blur',()=>{insideActiveImage=false;});
