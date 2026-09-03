@@ -14,9 +14,10 @@ internal enum TerminalAdaptationMode
 internal sealed record TerminalStreamSettings(
     TerminalAdaptationMode Mode,
     int FixedMaximumWidth,
-    int FixedJpegQuality)
+    int FixedJpegQuality,
+    bool MousePassthroughImmediately = false)
 {
-    public static TerminalStreamSettings Default { get; } = new(TerminalAdaptationMode.Automatic, 1920, 68);
+    public static TerminalStreamSettings Default { get; } = new(TerminalAdaptationMode.Automatic, 1920, 68, false);
 
     public TerminalStreamSettings Normalize()
     {
@@ -35,9 +36,9 @@ internal sealed record TerminalStreamSettings(
 }
 
 /// <summary>
-/// Persists Terminal transport preferences independently from monitor identity.
-/// The file is intentionally small and human-readable; monitor identity remains
-/// authoritative in SQLite while stream tuning can evolve without schema churn.
+/// Persists Terminal behavior independently from monitor identity. The file is
+/// intentionally small and human-readable; monitor identity remains authoritative
+/// in SQLite while Terminal-specific behavior can evolve without schema churn.
 /// </summary>
 internal sealed class TerminalStreamSettingsStore
 {
@@ -66,6 +67,12 @@ internal sealed class TerminalStreamSettingsStore
             Save();
             return value;
         }
+    }
+
+    public TerminalStreamSettings SetMousePassthroughImmediately(string vmuId, bool enabled)
+    {
+        var current = Get(vmuId);
+        return Set(vmuId, current with { MousePassthroughImmediately = enabled });
     }
 
     public void Delete(string vmuId)
