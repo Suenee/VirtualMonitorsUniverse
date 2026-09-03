@@ -68,8 +68,9 @@ internal static class TerminalInputService
 
     private static void Send(Input[] inputs, string message)
     {
-        var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
-        if (sent != inputs.Length)
+        var expected = (uint)inputs.Length;
+        var sent = SendInput(expected, inputs, Marshal.SizeOf<Input>());
+        if (sent != expected)
             throw new Win32Exception(Marshal.GetLastWin32Error(), message);
     }
 
