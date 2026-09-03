@@ -9,6 +9,10 @@ internal sealed record CursorDisplayIdentity(
     bool IsVirtual,
     string? CName,
     string? VmuId);
+internal sealed record CursorMoveObservation(
+    CursorPoint? PreviousPosition,
+    CursorPoint CurrentPosition,
+    CursorDisplayIdentity? CurrentDisplay);
 internal sealed record CursorDisplayTransition(
     CursorDisplayIdentity? PreviousDisplay,
     CursorDisplayIdentity? CurrentDisplay,
@@ -16,10 +20,10 @@ internal sealed record CursorDisplayTransition(
     CursorPoint CurrentPosition);
 
 /// <summary>
-/// Publishes display-boundary transitions from the Windows low-level mouse hook.
-/// No timer or cursor polling is used: work happens only when Windows reports a
-/// mouse-move event. The hook is installed only while at least one Terminal live
-/// stream is active.
+/// Publishes cursor movement and display-boundary transitions from the Windows
+/// low-level mouse hook. No timer or cursor polling is used: work happens only
+/// when Windows reports a mouse-move event. The hook is installed only while at
+/// least one Terminal live stream is active.
 /// </summary>
 internal sealed class WindowsCursorTransitionService
 {
@@ -45,6 +49,13 @@ internal sealed class WindowsCursorTransitionService
         _logStore = logStore;
         _hookProc = HookCallback;
     }
+
+    /// <summary>
+    /// Process-wide move observation used by the isolated Terminal mouse portal.
+    /// The portal can therefore be removed without coupling browser input state to
+    /// the normal display-transition logic.
+    /// </summary>
+    public static event Action<CursorMoveObservation>? MoveObserved;
 
     public event Action<CursorDisplayTransition>? Transition;
 
@@ -163,6 +174,15 @@ internal sealed class WindowsCursorTransitionService
         var previousDisplay = _previousDisplay;
         _previousPosition = currentPosition;
         _previousDisplay = currentDisplay;
+
+        try
+        {
+            MoveObserved?.Invoke(new CursorMoveObservation(previousPosition, currentPosition, currentDisplay));
+        }
+        catch
+        {
+            // Observers run from a low-level hook and must never disturb User32.
+        }
 
         if (previousPosition is null) return;
         if (SameDisplay(previousDisplay, currentDisplay)) return;
