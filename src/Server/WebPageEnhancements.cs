@@ -24,14 +24,14 @@ internal static class WebPageEnhancements
 <button id="fullscreenToggle" class="fullscreenToggle iconButton" type="button" aria-label="Toggle fullscreen" title="Enter fullscreen">⛶</button>
 """;
 
-    public static string Global => $$"""
+    public static string Global => $$$$"""
 <style>
 .globalTools{position:relative;display:flex;align-items:center}.globalScreenshotMenu{position:absolute;right:0;top:54px;background:#fff;color:#222;border:1px solid #bbb;border-radius:6px;min-width:190px;padding:6px;box-shadow:0 3px 12px #0003;z-index:1400}.globalScreenshotMenu button{display:block;width:100%;padding:9px 10px;border:0;background:transparent;text-align:left;border-radius:4px;cursor:pointer}.globalScreenshotMenu button:hover,.globalScreenshotMenu button:focus-visible{background:#eef1f4}.vmuToast{position:fixed;right:16px;bottom:16px;z-index:5000;padding:9px 12px;border-radius:7px;background:#282d33;color:#fff;box-shadow:0 3px 12px #0005;font-size:13px}.vmuToast.error{background:#8b1f28}.vmuMenuScreenshot{display:block;width:100%;text-align:left;padding:8px 9px;border:0;background:transparent;border-radius:4px;cursor:pointer}.vmuMenuScreenshot:hover{background:#eef1f4}.builtInAvatar{object-fit:contain;background:transparent}.navAvatarEmoji .builtInAvatar,.navAvatar.builtInAvatar{width:24px;height:24px}.avatarEmoji .builtInAvatar,.cardAvatar.builtInAvatar{width:28px;height:28px}.navAvatarEmoji:not(:has(img)),.avatarEmoji:not(:has(img)){font-size:0;min-width:24px;min-height:24px}.avatarpicker [data-animal] img{width:34px;height:34px;object-fit:contain}.avatarcurrent img{object-fit:contain}.vmuMainMenuIcon{display:block;width:38px;height:25px;object-fit:contain;pointer-events:none}.navwrap:hover .navmenu{display:block}.monitorMenu label.vmuAudioDisabled{opacity:.45}
 </style>
 <script>
 (() => {
   if(window.vmuGlobalTools)return;window.vmuGlobalTools=true;
-  const pageServerVersion='{{ProjectInfo.Version}}';
+  const pageServerVersion='{{{{ProjectInfo.Version}}}}';
   const nativeFetch=window.fetch.bind(window);
   const reloadVersionKey='vmu-version-reload:'+location.pathname;
   const retryReloadKey='vmu-retry-reload:'+location.pathname;
