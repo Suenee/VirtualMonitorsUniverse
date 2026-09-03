@@ -176,12 +176,34 @@ internal sealed class RemoteActionRegistry
         if (display is null)
             throw new RemoteActionException("COMMAND_FAILED", "The Terminal target is not part of the active Windows desktop.");
 
+        var browserLeft = OptionalDouble(args, "browserLeft", -1_000_000d, 1_000_000d);
+        var browserTop = OptionalDouble(args, "browserTop", -1_000_000d, 1_000_000d);
+        var browserRight = OptionalDouble(args, "browserRight", -1_000_000d, 1_000_000d);
+        var browserBottom = OptionalDouble(args, "browserBottom", -1_000_000d, 1_000_000d);
+        var hasPortalGeometry = browserLeft.HasValue && browserTop.HasValue && browserRight.HasValue && browserBottom.HasValue && browserRight > browserLeft && browserBottom > browserTop;
+
         try
         {
+            if (hasPortalGeometry)
+            {
+                TerminalMousePortalService.Begin(
+                    monitor.Configuration.VmuId,
+                    monitor.DeviceName,
+                    display.X,
+                    display.Y,
+                    display.Width,
+                    display.Height,
+                    browserLeft!.Value,
+                    browserTop!.Value,
+                    browserRight!.Value,
+                    browserBottom!.Value);
+            }
+
             TerminalInputService.EnterMouse(display.X, display.Y, display.Width, display.Height, normalizedX, normalizedY, button);
         }
         catch (Exception ex)
         {
+            TerminalMousePortalService.Cancel(monitor.Configuration.VmuId);
             throw new RemoteActionException("COMMAND_FAILED", ex.Message, ex);
         }
 
@@ -190,7 +212,8 @@ internal sealed class RemoteActionRegistry
             ["success"] = true,
             ["monitor"] = monitor.Configuration.Name,
             ["x"] = normalizedX,
-            ["y"] = normalizedY
+            ["y"] = normalizedY,
+            ["portal"] = hasPortalGeometry
         };
     }
 
@@ -274,6 +297,14 @@ internal sealed class RemoteActionRegistry
     private static double RequireDouble(JsonElement args, string name, double min, double max)
     {
         if (!args.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out var result) || double.IsNaN(result) || double.IsInfinity(result) || result < min || result > max)
+            throw new RemoteActionException("INVALID_ARGUMENT", $"{name} must be a number from {min} through {max}.");
+        return result;
+    }
+
+    private static double? OptionalDouble(JsonElement args, string name, double min, double max)
+    {
+        if (!args.TryGetProperty(name, out var value)) return null;
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out var result) || double.IsNaN(result) || double.IsInfinity(result) || result < min || result > max)
             throw new RemoteActionException("INVALID_ARGUMENT", $"{name} must be a number from {min} through {max}.");
         return result;
     }
