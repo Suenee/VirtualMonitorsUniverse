@@ -37,6 +37,8 @@ internal sealed class RemoteActionRegistry
         "monitor_open_properties",
         "monitor_open_remote_access",
         "monitor_set_title",
+        "terminal_mouse_enter",
+        "terminal_key_press",
         "all_monitors_connect",
         "all_monitors_disconnect",
         "get_state"
@@ -63,6 +65,8 @@ internal sealed class RemoteActionRegistry
             "monitor_open_properties" => OpenMonitorPage(args, terminal: false, remoteAccess: false),
             "monitor_open_remote_access" => OpenMonitorPage(args, terminal: false, remoteAccess: true),
             "monitor_set_title" => SetTitle(args),
+            "terminal_mouse_enter" => TerminalMouseEnter(args),
+            "terminal_key_press" => TerminalKeyPress(args),
             "all_monitors_connect" => SetAllMonitors(true),
             "all_monitors_disconnect" => SetAllMonitors(false),
             "get_state" => StateSnapshot(),
@@ -157,6 +161,56 @@ internal sealed class RemoteActionRegistry
         return StateFor(Update(current, title: value.GetString()!.Trim()));
     }
 
+    private object TerminalMouseEnter(JsonElement args)
+    {
+        var monitor = RequireSnapshot(RequireMonitor(args));
+        if (!monitor.Connected || monitor.Health.IsError || string.IsNullOrWhiteSpace(monitor.DeviceName))
+            throw new RemoteActionException("INVALID_ARGUMENT", "The Terminal target monitor is not connected and healthy.");
+        if (!monitor.Configuration.CollaborationMouse)
+            throw new RemoteActionException("PERMISSION_DENIED", "Mouse passthrough is disabled for this monitor.");
+
+        var normalizedX = RequireDouble(args, "x", 0d, 1d);
+        var normalizedY = RequireDouble(args, "y", 0d, 1d);
+        var button = OptionalString(args, "button") ?? "none";
+        var display = WindowsArrangementService.GetActive().FirstOrDefault(x => x.DeviceName.Equals(monitor.DeviceName, StringComparison.OrdinalIgnoreCase));
+        if (display is null)
+            throw new RemoteActionException("COMMAND_FAILED", "The Terminal target is not part of the active Windows desktop.");
+
+        try
+        {
+            TerminalInputService.EnterMouse(display.X, display.Y, display.Width, display.Height, normalizedX, normalizedY, button);
+        }
+        catch (Exception ex) when (ex is not RemoteActionException)
+        {
+            throw new RemoteActionException("COMMAND_FAILED", ex.Message, ex);
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["success"] = true,
+            ["monitor"] = monitor.Configuration.Name,
+            ["x"] = normalizedX,
+            ["y"] = normalizedY
+        };
+    }
+
+    private object TerminalKeyPress(JsonElement args)
+    {
+        var monitor = RequireSnapshot(RequireMonitor(args));
+        if (!monitor.Connected || monitor.Health.IsError)
+            throw new RemoteActionException("INVALID_ARGUMENT", "The Terminal target monitor is not connected and healthy.");
+        if (!monitor.Configuration.CollaborationKeyboard)
+            throw new RemoteActionException("PERMISSION_DENIED", "Keyboard passthrough is disabled for this monitor.");
+
+        var key = OptionalString(args, "key") ?? string.Empty;
+        if (!key.Equals("F11", StringComparison.OrdinalIgnoreCase))
+            throw new RemoteActionException("INVALID_ARGUMENT", "Only F11 passthrough is implemented in this VMU version.");
+
+        try { TerminalInputService.PressF11(); }
+        catch (Exception ex) { throw new RemoteActionException("COMMAND_FAILED", ex.Message, ex); }
+        return new Dictionary<string, object?> { ["success"] = true, ["monitor"] = monitor.Configuration.Name, ["key"] = "F11" };
+    }
+
     private object SetAllMonitors(bool connected)
     {
         var changed = new List<object>();
@@ -213,12 +267,22 @@ internal sealed class RemoteActionRegistry
         return result;
     }
 
+    private static double RequireDouble(JsonElement args, string name, double min, double max)
+    {
+        if (!args.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out var result) || double.IsNaN(result) || double.IsInfinity(result) || result < min || result > max)
+            throw new RemoteActionException("INVALID_ARGUMENT", $"{name} must be a number from {min} through {max}.");
+        return result;
+    }
+
     private static bool RequireBool(JsonElement args, string name)
     {
         if (!args.TryGetProperty(name, out var value) || value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
             throw new RemoteActionException("INVALID_ARGUMENT", $"{name} must be a boolean.");
         return value.GetBoolean();
     }
+
+    private static string? OptionalString(JsonElement args, string name)
+        => args.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 
     private static object StateFor(MonitorSnapshot monitor) => new Dictionary<string, object?>
     {
