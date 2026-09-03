@@ -18,7 +18,7 @@ internal sealed class SettingsForm : Form
     private readonly NumericUpDown _webPort = CreatePortBox();
     private readonly NumericUpDown _socketPort = CreatePortBox();
     private readonly NumericUpDown _retentionDays = new() { Minimum = 1, Maximum = 3650, Width = 96 };
-    private readonly NumericUpDown _arrangementSnapTolerance = new() { Minimum = 5, Maximum = 50, Width = 96 };
+    private readonly CheckBox _startWithWindows = new() { AutoSize = true, Margin = Padding.Empty, Padding = Padding.Empty };
     private readonly ComboBox _monitorExit = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 145 };
     private readonly CheckBox _restoreServices = new() { AutoSize = true, Margin = Padding.Empty, Padding = Padding.Empty };
     private readonly Dictionary<NumericUpDown, Panel> _portBorders = new();
@@ -47,14 +47,14 @@ internal sealed class SettingsForm : Form
         _webPort.Value = _originalSettings.Web.Port;
         _socketPort.Value = _originalSettings.Socket.Port;
         _retentionDays.Value = Math.Clamp((int)Math.Ceiling(_originalSettings.Logging.RetentionMinutes / 1440d), 1, 3650);
-        _arrangementSnapTolerance.Value = Math.Clamp(_originalSettings.WebUi.ArrangementSnapTolerancePx, 5, 50);
+        _startWithWindows.Checked = _originalSettings.Startup.Enabled;
         _monitorExit.Items.AddRange(["Disconnect", "Keep"]);
         _monitorExit.SelectedItem = _originalSettings.Exit.MonitorAction == MonitorExitAction.Keep ? "Keep" : "Disconnect";
         _restoreServices.Checked = _originalSettings.Exit.RestoreServices;
 
+        _tips.SetToolTip(_startWithWindows, "Start VMU automatically after the current user signs in to Windows.");
         _tips.SetToolTip(_monitorExit, "Disconnect turns off connected VMU monitors when the application exits. Keep leaves them unchanged.");
         _tips.SetToolTip(_restoreServices, "Remember running service states and restore them after a normal or maintenance restart.");
-        _tips.SetToolTip(_arrangementSnapTolerance, "Distance in Windows desktop pixels at which monitor edges snap together in Arrangement.");
 
         var root = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(12), ColumnCount = 1 };
         var services = new GroupBox { Text = "Services", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 10) };
@@ -69,10 +69,10 @@ internal sealed class SettingsForm : Form
         services.Controls.Add(serviceLayout);
         root.Controls.Add(services);
 
-        var general = new GroupBox { Text = "Web and Logging", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 10), Margin = new Padding(0, 10, 0, 0) };
+        var general = new GroupBox { Text = "General", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 10), Margin = new Padding(0, 10, 0, 0) };
         var generalLayout = CreateTwoColumnLayout();
         AddTwoColumnRow(generalLayout, "Log Retention", WrapWithSuffix(_retentionDays, "days"));
-        AddTwoColumnRow(generalLayout, "Arrangement Snap", WrapWithSuffix(_arrangementSnapTolerance, "px"));
+        AddTwoColumnRow(generalLayout, "Start with Windows", CreateCheckboxHost(_startWithWindows));
         general.Controls.Add(generalLayout);
         root.Controls.Add(general);
 
@@ -187,7 +187,7 @@ internal sealed class SettingsForm : Form
         settings.Socket.Interface = GetInterface(_socketInterface);
         settings.Socket.Port = (int)_socketPort.Value;
         settings.Logging.RetentionMinutes = checked((int)_retentionDays.Value * 1440);
-        settings.WebUi.ArrangementSnapTolerancePx = (int)_arrangementSnapTolerance.Value;
+        settings.Startup.Enabled = _startWithWindows.Checked;
         settings.Exit.MonitorAction = string.Equals(Convert.ToString(_monitorExit.SelectedItem), "Keep", StringComparison.OrdinalIgnoreCase) ? MonitorExitAction.Keep : MonitorExitAction.Disconnect;
         settings.Exit.RestoreServices = _restoreServices.Checked;
         settings.Save(_settingsPath);
