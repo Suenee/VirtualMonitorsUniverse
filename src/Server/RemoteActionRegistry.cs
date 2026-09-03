@@ -180,7 +180,7 @@ internal sealed class RemoteActionRegistry
         {
             TerminalInputService.EnterMouse(display.X, display.Y, display.Width, display.Height, normalizedX, normalizedY, button);
         }
-        catch (Exception ex) when (ex is not RemoteActionException)
+        catch (Exception ex)
         {
             throw new RemoteActionException("COMMAND_FAILED", ex.Message, ex);
         }
@@ -197,7 +197,7 @@ internal sealed class RemoteActionRegistry
     private object TerminalKeyPress(JsonElement args)
     {
         var monitor = RequireSnapshot(RequireMonitor(args));
-        if (!monitor.Connected || monitor.Health.IsError)
+        if (!monitor.Connected || monitor.Health.IsError || string.IsNullOrWhiteSpace(monitor.DeviceName))
             throw new RemoteActionException("INVALID_ARGUMENT", "The Terminal target monitor is not connected and healthy.");
         if (!monitor.Configuration.CollaborationKeyboard)
             throw new RemoteActionException("PERMISSION_DENIED", "Keyboard passthrough is disabled for this monitor.");
@@ -206,7 +206,11 @@ internal sealed class RemoteActionRegistry
         if (!key.Equals("F11", StringComparison.OrdinalIgnoreCase))
             throw new RemoteActionException("INVALID_ARGUMENT", "Only F11 passthrough is implemented in this VMU version.");
 
-        try { TerminalInputService.PressF11(); }
+        var display = WindowsArrangementService.GetActive().FirstOrDefault(x => x.DeviceName.Equals(monitor.DeviceName, StringComparison.OrdinalIgnoreCase));
+        if (display is null)
+            throw new RemoteActionException("COMMAND_FAILED", "The Terminal target is not part of the active Windows desktop.");
+
+        try { TerminalInputService.PressF11(display.X, display.Y, display.Width, display.Height); }
         catch (Exception ex) { throw new RemoteActionException("COMMAND_FAILED", ex.Message, ex); }
         return new Dictionary<string, object?> { ["success"] = true, ["monitor"] = monitor.Configuration.Name, ["key"] = "F11" };
     }
