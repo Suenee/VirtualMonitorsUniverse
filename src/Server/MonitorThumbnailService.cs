@@ -12,12 +12,14 @@ namespace VirtualMonitorsUniverse.Server;
 /// <summary>
 /// Captures exact monitor frames through DXGI Desktop Duplication.
 /// Thumbnail capture remains cached, while live Terminal capture reuses its
-/// D3D11/Desktop Duplication objects between frames. Live capture releases the
-/// duplicated desktop frame immediately after the GPU copy and encodes directly
-/// from the mapped staging texture to minimize latency and CPU memory traffic.
+/// D3D11/Desktop Duplication objects between frames. Recoverable Desktop
+/// Duplication resets are handled inside the capture layer so the HTTP live
+/// stream does not have to reconnect for normal Windows topology/session events.
 /// </summary>
 internal sealed class MonitorThumbnailService
 {
+    private const int DxgiErrorAccessLost = unchecked((int)0x887A0026);
+    private const int DxgiErrorWaitTimeout = unchecked((int)0x887A0027);
     private static readonly FeatureLevel[] FeatureLevels = [FeatureLevel.Level_11_1, FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0];
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _captureLocks = new(StringComparer.OrdinalIgnoreCase);
@@ -57,25 +59,32 @@ internal sealed class MonitorThumbnailService
         await gate.WaitAsync(cancellationToken);
         try
         {
-            if (!_liveSessions.TryGetValue(cacheKey, out var session) || !session.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase))
+            var retryDelay = TimeSpan.FromMilliseconds(100);
+            while (true)
             {
-                if (session is not null)
+                cancellationToken.ThrowIfCancellationRequested();
+                var session = GetOrCreateLiveSession(cacheKey, deviceName);
+                try
                 {
-                    _liveSessions.TryRemove(cacheKey, out _);
-                    session.Dispose();
-                }
-                session = new LiveCaptureSession(deviceName);
-                _liveSessions[cacheKey] = session;
-            }
+                    var frame = await Task.Run(session.TryCaptureFrame, cancellationToken);
+                    if (frame is { Length: > 0 }) return frame;
 
-            try
-            {
-                return await Task.Run(session.CaptureFrame, cancellationToken);
-            }
-            catch
-            {
-                if (_liveSessions.TryRemove(cacheKey, out var broken)) broken.Dispose();
-                throw;
+                    // A timeout before the first frame is not a broken stream. Keep the
+                    // existing HTTP request alive and wait for Desktop Duplication to
+                    // report an actual desktop/pointer update.
+                    continue;
+                }
+                catch (DesktopDuplicationAccessLostException)
+                {
+                    RemoveLiveSession(cacheKey, session);
+                    await Task.Delay(retryDelay, cancellationToken);
+                    retryDelay = TimeSpan.FromMilliseconds(Math.Min(1000, retryDelay.TotalMilliseconds * 2));
+                }
+                catch
+                {
+                    RemoveLiveSession(cacheKey, session);
+                    throw;
+                }
             }
         }
         finally
@@ -85,6 +94,24 @@ internal sealed class MonitorThumbnailService
     }
 
     public void Invalidate(string cacheKey) => _cache.TryRemove(cacheKey, out _);
+
+    private LiveCaptureSession GetOrCreateLiveSession(string cacheKey, string deviceName)
+    {
+        if (_liveSessions.TryGetValue(cacheKey, out var session) && session.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase))
+            return session;
+
+        if (session is not null) RemoveLiveSession(cacheKey, session);
+        var created = new LiveCaptureSession(deviceName);
+        _liveSessions[cacheKey] = created;
+        return created;
+    }
+
+    private void RemoveLiveSession(string cacheKey, LiveCaptureSession expected)
+    {
+        if (_liveSessions.TryGetValue(cacheKey, out var current) && ReferenceEquals(current, expected))
+            _liveSessions.TryRemove(cacheKey, out _);
+        expected.Dispose();
+    }
 
     private static byte[] CaptureFrame(string deviceName, int maximumWidth, long quality)
     {
@@ -104,11 +131,12 @@ internal sealed class MonitorThumbnailService
             var height = description.DesktopCoordinates.Bottom - description.DesktopCoordinates.Top;
             if (width <= 0 || height <= 0) throw new InvalidOperationException($"DXGI output '{deviceName}' has invalid desktop bounds.");
             using var staging = device.CreateTexture2D(CreateStagingDescription(width, height));
-            return CaptureFromDuplication(deviceName, duplication, context, staging, description, width, height, maximumWidth, quality, null);
+            return CaptureFromDuplication(deviceName, duplication, context, staging, description, width, height, maximumWidth, quality, null)
+                ?? throw new TimeoutException($"DXGI did not produce a frame for '{deviceName}' within the capture timeout.");
         }
     }
 
-    private static byte[] CaptureFromDuplication(
+    private static byte[]? CaptureFromDuplication(
         string deviceName,
         IDXGIOutputDuplication duplication,
         ID3D11DeviceContext context,
@@ -120,19 +148,18 @@ internal sealed class MonitorThumbnailService
         long quality,
         byte[]? previousFrame)
     {
-        const int dxgiErrorWaitTimeout = unchecked((int)0x887A0027);
         IDXGIResource? resource = null;
         var acquired = false;
         var released = false;
         try
         {
-            // Desktop Duplication wakes immediately when the desktop changes. A longer
-            // idle timeout therefore reduces duplicate keepalive JPEG traffic without
-            // adding latency to real screen updates.
+            // Desktop Duplication wakes immediately when the desktop or hardware
+            // pointer changes. The timeout is an idle condition, not a stream error.
             var result = duplication.AcquireNextFrame(5000, out _, out resource);
             if (result.Failure)
             {
-                if (result.Code == dxgiErrorWaitTimeout && previousFrame is not null) return previousFrame;
+                if (result.Code == DxgiErrorWaitTimeout) return previousFrame;
+                if (result.Code == DxgiErrorAccessLost) throw new DesktopDuplicationAccessLostException(deviceName);
                 throw new InvalidOperationException($"DXGI could not acquire a frame from '{deviceName}' (0x{result.Code:X8}).");
             }
             if (resource is null) throw new InvalidOperationException($"DXGI returned no desktop resource for '{deviceName}'.");
@@ -258,6 +285,9 @@ internal sealed class MonitorThumbnailService
 
     private sealed record CacheEntry(DateTime CreatedUtc, byte[] JpegBytes);
 
+    private sealed class DesktopDuplicationAccessLostException(string deviceName)
+        : Exception($"DXGI Desktop Duplication access was lost for '{deviceName}'.");
+
     private sealed class LiveCaptureSession : IDisposable
     {
         private readonly IDXGIFactory1 _factory;
@@ -294,7 +324,7 @@ internal sealed class MonitorThumbnailService
         public string DeviceName { get; }
         public byte[]? LastFrame => _lastFrame;
 
-        public byte[] CaptureFrame()
+        public byte[]? TryCaptureFrame()
         {
             _lastFrame = CaptureFromDuplication(DeviceName, _duplication, _context, _staging, _description, _width, _height, 1920, 68L, _lastFrame);
             return _lastFrame;
