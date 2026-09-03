@@ -87,14 +87,17 @@ internal sealed class HotkeySettings
     public string TerminalF11Forward { get; set; } = "Win+Alt+F11";
 
     // Migration only: VMU 0.54 used this property for Exit Fullscreen.
-    // Keep reading it so existing settings files retain the configured shortcut.
+    // Keep reading it so existing settings files retain a customized shortcut.
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FullscreenExit { get; set; }
 
     public void Normalize()
     {
-        if (string.IsNullOrWhiteSpace(TerminalF11Forward))
-            TerminalF11Forward = string.IsNullOrWhiteSpace(FullscreenExit) ? "Win+Alt+F11" : FullscreenExit.Trim();
+        if (!string.IsNullOrWhiteSpace(FullscreenExit) &&
+            (string.IsNullOrWhiteSpace(TerminalF11Forward) || TerminalF11Forward.Equals("Win+Alt+F11", StringComparison.OrdinalIgnoreCase)))
+            TerminalF11Forward = FullscreenExit.Trim();
+        else if (string.IsNullOrWhiteSpace(TerminalF11Forward))
+            TerminalF11Forward = "Win+Alt+F11";
         else
             TerminalF11Forward = TerminalF11Forward.Trim();
         FullscreenExit = null;
