@@ -13,6 +13,7 @@ internal sealed class ServerSettings
     public ServiceEndpointSettings Socket { get; set; } = new() { Port = 8182 };
     public LoggingSettings Logging { get; set; } = new();
     public WebUiSettings WebUi { get; set; } = new();
+    public StartupSettings Startup { get; set; } = new();
     public ExitSettings Exit { get; set; } = new();
     public ServiceStateSettings ServiceState { get; set; } = new();
 
@@ -33,6 +34,7 @@ internal sealed class ServerSettings
     public void Save(string path)
     {
         Normalize();
+        WindowsStartupService.Apply(Startup.Enabled);
         Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
         File.WriteAllText(path, JsonSerializer.Serialize(this, JsonOptions));
     }
@@ -44,6 +46,7 @@ internal sealed class ServerSettings
         Socket ??= new ServiceEndpointSettings { Port = 8182 };
         Logging ??= new LoggingSettings();
         WebUi ??= new WebUiSettings();
+        Startup ??= new StartupSettings();
         Exit ??= new ExitSettings();
         ServiceState ??= new ServiceStateSettings();
         Vmu.Normalize(8180); Web.Normalize(8181); Socket.Normalize(8182);
@@ -72,6 +75,7 @@ internal sealed class WebUiSettings
     public int MonitorPreviewRefreshSeconds { get; set; } = 60;
     public int ArrangementSnapTolerancePx { get; set; } = 15;
 }
+internal sealed class StartupSettings { public bool Enabled { get; set; } }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
 internal enum MonitorExitAction { Disconnect, Keep, Uninstall }
