@@ -34,18 +34,42 @@ internal static class TerminalInputService
         if (!SetCursorPos(x, y))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not move the cursor to the virtual monitor.");
 
-        if (string.IsNullOrWhiteSpace(button) || button.Equals("none", StringComparison.OrdinalIgnoreCase))
-            return;
-
-        var (down, up) = button.ToLowerInvariant() switch
+        if (!string.IsNullOrWhiteSpace(button) && !button.Equals("none", StringComparison.OrdinalIgnoreCase))
         {
-            "left" => (MouseLeftDown, MouseLeftUp),
-            "right" => (MouseRightDown, MouseRightUp),
-            "middle" => (MouseMiddleDown, MouseMiddleUp),
-            _ => throw new ArgumentException($"Unsupported mouse button '{button}'.", nameof(button))
-        };
+            var (down, up) = button.ToLowerInvariant() switch
+            {
+                "left" => (MouseLeftDown, MouseLeftUp),
+                "right" => (MouseRightDown, MouseRightUp),
+                "middle" => (MouseMiddleDown, MouseMiddleUp),
+                _ => throw new ArgumentException($"Unsupported mouse button '{button}'.", nameof(button))
+            };
 
-        SendMouseClick(down, up);
+            SendMouseClick(down, up);
+        }
+
+        WakeTerminalCaptureAfterMouseEnter(displayX, displayY, displayWidth, displayHeight, x, y);
+    }
+
+    /// <summary>
+    /// Desktop Duplication wakes on hardware-pointer movement. A Terminal entry
+    /// therefore emits one tiny in-monitor pointer transition and immediately
+    /// restores the requested coordinate. This is deliberately done after the
+    /// forwarded click so the already-running Terminal stream receives a fresh
+    /// frame immediately instead of waiting for the user's next real movement.
+    /// </summary>
+    private static void WakeTerminalCaptureAfterMouseEnter(int displayX, int displayY, int displayWidth, int displayHeight, int x, int y)
+    {
+        var left = displayX;
+        var right = displayX + displayWidth - 1;
+        if (right <= left) return;
+
+        var nudgeX = x < right ? x + 1 : x - 1;
+        if (nudgeX < left || nudgeX > right || nudgeX == x) return;
+
+        if (!SetCursorPos(nudgeX, y))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not signal the Terminal capture after mouse entry.");
+        if (!SetCursorPos(x, y))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not restore the Terminal cursor after capture signaling.");
     }
 
     public static void PressF11(int displayX, int displayY, int displayWidth, int displayHeight)
