@@ -37,26 +37,12 @@ internal static class SettingsLayoutEnhancement
   hotkeyCell.append(hotkeyInput,hotkeyHelp);
   grid.append(hotkeyLabel,hotkeyCell);
 
-  const mouseLabel=document.createElement('label');
-  mouseLabel.htmlFor='mousePassthroughImmediately';
-  mouseLabel.textContent='Mouse Passthrough Immediately';
-  const mouseCell=document.createElement('div');
-  mouseCell.className='checkboxCell';
-  const mouseImmediate=document.createElement('input');
-  mouseImmediate.id='mousePassthroughImmediately';
-  mouseImmediate.type='checkbox';
-  mouseImmediate.title='When enabled, entering the active Terminal image immediately enters the virtual monitor while this browser window has focus.';
-  mouseCell.append(mouseImmediate);
-  grid.append(mouseLabel,mouseCell);
-
   let savedSettings=null;
   let savedHotkey='Win+Alt+F11';
   let pendingHotkey=savedHotkey;
-  let savedMouseImmediate=false;
   let capturing=false;
   let baseline='';
   let keyboardAvailable=false;
-  let mouseAvailable=false;
 
   function q(id){return document.getElementById(id);}
   function keyName(event){
@@ -97,8 +83,6 @@ internal static class SettingsLayoutEnhancement
     hotkeyHelp.textContent=keyboardAvailable
       ?'While an active VMU Terminal has keyboard focus, this shortcut sends F11 to the virtual monitor. Plain F11 remains available to the browser.'
       :'Enable Keyboard passthrough on at least one monitor to configure this shortcut.';
-    mouseImmediate.disabled=!mouseAvailable;
-    mouseLabel.classList.toggle('terminalInputDisabled',!mouseAvailable);
   }
 
   function state(){
@@ -109,7 +93,7 @@ internal static class SettingsLayoutEnhancement
       retention:q('retention')?.value||'',preview:q('preview')?.value||'',
       snap:q('snapTolerance')?.value||'',startup:q('startupEnabled')?.checked===true,
       exit:q('exit')?.value||'',restore:q('restore')?.checked===true,
-      terminalF11:pendingHotkey,mouseImmediate:mouseImmediate.checked
+      terminalF11:pendingHotkey
     });
   }
   function updateDirty(){if(!baseline){save.disabled=true;return;}save.disabled=state()===baseline;}
@@ -129,8 +113,6 @@ internal static class SettingsLayoutEnhancement
     const restore=q('restore');if(restore)restore.checked=settings.exit?.restoreServices===true;
     savedHotkey=settings.hotkeys?.terminalF11Forward||settings.hotkeys?.fullscreenExit||'Win+Alt+F11';
     pendingHotkey=savedHotkey;hotkeyInput.value=savedHotkey;
-    savedMouseImmediate=settings.terminalInput?.mousePassthroughImmediately===true;
-    mouseImmediate.checked=savedMouseImmediate;
     q('vmuInterface')?.dispatchEvent(new Event('change'));
   }
 
@@ -146,7 +128,7 @@ internal static class SettingsLayoutEnhancement
       if(path==='/api/settings'&&String(init?.method||'GET').toUpperCase()==='POST'&&typeof init?.body==='string'){
         const payload=JSON.parse(init.body);
         payload.hotkeys={terminalF11Forward:pendingHotkey||'Win+Alt+F11'};
-        payload.terminalInput={mousePassthroughImmediately:mouseImmediate.checked===true};
+        payload.terminalInput=savedSettings?.terminalInput||{mousePassthroughImmediatelyByMonitor:{}};
         init={...init,body:JSON.stringify(payload)};
       }
     }catch{}
@@ -159,7 +141,6 @@ internal static class SettingsLayoutEnhancement
   ]).then(([settings,monitors])=>{
     savedSettings=settings;
     keyboardAvailable=Array.isArray(monitors)&&monitors.some(m=>m?.configuration?.collaborationKeyboard===true);
-    mouseAvailable=Array.isArray(monitors)&&monitors.some(m=>m?.configuration?.collaborationMouse===true);
     applyAvailability();
     setTimeout(()=>{applySettings(settings);establishBaseline();},60);
   }).catch(()=>{applyAvailability();setTimeout(establishBaseline,60);});
@@ -168,7 +149,6 @@ internal static class SettingsLayoutEnhancement
     setTimeout(()=>{
       if(savedSettings)applySettings(savedSettings);
       pendingHotkey=savedHotkey;hotkeyInput.value=savedHotkey;
-      mouseImmediate.checked=savedMouseImmediate;
       establishBaseline();
     },0);
   });
