@@ -14,6 +14,7 @@ internal sealed class ServerSettings
     public LoggingSettings Logging { get; set; } = new();
     public WebUiSettings WebUi { get; set; } = new();
     public StartupSettings Startup { get; set; } = new();
+    public HotkeySettings Hotkeys { get; set; } = new();
     public ExitSettings Exit { get; set; } = new();
     public ServiceStateSettings ServiceState { get; set; } = new();
 
@@ -47,6 +48,7 @@ internal sealed class ServerSettings
         Logging ??= new LoggingSettings();
         WebUi ??= new WebUiSettings();
         Startup ??= new StartupSettings();
+        Hotkeys ??= new HotkeySettings();
         Exit ??= new ExitSettings();
         ServiceState ??= new ServiceStateSettings();
         Vmu.Normalize(8180); Web.Normalize(8181); Socket.Normalize(8182);
@@ -54,6 +56,7 @@ internal sealed class ServerSettings
         Logging.RetentionMinutes = Math.Max(1, Logging.RetentionMinutes);
         if (!AllowedPreviewRefreshSeconds.Contains(WebUi.MonitorPreviewRefreshSeconds)) WebUi.MonitorPreviewRefreshSeconds = 60;
         WebUi.ArrangementSnapTolerancePx = Math.Clamp(WebUi.ArrangementSnapTolerancePx, 5, 50);
+        Hotkeys.FullscreenExit = string.IsNullOrWhiteSpace(Hotkeys.FullscreenExit) ? "Win+Alt+F11" : Hotkeys.FullscreenExit.Trim();
         if (!Enum.IsDefined(Exit.MonitorAction) || Exit.MonitorAction == MonitorExitAction.Uninstall) Exit.MonitorAction = MonitorExitAction.Disconnect;
     }
 }
@@ -76,6 +79,7 @@ internal sealed class WebUiSettings
     public int ArrangementSnapTolerancePx { get; set; } = 15;
 }
 internal sealed class StartupSettings { public bool Enabled { get; set; } }
+internal sealed class HotkeySettings { public string FullscreenExit { get; set; } = "Win+Alt+F11"; }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
 internal enum MonitorExitAction { Disconnect, Keep, Uninstall }
