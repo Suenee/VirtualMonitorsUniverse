@@ -3,10 +3,9 @@ using System.Runtime.InteropServices;
 namespace VirtualMonitorsUniverse.Server;
 
 /// <summary>
-/// Applies Terminal mouse input to the Windows desktop coordinates occupied by a
-/// connected VMU monitor. Localhost can use a portal hand-off: the real Windows
-/// cursor enters the virtual display and a lightweight watcher returns it to the
-/// corresponding edge of the browser-side Terminal image.
+/// Applies local Terminal mouse input to the Windows desktop coordinates occupied
+/// by a connected VMU monitor. The browser sends normalized monitor coordinates;
+/// this service performs the final Windows coordinate translation and input call.
 /// </summary>
 internal sealed class TerminalMouseService
 {
@@ -18,18 +17,8 @@ internal sealed class TerminalMouseService
     private const uint MouseeventfMiddledown = 0x0020;
     private const uint MouseeventfMiddleup = 0x0040;
     private const uint MouseeventfWheel = 0x0800;
-    private readonly object _portalSync = new();
-    private CancellationTokenSource? _portalCancellation;
-    private string? _portalMonitorId;
-    private int? _pendingPortalLeft;
-    private int? _pendingPortalTop;
 
-    // Kept for API compatibility. The browser no longer polls portal lifecycle.
-    public bool IsPortalActive(string monitorId)
-    {
-        lock (_portalSync)
-            return _portalCancellation is not null && string.Equals(_portalMonitorId, monitorId, StringComparison.OrdinalIgnoreCase);
-    }
+    public bool IsPortalActive(string monitorId) => false;
 
     public void Apply(MonitorSnapshot monitor, TerminalMouseRequest request)
     {
@@ -39,13 +28,6 @@ internal sealed class TerminalMouseService
             throw new InvalidOperationException("The monitor must be connected and healthy before mouse input can be applied.");
         if (!monitor.Configuration.CollaborationMouse)
             throw new InvalidOperationException("Mouse collaboration is disabled for this monitor.");
-
-        var type = request.Type.ToLowerInvariant();
-        if (type == "portalbounds")
-        {
-            SetPortalBoundsStart(request.Button, request.Delta);
-            return;
-        }
 
         if (request.X is not null || request.Y is not null)
         {
@@ -58,12 +40,9 @@ internal sealed class TerminalMouseService
                 throw new InvalidOperationException($"Windows rejected cursor positioning at {x},{y}.");
         }
 
-        switch (type)
+        switch (request.Type.ToLowerInvariant())
         {
             case "move":
-                return;
-            case "portal":
-                StartLocalPortalWatcher(monitor, request.Button, request.Delta);
                 return;
             case "down":
                 SendButton(request.Button, down: true);
@@ -77,103 +56,6 @@ internal sealed class TerminalMouseService
             default:
                 throw new ArgumentException($"Unsupported Terminal mouse event '{request.Type}'.", nameof(request));
         }
-    }
-
-    private void SetPortalBoundsStart(int left, int top)
-    {
-        lock (_portalSync)
-        {
-            _pendingPortalLeft = left;
-            _pendingPortalTop = top;
-        }
-    }
-
-    private void StartLocalPortalWatcher(MonitorSnapshot monitor, int browserRight, int browserBottom)
-    {
-        CancellationTokenSource cancellation;
-        int browserLeft;
-        int browserTop;
-        lock (_portalSync)
-        {
-            browserLeft = _pendingPortalLeft ?? browserRight;
-            browserTop = _pendingPortalTop ?? browserBottom;
-            _pendingPortalLeft = null;
-            _pendingPortalTop = null;
-            _portalCancellation?.Cancel();
-            _portalCancellation?.Dispose();
-            cancellation = new CancellationTokenSource();
-            _portalCancellation = cancellation;
-            _portalMonitorId = monitor.Configuration.VmuId;
-        }
-
-        var left = monitor.PositionX!.Value;
-        var top = monitor.PositionY!.Value;
-        var right = left + Math.Max(1, monitor.Width) - 1;
-        var bottom = top + Math.Max(1, monitor.Height) - 1;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                // Do not immediately interpret an entry close to an edge as an exit.
-                await Task.Delay(140, cancellation.Token);
-                while (!cancellation.IsCancellationRequested)
-                {
-                    if (!GetCursorPos(out var point)) return;
-                    if (point.X < left || point.X > right || point.Y < top || point.Y > bottom) return;
-                    if (point.X <= left + 1 || point.X >= right - 1 || point.Y <= top + 1 || point.Y >= bottom - 1)
-                    {
-                        var width = Math.Max(1, right - left);
-                        var height = Math.Max(1, bottom - top);
-                        var nx = Math.Clamp((point.X - left) / (double)width, 0, 1);
-                        var ny = Math.Clamp((point.Y - top) / (double)height, 0, 1);
-                        var browserWidth = Math.Max(1, browserRight - browserLeft);
-                        var browserHeight = Math.Max(1, browserBottom - browserTop);
-
-                        int returnX;
-                        int returnY;
-                        if (point.X <= left + 1)
-                        {
-                            returnX = browserLeft;
-                            returnY = browserTop + (int)Math.Round(ny * browserHeight);
-                        }
-                        else if (point.X >= right - 1)
-                        {
-                            returnX = browserRight;
-                            returnY = browserTop + (int)Math.Round(ny * browserHeight);
-                        }
-                        else if (point.Y <= top + 1)
-                        {
-                            returnX = browserLeft + (int)Math.Round(nx * browserWidth);
-                            returnY = browserTop;
-                        }
-                        else
-                        {
-                            returnX = browserLeft + (int)Math.Round(nx * browserWidth);
-                            returnY = browserBottom;
-                        }
-
-                        SetCursorPos(returnX, returnY);
-                        return;
-                    }
-                    await Task.Delay(8, cancellation.Token);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            finally
-            {
-                lock (_portalSync)
-                {
-                    if (ReferenceEquals(_portalCancellation, cancellation))
-                    {
-                        _portalCancellation.Dispose();
-                        _portalCancellation = null;
-                        _portalMonitorId = null;
-                    }
-                }
-            }
-        });
     }
 
     private static void SendButton(int button, bool down)
@@ -214,19 +96,8 @@ internal sealed class TerminalMouseService
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetCursorPos(int x, int y);
 
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetCursorPos(out Point point);
-
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint inputCount, Input[] inputs, int inputSize);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Point
-    {
-        public int X;
-        public int Y;
-    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Input
