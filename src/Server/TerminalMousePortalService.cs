@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 
 namespace VirtualMonitorsUniverse.Server;
 
@@ -20,14 +21,22 @@ internal static class TerminalMousePortalService
     private const int ReturnOffset = 2;
     private const int EdgeThreshold = 2;
     private const int ArmDistance = 2;
+    private const string LogService = "TERMINAL_PORTAL";
 
     private static readonly object Sync = new();
     private static PortalSession? _session;
+    private static LogStore? _logStore;
 
     static TerminalMousePortalService()
     {
         WindowsCursorTransitionService.MoveObserved += OnCursorMove;
     }
+
+    /// <summary>
+    /// Supplies the normal VMU operational log. This optional dependency keeps
+    /// portal diagnostics isolated from Terminal input and capture services.
+    /// </summary>
+    public static void ConfigureLogging(LogStore logStore) => _logStore = logStore;
 
     public static void Begin(
         string vmuId,
@@ -45,29 +54,43 @@ internal static class TerminalMousePortalService
         if (displayWidth <= 0 || displayHeight <= 0) return;
         if (browserRight <= browserLeft || browserBottom <= browserTop) return;
 
-        lock (Sync)
-        {
-            _session = new PortalSession(
-                vmuId,
+        var session = new PortalSession(
+            vmuId,
+            deviceName,
+            displayX,
+            displayY,
+            checked(displayX + displayWidth),
+            checked(displayY + displayHeight),
+            browserLeft,
+            browserTop,
+            browserRight,
+            browserBottom);
+
+        lock (Sync) _session = session;
+
+        WriteLog("INFO", "TERMINAL_PORTAL_BEGIN", "Terminal mouse exit session started.", session,
+            new
+            {
                 deviceName,
-                displayX,
-                displayY,
-                checked(displayX + displayWidth),
-                checked(displayY + displayHeight),
-                browserLeft,
-                browserTop,
-                browserRight,
-                browserBottom);
-        }
+                display = new { left = session.DisplayLeft, top = session.DisplayTop, right = session.DisplayRight, bottom = session.DisplayBottom },
+                browser = new { left = browserLeft, top = browserTop, right = browserRight, bottom = browserBottom }
+            });
     }
 
     public static void Cancel(string? vmuId = null)
     {
+        PortalSession? cancelled = null;
         lock (Sync)
         {
             if (vmuId is null || _session?.VmuId.Equals(vmuId, StringComparison.OrdinalIgnoreCase) == true)
+            {
+                cancelled = _session;
                 _session = null;
+            }
         }
+
+        if (cancelled is not null)
+            WriteLog("INFO", "TERMINAL_PORTAL_CANCEL", "Terminal mouse exit session was cancelled.", cancelled);
     }
 
     private static void OnCursorMove(CursorMoveObservation observation)
@@ -78,14 +101,12 @@ internal static class TerminalMousePortalService
 
         var current = observation.CurrentPosition;
 
-        // The first cursor events after entry include the deliberate one-pixel
-        // DXGI wake-up nudge. Record the real entry point and arm edge detection
-        // only after the user has moved far enough to distinguish real movement
-        // from that synthetic wake-up sequence.
         if (session.EntryPosition is null)
         {
             session.EntryPosition = current;
             session.LastPosition = current;
+            session.LastZone = ZoneFor(session, current);
+            WriteMoveLog(session, observation, current, "entry");
             return;
         }
 
@@ -98,26 +119,35 @@ internal static class TerminalMousePortalService
             }
 
             session.Armed = true;
+            WriteMoveLog(session, observation, current, "armed");
         }
 
         var previous = session.LastPosition ?? observation.PreviousPosition ?? current;
         session.LastPosition = current;
+
+        var currentZone = ZoneFor(session, current);
+        if (!string.Equals(currentZone, session.LastZone, StringComparison.Ordinal))
+        {
+            session.LastZone = currentZone;
+            WriteMoveLog(session, observation, current, currentZone);
+        }
 
         var currentOnTarget = observation.CurrentDisplay is not null &&
             observation.CurrentDisplay.DeviceName.Equals(session.DeviceName, StringComparison.OrdinalIgnoreCase);
 
         if (!currentOnTarget)
         {
-            // Windows may cross directly from the virtual monitor into an adjacent
-            // display in a single mouse move. Treat that as portal exit instead of
-            // silently cancelling the session as the previous implementation did.
             if (InsideDisplay(session, previous))
             {
                 var crossedEdge = ChooseCrossedEdge(session, previous, current);
+                WriteLog("INFO", "TERMINAL_PORTAL_EDGE", $"Cursor crossed Terminal edge {crossedEdge}.", session,
+                    MoveDetails(session, observation, previous, current, crossedEdge.ToString()));
                 ReturnToBrowser(session, crossedEdge, previous);
             }
             else
             {
+                WriteLog("INFO", "TERMINAL_PORTAL_CANCEL", "Cursor left the target display without a usable edge crossing.", session,
+                    MoveDetails(session, observation, previous, current, "outside-target"));
                 Cancel(session.VmuId);
             }
 
@@ -129,6 +159,8 @@ internal static class TerminalMousePortalService
         var edge = DetectReachedEdge(session, current, dx, dy);
         if (edge is null) return;
 
+        WriteLog("INFO", "TERMINAL_PORTAL_EDGE", $"Cursor reached Terminal edge {edge.Value}.", session,
+            MoveDetails(session, observation, previous, current, edge.Value.ToString()));
         ReturnToBrowser(session, edge.Value, current);
     }
 
@@ -161,8 +193,6 @@ internal static class TerminalMousePortalService
         if (crossedLeft || crossedRight || crossedTop || crossedBottom)
             return ChooseEdge(crossedLeft, crossedRight, crossedTop, crossedBottom, dx, dy);
 
-        // A topology hand-off can report another display even when the sampled
-        // point is numerically on the shared edge. Fall back to travel direction.
         if (Math.Abs(dx) >= Math.Abs(dy))
             return dx < 0 ? PortalEdge.Left : PortalEdge.Right;
         return dy < 0 ? PortalEdge.Top : PortalEdge.Bottom;
@@ -182,16 +212,21 @@ internal static class TerminalMousePortalService
     {
         var destination = MapReturnPoint(session, edge, source);
 
-        // Clear the session before SetCursorPos. The generated cursor event must
-        // never be interpreted as another portal movement.
         lock (Sync)
         {
             if (!ReferenceEquals(_session, session)) return;
             _session = null;
         }
 
-        if (!SetCursorPos(destination.X, destination.Y))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not return the cursor from the Terminal portal.");
+        WriteLog("INFO", "TERMINAL_PORTAL_RETURN", $"Returning cursor from Terminal through {edge} edge.", session,
+            new { edge = edge.ToString(), source, destination });
+
+        if (SetCursorPos(destination.X, destination.Y)) return;
+
+        var error = Marshal.GetLastWin32Error();
+        WriteLog("ERROR", "TERMINAL_PORTAL_RETURN_FAILED", $"Windows could not return the cursor from the Terminal portal (Win32 {error}).", session,
+            new { edge = edge.ToString(), source, destination, win32Error = error });
+        throw new Win32Exception(error, "Windows could not return the cursor from the Terminal portal.");
     }
 
     private static CursorPoint MapReturnPoint(PortalSession session, PortalEdge edge, CursorPoint current)
@@ -230,6 +265,54 @@ internal static class TerminalMousePortalService
         return Math.Sqrt((double)dx * dx + (double)dy * dy);
     }
 
+    private static string ZoneFor(PortalSession session, CursorPoint point)
+    {
+        if (!InsideDisplay(session, point)) return "outside";
+        if (point.X - session.DisplayLeft <= EdgeThreshold) return "near-left";
+        if (session.DisplayRight - 1 - point.X <= EdgeThreshold) return "near-right";
+        if (point.Y - session.DisplayTop <= EdgeThreshold) return "near-top";
+        if (session.DisplayBottom - 1 - point.Y <= EdgeThreshold) return "near-bottom";
+        return "inside";
+    }
+
+    private static void WriteMoveLog(PortalSession session, CursorMoveObservation observation, CursorPoint current, string reason)
+    {
+        var previous = session.LastPosition ?? observation.PreviousPosition;
+        WriteLog("DEBUG", "TERMINAL_PORTAL_MOVE", $"Terminal portal cursor observation: {reason}.", session,
+            MoveDetails(session, observation, previous, current, reason));
+    }
+
+    private static object MoveDetails(PortalSession session, CursorMoveObservation observation, CursorPoint? previous, CursorPoint current, string reason)
+        => new
+        {
+            reason,
+            previous,
+            current,
+            currentDisplay = observation.CurrentDisplay?.DeviceName,
+            targetDisplay = session.DeviceName,
+            armed = session.Armed,
+            distances = new
+            {
+                left = current.X - session.DisplayLeft,
+                right = session.DisplayRight - 1 - current.X,
+                top = current.Y - session.DisplayTop,
+                bottom = session.DisplayBottom - 1 - current.Y
+            }
+        };
+
+    private static void WriteLog(string level, string eventName, string message, PortalSession session, object? details = null)
+    {
+        try
+        {
+            _logStore?.Write(level, LogService, eventName, message, session.VmuId,
+                details is null ? null : JsonSerializer.Serialize(details));
+        }
+        catch
+        {
+            // Diagnostics must never alter mouse behavior or escape into User32.
+        }
+    }
+
     private enum PortalEdge { Left, Right, Top, Bottom }
 
     private sealed class PortalSession(
@@ -256,6 +339,7 @@ internal static class TerminalMousePortalService
         public double BrowserBottom { get; } = browserBottom;
         public CursorPoint? EntryPosition { get; set; }
         public CursorPoint? LastPosition { get; set; }
+        public string? LastZone { get; set; }
         public bool Armed { get; set; }
     }
 
