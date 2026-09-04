@@ -66,8 +66,8 @@ internal sealed class WebServerService : NetworkService
         _arrangements=new DisplayArrangementCoordinator(logs);
         _terminalStartupStats=new TerminalStartupStatsStore(logs.DatabasePath);
         _cursorTransitions=new WindowsCursorTransitionService(()=>_monitors.List(),logs);
-        _cursorTransitions.Transition+=OnCursorTransition;
         TerminalMousePortalService.ConfigureLogging(logs);
+        _cursorTransitions.Transition+=OnCursorTransition;
     }
 
     protected override void ConfigureApplication(WebApplication app){app.MapGet("/",StatusPage);app.MapGet("/settings",SettingsPage);app.MapGet("/settings/arrangement",()=>Results.Redirect("/arrangement"));app.MapGet("/arrangement",ArrangementPage);app.MapGet("/monitors",MonitorsPage);app.MapGet("/monitors/new",NewMonitorPage);app.MapGet("/monitors/{id}",MonitorPropertiesPage);app.MapGet("/monitor/{id}",TerminalPage);app.MapGet("/log",LogPage);app.MapGet("/api/health",()=>Results.Json(new{status="ok",version=ProjectInfo.Version}));app.MapGet("/api/status",()=>Results.Json(StatusModel()));app.MapGet("/api/resources",()=>Results.Json(_resources.Read()));app.MapGet("/api/arrangement",()=>Results.Json(ArrangementModel()));app.MapPost("/api/arrangement/apply",ApplyArrangementAsync);app.MapPost("/api/arrangement/keep",()=>Results.Json(new{kept=_arrangements.Keep()}));app.MapPost("/api/arrangement/revert",()=>Results.Json(new{reverted=_arrangements.Revert()}));app.MapPost("/api/arrangement/open-windows-settings",OpenWindowsDisplaySettings);app.MapGet("/api/settings",()=>Results.Json(_settingsProvider()));app.MapPost("/api/settings",SaveSettingsAsync);app.MapGet("/api/log",(HttpRequest request)=>Results.Json(ReadLog(request)));app.MapGet("/api/log/count",(HttpRequest request)=>Results.Json(ReadLogCount(request)));app.MapDelete("/api/log",()=>{LogStore.Clear();return Results.NoContent();});app.MapGet("/api/log/export/{format}",ExportLog);app.MapGet("/api/avatars",()=>Results.Json(new{revision=MonitorAvatarService.Revision,ids=MonitorAvatarService.AnimalNames}));app.MapGet("/api/avatars/{id}",BuiltInAvatar);app.MapGet("/api/monitors",()=>Results.Json(_monitors.List()));app.MapPost("/api/monitors/order",ReorderAsync);app.MapGet("/api/monitors/name-available/{name}",(string name,string? except)=>Results.Json(new{available=_monitors.NameAvailable(name,except)}));app.MapPost("/api/monitors",CreateAsync);app.MapGet("/api/monitors/{id}",(string id)=>_monitors.Get(id) is{} monitor?Results.Json(monitor):Results.NotFound());app.MapPut("/api/monitors/{id}",UpdateAsync);app.MapPost("/api/monitors/{id}/connect",(string id)=>Action(()=>_monitors.Connect(id)));app.MapPost("/api/monitors/{id}/disconnect",(string id)=>Action(()=>_monitors.Disconnect(id)));app.MapPost("/api/monitors/{id}/uninstall",Uninstall);app.MapGet("/api/monitors/{id}/thumbnail",ThumbnailAsync);app.MapGet("/api/monitors/{id}/live",LiveAsync);app.MapGet("/api/monitors/{id}/terminal-startup-stats",TerminalStartupStats);app.MapPost("/api/monitors/{id}/terminal-startup-sample",TerminalStartupSampleAsync);app.MapGet("/api/monitors/{id}/avatar",Avatar);app.MapPost("/api/monitors/{id}/avatar/animal/{animal}",(string id,string animal)=>Action(()=>_monitors.SetAnimalAvatar(id,animal)));app.MapPost("/api/monitors/{id}/avatar/upload",UploadAvatarAsync);app.MapGet("/api/monitors/{id}/access-rules",(string id)=>Results.Json(_monitors.ListAccessRules(id)));app.MapPost("/api/monitors/{id}/access-rules",RuleAsync);app.MapDelete("/api/monitors/{id}/access-rules/{ruleId:long}",(string id,long ruleId)=>{_monitors.DeleteAccessRule(id,ruleId);return Results.NoContent();});}
@@ -99,8 +99,7 @@ internal sealed class WebServerService : NetworkService
             while(!context.RequestAborted.IsCancellationRequested&&IsVmuServerRunning())
             {
                 var frame=await _capture.GetLiveFrameAsync(monitor.Configuration.VmuId,monitor.DeviceName,context.RequestAborted);
-                if(frame is null){await Task.Delay(40,context.RequestAborted);continue;}
-                await WriteMjpegFrameAsync(client,frame,context.RequestAborted);
+                await WriteLiveFrameAsync(client,frame,context.RequestAborted);
             }
         }
         catch(OperationCanceledException){}
@@ -108,11 +107,43 @@ internal sealed class WebServerService : NetworkService
         finally
         {
             clients.TryRemove(clientId,out _);
-            if(clients.IsEmpty)_terminalClients.TryRemove(monitor.Configuration.VmuId,out _);
+            if(clients.IsEmpty)_terminalClients.TryRemove(new KeyValuePair<string,ConcurrentDictionary<Guid,LiveTerminalClient>>(monitor.Configuration.VmuId,clients));
         }
     }
 
-    private async Task WriteMjpegFrameAsync(LiveTerminalClient client,byte[] frame,CancellationToken cancellationToken)
+    private void OnCursorTransition(CursorDisplayTransition transition)
+    {
+        var departed=transition.PreviousDisplay;
+        if(departed is not {IsVirtual:true,VmuId:not null,CName:not null})return;
+        if(!_terminalClients.TryGetValue(departed.VmuId,out var clients)||clients.IsEmpty)return;
+        if(!_terminalRefreshPending.TryAdd(departed.VmuId,0))return;
+
+        _=Task.Run(async()=>
+        {
+            try
+            {
+                var frame=await TerminalFrameRefreshService.CaptureAsync(departed.DeviceName,CancellationToken.None);
+                if(!_terminalClients.TryGetValue(departed.VmuId,out var currentClients))return;
+                foreach(var client in currentClients.Values.ToArray())
+                {
+                    try{await WriteLiveFrameAsync(client,frame,client.Context.RequestAborted);}
+                    catch(OperationCanceledException){}
+                    catch(ObjectDisposedException){}
+                    catch(IOException){}
+                }
+            }
+            catch(Exception ex)
+            {
+                LogStore.Write("WARN","WEB","TERMINAL_CURSOR_REFRESH_FAILED",ex.Message,departed.VmuId,JsonSerializer.Serialize(new{departed.WindowsNumber,departed.DeviceName,departed.IsVirtual,departed.CName,transition.PreviousPosition,transition.CurrentPosition,currentDisplay=transition.CurrentDisplay}));
+            }
+            finally
+            {
+                _terminalRefreshPending.TryRemove(departed.VmuId,out _);
+            }
+        });
+    }
+
+    private async Task WriteLiveFrameAsync(LiveTerminalClient client,byte[] frame,CancellationToken cancellationToken)
     {
         await client.WriteGate.WaitAsync(cancellationToken);
         try
@@ -122,70 +153,49 @@ internal sealed class WebServerService : NetworkService
             await client.Context.Response.Body.WriteAsync(frame,cancellationToken);
             await client.Context.Response.Body.WriteAsync("\r\n"u8.ToArray(),cancellationToken);
             await client.Context.Response.Body.FlushAsync(cancellationToken);
+            _resources.AddVmuNetworkBytes(header.Length+frame.Length+2);
         }
-        finally{client.WriteGate.Release();}
-    }
-
-    private void OnCursorTransition(CursorDisplayTransition transition)
-    {
-        var previous=transition.PreviousDisplay;
-        if(previous is null||!previous.IsVirtual||string.IsNullOrWhiteSpace(previous.VmuId))return;
-        if(!_terminalClients.ContainsKey(previous.VmuId))return;
-        if(!_terminalRefreshPending.TryAdd(previous.VmuId,0))return;
-        _=Task.Run(()=>BroadcastTerminalRefreshAsync(previous.VmuId,previous.DeviceName,previous.CName,transition));
-    }
-
-    private async Task BroadcastTerminalRefreshAsync(string vmuId,string deviceName,string? cname,CursorDisplayTransition transition)
-    {
-        try
+        finally
         {
-            if(!_terminalClients.TryGetValue(vmuId,out var clients)||clients.IsEmpty)return;
-            var display=WindowsArrangementService.GetActive().FirstOrDefault(x=>x.DeviceName.Equals(deviceName,StringComparison.OrdinalIgnoreCase));
-            if(display is null)return;
-            var frame=TerminalFrameRefreshService.Capture(display.X,display.Y,display.Width,display.Height);
-            foreach(var client in clients.Values.ToArray())
-            {
-                try{await WriteMjpegFrameAsync(client,frame,client.Context.RequestAborted);}catch(OperationCanceledException){}catch(IOException){}
-            }
+            client.WriteGate.Release();
         }
-        catch(Exception ex)
-        {
-            LogStore.Write("WARN","WEB","TERMINAL_CURSOR_REFRESH_FAILED",$"Corrective Terminal frame failed: {ex.Message}",vmuId,JsonSerializer.Serialize(new{deviceName,cname,previous=transition.PreviousPosition,current=transition.CurrentPosition}));
-        }
-        finally{_terminalRefreshPending.TryRemove(vmuId,out _);}
     }
 
-    private object TerminalStartupStats(string id){var monitor=_monitors.Get(id);if(monitor is null)return new{expectedMs=5000,sampleCount=0};var estimate=_terminalStartupStats.GetEstimate(monitor.Configuration.VmuId);return new{expectedMs=estimate.ExpectedMs,sampleCount=estimate.SampleCount};}
-    private async Task<IResult> TerminalStartupSampleAsync(string id,HttpRequest request){var monitor=_monitors.Get(id);if(monitor is null)return Results.NotFound();var sample=await request.ReadFromJsonAsync<TerminalStartupSampleRequest>();if(sample is null||sample.DurationMs<0)return Results.BadRequest(new{error="Invalid startup sample."});_terminalStartupStats.Record(monitor.Configuration.VmuId,sample.DurationMs,sample.Success,sample.ExpectedMs,sample.Reason);return Results.NoContent();}
-    private IResult Uninstall(string id){var monitor=_monitors.Get(id);if(monitor is null)return Results.NotFound();var vmuId=monitor.Configuration.VmuId;var result=Action(()=>_monitors.Uninstall(id));_terminalStartupStats.DeleteMonitor(vmuId);return result;}
-    private async Task<IResult> CreateAsync(HttpRequest request){try{var payload=await request.ReadFromJsonAsync<MonitorCreateRequest>();if(payload is null)return Results.BadRequest(new{error="Invalid request."});var result=_monitors.Create(payload.Name??"",payload.Title??"",payload.Width,payload.Height,payload.RefreshRate,payload.Portrait,payload.AvatarAnimal);return Results.Json(result);}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
-    private async Task<IResult> UpdateAsync(string id,HttpRequest request){try{var payload=await request.ReadFromJsonAsync<MonitorUpdateRequest>();if(payload is null)return Results.BadRequest(new{error="Invalid request."});if(!Enum.TryParse<RemoteAccessMode>(payload.RemoteAccess,true,out var remote))return Results.BadRequest(new{error="Invalid Remote Access mode."});if(!Enum.TryParse<SecurityMode>(payload.SecurityMode,true,out var security))return Results.BadRequest(new{error="Invalid Security mode."});var result=_monitors.UpdateProperties(id,payload.Name??"",payload.Title??"",payload.Width,payload.Height,payload.RefreshRate,payload.Portrait,remote,security,payload.Password,payload.RegenerateApiKey,payload.CollaborationClipboard,payload.CollaborationMouse,payload.CollaborationKeyboard);return Results.Json(result);}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
-    private async Task<IResult> ReorderAsync(HttpRequest request){try{var payload=await request.ReadFromJsonAsync<MonitorOrderRequest>();if(payload?.Ids is null)return Results.BadRequest(new{error="Invalid request."});_monitors.Reorder(payload.Ids);return Results.NoContent();}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
-    private async Task<IResult> RuleAsync(string id,HttpRequest request){try{var payload=await request.ReadFromJsonAsync<AccessRuleRequest>();if(payload is null)return Results.BadRequest(new{error="Invalid request."});_monitors.AddAccessRule(id,payload.ClientId,payload.IpAddress,payload.MacAddress,payload.ComputerName,payload.UserName,payload.Permission);return Results.NoContent();}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
-    private async Task<IResult> UploadAvatarAsync(string id,HttpRequest request){try{if(!request.HasFormContentType)return Results.BadRequest(new{error="multipart/form-data expected"});var form=await request.ReadFormAsync();var file=form.Files.FirstOrDefault();if(file is null)return Results.BadRequest(new{error="No file uploaded."});await using var stream=file.OpenReadStream();_monitors.SetUploadedAvatar(id,stream);return Results.NoContent();}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
-    private IResult Avatar(string id){var monitor=_monitors.Get(id);if(monitor is null)return Results.NotFound();return monitor.Configuration.AvatarKind.Equals("animal",StringComparison.OrdinalIgnoreCase)?BuiltInAvatar(monitor.Configuration.AvatarValue):Results.File(_monitors.GetAvatarBytes(id),"image/png");}
-    private IResult BuiltInAvatar(string id){try{return Results.File(MonitorAvatarService.GetBuiltInPng(id),"image/png");}catch{return Results.NotFound();}}
-    private IResult ThumbnailAsync(string id){var monitor=_monitors.Get(id);if(monitor is null||!monitor.Connected||monitor.Health.IsError||monitor.DeviceName is null)return Results.NotFound();try{return Results.File(_capture.GetJpeg(monitor.Configuration.VmuId,monitor.DeviceName),"image/jpeg");}catch(Exception ex){LogStore.Write("WARN","WEB","THUMBNAIL_FAILED",ex.Message,monitor.Configuration.VmuId);return Results.NotFound();}}
-    private object ReadLog(HttpRequest request){var search=request.Query["search"].FirstOrDefault();var afterText=request.Query["after"].FirstOrDefault();_ = long.TryParse(afterText,out var after);var services=request.Query["services"].SelectMany(x=>x?.Split(',',StringSplitOptions.RemoveEmptyEntries|StringSplitOptions.TrimEntries)??[]).ToArray();return LogStore.Read(search,services.Length==0?null:services,after);}
-    private object ReadLogCount(HttpRequest request){var search=request.Query["search"].FirstOrDefault();var services=request.Query["services"].SelectMany(x=>x?.Split(',',StringSplitOptions.RemoveEmptyEntries|StringSplitOptions.TrimEntries)??[]).ToArray();return LogStore.Count(search,services.Length==0?null:services);}
-    private IResult ExportLog(string format){var rows=LogStore.ReadAll();var bytes=LogExportService.Export(rows,format);var contentType=format.ToLowerInvariant() switch{"csv"=>"text/csv; charset=utf-8","xlsx"=>"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","txt"=>"text/plain; charset=utf-8",_=>"application/octet-stream"};return Results.File(bytes,contentType,$"vmu-log-{DateTime.Now:yyyyMMdd-HHmmss}.{format.ToLowerInvariant()}");}
-    private IResult Action(Func<MonitorSnapshot> action){try{return Results.Json(action());}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private IResult TerminalStartupStats(string id){var monitor=_monitors.Get(id);return monitor is null?Results.NotFound():Results.Json(_terminalStartupStats.ReadEstimate(monitor.Configuration.Name));}
+    private async Task<IResult> TerminalStartupSampleAsync(HttpRequest request,string id){var monitor=_monitors.Get(id);if(monitor is null)return Results.NotFound();var sample=await request.ReadFromJsonAsync<TerminalStartupSampleRequest>();if(sample is null)return Results.BadRequest();var duration=Math.Clamp(sample.DurationMs,0,300000);_terminalStartupStats.Record(monitor.Configuration.Name,duration,sample.Success);if(!sample.Success){LogStore.Write("WARN","WEB","TERMINAL_START_TIMEOUT",$"Terminal for {monitor.Configuration.Title} did not produce its first frame within the expected startup window.",monitor.Configuration.VmuId,JsonSerializer.Serialize(new{durationMs=duration,expectedMs=Math.Max(0,sample.ExpectedMs),sample.Reason}));}return Results.NoContent();}
+    private async Task<IResult> ThumbnailAsync(string id,HttpContext context){try{var monitor=_monitors.Get(id);if(monitor is null||!monitor.Connected||monitor.DeviceName is null)return Results.NotFound();if(context.Request.Query.TryGetValue("force",out var force)&&force.Any(x=>string.Equals(x,"1",StringComparison.OrdinalIgnoreCase)||string.Equals(x,"true",StringComparison.OrdinalIgnoreCase)))_capture.Invalidate(monitor.Configuration.VmuId);return Results.File(await _capture.GetThumbnailAsync(monitor.Configuration.VmuId,monitor.DeviceName,context.RequestAborted),"image/jpeg");}catch(Exception ex){LogStore.Write("WARN","WEB","MONITOR_THUMBNAIL_FAILED",ex.Message,id);return Results.NotFound();}}
+    private IResult BuiltInAvatar(string id){var bytes=MonitorAvatarService.ReadBuiltIn(id);return bytes is null?Results.NotFound():Results.File(bytes,"image/png");}
+    private async Task<IResult> CreateAsync(HttpRequest request){try{var payload=await request.ReadFromJsonAsync<MonitorCreateRequest>();if(payload is null)return Results.BadRequest();return Results.Json(_monitors.Create(payload.Name,payload.Title,payload.Width,payload.Height,payload.RefreshRate,payload.Portrait,payload.AvatarAnimal));}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private async Task<IResult> UpdateAsync(HttpRequest request,string id){try{var payload=await request.ReadFromJsonAsync<MonitorUpdateRequest>();if(payload is null||!Enum.TryParse<RemoteAccessMode>(payload.RemoteAccess,true,out var remoteAccess)||!Enum.TryParse<RemoteSecurityMode>(payload.SecurityMode,true,out var securityMode))return Results.BadRequest();return Results.Json(_monitors.UpdateProperties(id,payload.Name,payload.Title,payload.Width,payload.Height,payload.RefreshRate,payload.Portrait,remoteAccess,securityMode,payload.Password,payload.RegenerateApiKey,payload.CollaborationClipboard,payload.CollaborationMouse,payload.CollaborationKeyboard));}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private async Task<IResult> ReorderAsync(HttpRequest request){var payload=await request.ReadFromJsonAsync<MonitorOrderRequest>();if(payload is null)return Results.BadRequest();_monitors.Reorder(payload.Ids);return Results.NoContent();}
+    private IResult Avatar(string id){var avatar=_monitors.GetAvatar(id);return avatar is null?Results.NotFound():Results.File(avatar.Value.Bytes,avatar.Value.ContentType);}
+    private async Task<IResult> UploadAvatarAsync(HttpRequest request,string id){try{var file=(await request.ReadFormAsync()).Files.GetFile("file");if(file is null||file.Length==0)return Results.BadRequest();if(file.Length>2*1024*1024)return Results.BadRequest(new{error="Avatar file must be at most 2 MB."});await using var stream=file.OpenReadStream();return Results.Json(_monitors.SetCustomAvatar(id,file.FileName,stream));}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private async Task<IResult> RuleAsync(HttpRequest request,string id){var payload=await request.ReadFromJsonAsync<AccessRuleRequest>();if(payload is null||!Enum.TryParse<AccessPermission>(payload.Permission,true,out var permission))return Results.BadRequest();return Results.Json(_monitors.UpsertAccessRule(id,payload.ClientId,payload.IpAddress,payload.MacAddress,payload.ComputerName,payload.UserName,permission));}
+    private static IResult Action(Func<MonitorSnapshot> action){try{return Results.Json(action());}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private IResult Uninstall(string id){try{var monitor=_monitors.Get(id);if(monitor is null)return Results.NotFound();_monitors.Uninstall(id);_terminalStartupStats.Delete(monitor.Configuration.Name);return Results.NoContent();}catch(Exception ex){return Results.BadRequest(new{error=ex.Message});}}
+    private async Task<IResult> SaveSettingsAsync(HttpRequest request){var proposed=await request.ReadFromJsonAsync<ServerSettings>();if(proposed is null)return Results.BadRequest();if(proposed.Vmu.Interface.Equals("any",StringComparison.OrdinalIgnoreCase)&&!proposed.Web.Interface.Equals("any",StringComparison.OrdinalIgnoreCase))return Results.Conflict(new{error="Web Server must use All Interfaces while VMU Server uses All Interfaces."});var endpoints=new[]{(Name:"VMU Server",Port:proposed.Vmu.Port),(Name:"Web Server",Port:proposed.Web.Port),(Name:"Web Socket",Port:proposed.Socket.Port)};if(endpoints.GroupBy(x=>x.Port).Any(x=>x.Count()>1))return Results.Conflict(new{error="Service ports must be unique."});var active=IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Select(x=>x.Port).ToHashSet();var blocked=endpoints.FirstOrDefault(x=>active.Contains(x.Port)&&!_isOwnedListener(x.Port));if(blocked!=default)return Results.Conflict(new{error=$"{blocked.Name} port {blocked.Port} is already used."});return Results.Json(await _settingsSaver(proposed));}
+    private IReadOnlyList<LogEntry> ReadLog(HttpRequest request){var services=request.Query["service"].Where(x=>!string.IsNullOrWhiteSpace(x)).Select(x=>x!).ToArray();return LogStore.Read(request.Query["q"].FirstOrDefault(),services.Length==0?ServiceKeys:services);}
+    private LogCount ReadLogCount(HttpRequest request){var services=request.Query["service"].Where(x=>!string.IsNullOrWhiteSpace(x)).Select(x=>x!).ToArray();return LogStore.Count(request.Query["q"].FirstOrDefault(),services.Length==0?ServiceKeys:services);}
+    private IResult ExportLog(HttpRequest request,string format){if(format is not("xlsx" or "csv" or "txt"))return Results.BadRequest();var bytes=LogExportService.ExportBytes(format,ReadLog(request));var contentType=format=="xlsx"?"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":format=="csv"?"text/csv":"text/plain";return Results.File(bytes,contentType,$"vmu-log-{DateTime.Now:yyyyMMdd-HHmmss}.{format}");}
+    private string Navigation(){var status=_statusProvider();return WebUiRenderer.MonitorNavigation(_monitors.List(),status.GetValueOrDefault("VMU_SERVER"));}
+    private IResult Shell(string title,string body,string bodyClass="",string extraNav="")=>Results.Content(WebUiRenderer.Shell(title,body+WebPageEnhancements.Global,Navigation(),bodyClass,WebPageEnhancements.GlobalNavButtons+extraNav),"text/html; charset=utf-8");
     private bool IsVmuServerRunning()=>_statusProvider().GetValueOrDefault("VMU_SERVER");
-    private string Shell(string title,string body,string? bodyClass=null)=>WebUiRenderer.Shell(title,body,_statusProvider(),_monitors.List(),_settingsProvider().WebUi.ShowHelpLinks,bodyClass);
-    private static string BuildRefreshRateOptions(int selected)=>string.Join("",MonitorApplicationService.SupportedRefreshRates.Select(x=>$"<option value='{x}'{(x==selected?" selected":"")}>{x} Hz</option>"));
-    private sealed class LiveTerminalClient(HttpContext context){public HttpContext Context{get;}=context;public SemaphoreSlim WriteGate{get;}=new(1,1);}
+    private static string BuildRefreshRateOptions(int selected)=>string.Join("",MonitorApplicationService.SupportedRefreshRates.Select(rate=>$"<option value=\"{rate}\"{(rate==selected?" selected":string.Empty)}>{rate} Hz</option>"));
+
+    private sealed class LiveTerminalClient(HttpContext context)
+    {
+        public HttpContext Context { get; }=context;
+        public SemaphoreSlim WriteGate { get; }=new(1,1);
+    }
 }
 
-internal sealed class SocketServerService : NetworkService
+internal sealed class WebSocketServerService : NetworkService
 {
-    private readonly MonitorApplicationService _monitors;
-    private readonly RemoteActionRegistry _actions;
-    private readonly ConcurrentDictionary<Guid,WebSocket> _clients=new();
-    private readonly Func<ServerSettings> _settingsProvider;
-    public SocketServerService(LogStore logs,MonitorApplicationService monitors,Func<int> webPort,Func<ServerSettings> settings):base("Socket Server","SOCKET",logs){_monitors=monitors;_settingsProvider=settings;_actions=new RemoteActionRegistry(monitors,webPort);}
-    protected override void ConfigureApplication(WebApplication app){app.UseWebSockets();app.MapGet("/",()=>Results.Json(new{service="VMU Socket Server",transport="websocket",protocol="VPP",protocolVersion=1,path="/vpp"}));app.Map("/vpp",HandleAsync);}
-    private async Task HandleAsync(HttpContext context){if(!context.WebSockets.IsWebSocketRequest){context.Response.StatusCode=400;return;}using var socket=await context.WebSockets.AcceptWebSocketAsync();var id=Guid.NewGuid();_clients[id]=socket;LogStore.Write("INFO","SOCKET","CLIENT_CONNECTED",$"Client {id} connected");try{var buffer=new byte[65536];while(socket.State==WebSocketState.Open){var result=await socket.ReceiveAsync(buffer,context.RequestAborted);if(result.MessageType==WebSocketMessageType.Close)break;var text=Encoding.UTF8.GetString(buffer,0,result.Count);await HandleMessageAsync(socket,text);}}catch(OperationCanceledException){}catch(Exception ex){LogStore.Write("WARN","SOCKET","CLIENT_ERROR",ex.Message);}finally{_clients.TryRemove(id,out _);if(socket.State==WebSocketState.Open)await socket.CloseAsync(WebSocketCloseStatus.NormalClosure,"bye",CancellationToken.None);}}
-    private async Task HandleMessageAsync(WebSocket socket,string text){try{using var document=JsonDocument.Parse(text);var root=document.RootElement;var protocol=root.TryGetProperty("protocol",out var p)?p.GetString():null;var version=root.TryGetProperty("protocolVersion",out var pv)&&pv.TryGetInt32(out var v)?v:0;var type=root.TryGetProperty("type",out var t)?t.GetString():null;var from=root.TryGetProperty("from",out var f)?f.GetString():null;var recipient=root.TryGetProperty("recipient",out var r)?r.GetString():null;if(protocol!="VPP"||version!=1||type!="command"||string.IsNullOrWhiteSpace(from)||recipient!="vmu")throw new RemoteActionException("INVALID_ENVELOPE","Invalid VPP command envelope.");var requestId=root.TryGetProperty("requestId",out var ri)?ri.GetString():null;if(string.IsNullOrWhiteSpace(requestId))throw new RemoteActionException("INVALID_ENVELOPE","requestId is required.");var action=root.TryGetProperty("action",out var a)?a.GetString():null;if(string.IsNullOrWhiteSpace(action))throw new RemoteActionException("INVALID_ENVELOPE","action is required.");var args=root.TryGetProperty("args",out var ar)?ar:default;var response=_actions.Execute(action,args);await SendAsync(socket,new{protocol="VPP",protocolVersion=1,type="response",from="vmu",recipient=from,requestId,action,success=true,result=response});}catch(RemoteActionException ex){await SendAsync(socket,new{protocol="VPP",protocolVersion=1,type="response",from="vmu",recipient="client",requestId=TryRequestId(text),success=false,error=new{code=ex.Code,message=ex.Message}});}catch(Exception ex){await SendAsync(socket,new{protocol="VPP",protocolVersion=1,type="response",from="vmu",recipient="client",requestId=TryRequestId(text),success=false,error=new{code="INTERNAL_ERROR",message=ex.Message}});}}
-    private static string? TryRequestId(string text){try{using var d=JsonDocument.Parse(text);return d.RootElement.TryGetProperty("requestId",out var r)?r.GetString():null;}catch{return null;}}
-    private static Task SendAsync(WebSocket socket,object payload)=>socket.SendAsync(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload)),WebSocketMessageType.Text,true,CancellationToken.None);
+    private readonly RemoteActionRegistry _actions;public WebSocketServerService(LogStore logs,RemoteActionRegistry actions):base("Socket Server","SOCKET",logs){_actions=actions;}
+    protected override void ConfigureApplication(WebApplication app){app.UseWebSockets();app.Map("/",async context=>{if(!context.WebSockets.IsWebSocketRequest){context.Response.StatusCode=StatusCodes.Status426UpgradeRequired;return;}using var socket=await context.WebSockets.AcceptWebSocketAsync();await RunVppSessionAsync(socket,context.RequestAborted);});}
+    private async Task RunVppSessionAsync(WebSocket socket,CancellationToken cancellationToken){while(socket.State==WebSocketState.Open&&!cancellationToken.IsCancellationRequested){var payload=await ReceiveTextAsync(socket,cancellationToken);if(payload is null)break;await HandleVppMessageAsync(socket,payload,cancellationToken);}}
+    private async Task HandleVppMessageAsync(WebSocket socket,string payload,CancellationToken cancellationToken){string? correlationId=null;string recipient="sum";try{using var document=JsonDocument.Parse(payload);var root=document.RootElement;if(root.ValueKind!=JsonValueKind.Object)throw new RemoteActionException("INVALID_MESSAGE","VPP message must be a JSON object.");if(!root.TryGetProperty("protocolVersion",out var version)||version.ValueKind!=JsonValueKind.Number||version.GetInt32()!=1)throw new RemoteActionException("UNSUPPORTED_PROTOCOL","VMU supports VPP protocolVersion 1.");correlationId=RequiredString(root,"id");var type=RequiredString(root,"type");var from=RequiredString(root,"from");var target=RequiredString(root,"recipient");recipient=from;if(!from.Equals("sum",StringComparison.Ordinal))throw new RemoteActionException("INVALID_ROUTING","VMU accepts application VPP calls from the 'sum' client.");if(!type.Equals("call",StringComparison.Ordinal))throw new RemoteActionException("INVALID_MESSAGE","VMU currently accepts VPP call messages on the Socket Server.");var method=RequiredString(root,"method");var expectsResponse=root.TryGetProperty("expectsResponse",out var expects)&&expects.ValueKind==JsonValueKind.True;var args=root.TryGetProperty("args",out var argsElement)?argsElement:default;if(args.ValueKind!=JsonValueKind.Object)throw new RemoteActionException("INVALID_ARGUMENT","VPP call args must be a JSON object.");if(target.Equals("server",StringComparison.Ordinal)){if(!method.Equals("ping",StringComparison.Ordinal))throw new RemoteActionException("UNKNOWN_METHOD",$"Unknown Socket Server method '{method}'.");if(expectsResponse)await SendAsync(socket,Response(correlationId,recipient,new{success=true,application="vmu",version=ProjectInfo.Version}),cancellationToken);return;}if(!target.Equals("vmu",StringComparison.Ordinal))throw new RemoteActionException("INVALID_ROUTING","VMU application calls must use recipient 'vmu'.");var result=_actions.Execute(method,args);LogStore.Write("INFO","SOCKET","VPP_REMOTE_ACTION",$"SUM executed remote action '{method}'.",detailsJson:JsonSerializer.Serialize(new{method,correlationId}));if(expectsResponse)await SendAsync(socket,Response(correlationId,recipient,result),cancellationToken);if(!method.Equals("get_state",StringComparison.Ordinal))await SendAsync(socket,Event("stateChanged",recipient,_actions.StateSnapshot()),cancellationToken);}catch(RemoteActionException ex){LogStore.Write("WARN","SOCKET","VPP_REMOTE_ACTION_REJECTED",ex.Message,detailsJson:JsonSerializer.Serialize(new{correlationId,code=ex.Code}));if(correlationId is not null&&socket.State==WebSocketState.Open)await SendAsync(socket,Error(correlationId,recipient,ex.Code,ex.Message),cancellationToken);}catch(JsonException ex){LogStore.Write("WARN","SOCKET","VPP_INVALID_JSON",ex.Message);if(socket.State==WebSocketState.Open)await SendAsync(socket,Error(correlationId,recipient,"INVALID_MESSAGE","The VPP payload is not valid JSON."),cancellationToken);}catch(Exception ex){LogStore.Write("ERROR","SOCKET","VPP_REMOTE_ACTION_FAILED",ex.Message,detailsJson:JsonSerializer.Serialize(new{correlationId,exception=ex.ToString()}));if(socket.State==WebSocketState.Open)await SendAsync(socket,Error(correlationId,recipient,"COMMAND_FAILED",ex.Message),cancellationToken);}}
+    private static string RequiredString(JsonElement root,string property){if(!root.TryGetProperty(property,out var value)||value.ValueKind!=JsonValueKind.String||string.IsNullOrWhiteSpace(value.GetString()))throw new RemoteActionException("INVALID_MESSAGE",$"VPP field '{property}' must be a non-empty string.");return value.GetString()!;}
+    private static object Response(string correlationId,string recipient,object result)=>new{protocolVersion=1,id=Guid.NewGuid().ToString(),type="response",from="vmu",recipient,correlationId,result,source=new{app=ProjectInfo.ProductName,version=ProjectInfo.Version},timestamp=DateTimeOffset.Now.ToString("O")};private static object Error(string? correlationId,string recipient,string code,string message)=>new{protocolVersion=1,id=Guid.NewGuid().ToString(),type="error",from="vmu",recipient,correlationId,error=new{code,message},source=new{app=ProjectInfo.ProductName,version=ProjectInfo.Version},timestamp=DateTimeOffset.Now.ToString("O")};private static object Event(string eventName,string recipient,object args)=>new{protocolVersion=1,id=Guid.NewGuid().ToString(),type="event",from="vmu",recipient,@event=eventName,args,expectsResponse=false,source=new{app=ProjectInfo.ProductName,version=ProjectInfo.Version},timestamp=DateTimeOffset.Now.ToString("O")};
+    private static async Task SendAsync(WebSocket socket,object message,CancellationToken cancellationToken){var bytes=JsonSerializer.SerializeToUtf8Bytes(message);await socket.SendAsync(bytes,WebSocketMessageType.Text,true,cancellationToken);}private static async Task<string?> ReceiveTextAsync(WebSocket socket,CancellationToken cancellationToken){var buffer=new byte[8192];using var stream=new MemoryStream();while(true){var result=await socket.ReceiveAsync(buffer,cancellationToken);if(result.MessageType==WebSocketMessageType.Close){if(socket.State is WebSocketState.Open or WebSocketState.CloseReceived)await socket.CloseAsync(WebSocketCloseStatus.NormalClosure,"Closing",cancellationToken);return null;}if(result.MessageType!=WebSocketMessageType.Text)throw new RemoteActionException("INVALID_MESSAGE","VMU Socket Server accepts VPP JSON as WebSocket text messages only.");stream.Write(buffer,0,result.Count);if(stream.Length>1024*1024)throw new RemoteActionException("INVALID_MESSAGE","VPP message exceeds the 1 MB safety limit.");if(result.EndOfMessage)return Encoding.UTF8.GetString(stream.ToArray());}}
 }
