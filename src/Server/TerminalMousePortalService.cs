@@ -4,14 +4,23 @@ using System.Runtime.InteropServices;
 namespace VirtualMonitorsUniverse.Server;
 
 /// <summary>
-/// Owns the optional mouse-portal session used after the browser enters a VMU
-/// Terminal. The service is deliberately isolated from normal Terminal capture
-/// and input forwarding: removing this file and its two integration calls restores
-/// the pre-portal behavior.
+/// Owns only the mouse-exit side of an active Terminal portal session.
+///
+/// Mouse entry remains the established TerminalInputService behavior. Once entry
+/// succeeds, this service observes the same event-driven Windows cursor stream
+/// already used by Terminal capture recovery. It projects the target virtual
+/// display edges back to the active image rectangle in the browser and returns
+/// the system cursor when the user reaches or crosses an edge.
+///
+/// The service is intentionally isolated. Removing this file and the existing
+/// Begin/Cancel calls restores the pre-exit behavior without changing mouse entry.
 /// </summary>
 internal static class TerminalMousePortalService
 {
     private const int ReturnOffset = 2;
+    private const int EdgeThreshold = 2;
+    private const int ArmDistance = 2;
+
     private static readonly object Sync = new();
     private static PortalSession? _session;
 
@@ -43,8 +52,8 @@ internal static class TerminalMousePortalService
                 deviceName,
                 displayX,
                 displayY,
-                displayX + displayWidth,
-                displayY + displayHeight,
+                checked(displayX + displayWidth),
+                checked(displayY + displayHeight),
                 browserLeft,
                 browserTop,
                 browserRight,
@@ -68,29 +77,113 @@ internal static class TerminalMousePortalService
         if (session is null) return;
 
         var current = observation.CurrentPosition;
-        var previous = observation.PreviousPosition;
 
-        // A move generated while the cursor is no longer on the target display
-        // closes the session without attempting another warp. This also protects
-        // against Windows topology changes while a portal is active.
-        if (observation.CurrentDisplay is null ||
-            !observation.CurrentDisplay.DeviceName.Equals(session.DeviceName, StringComparison.OrdinalIgnoreCase))
+        // The first cursor events after entry include the deliberate one-pixel
+        // DXGI wake-up nudge. Record the real entry point and arm edge detection
+        // only after the user has moved far enough to distinguish real movement
+        // from that synthetic wake-up sequence.
+        if (session.EntryPosition is null)
         {
-            Cancel(session.VmuId);
+            session.EntryPosition = current;
+            session.LastPosition = current;
             return;
         }
 
-        var left = current.X <= session.DisplayLeft;
-        var right = current.X >= session.DisplayRight - 1;
-        var top = current.Y <= session.DisplayTop;
-        var bottom = current.Y >= session.DisplayBottom - 1;
-        if (!left && !right && !top && !bottom) return;
+        if (!session.Armed)
+        {
+            if (DistanceFrom(session.EntryPosition, current) < ArmDistance)
+            {
+                session.LastPosition = current;
+                return;
+            }
 
-        var edge = ChooseEdge(left, right, top, bottom, previous, current);
-        var destination = MapReturnPoint(session, edge, current);
+            session.Armed = true;
+        }
 
-        // Clear the session before SetCursorPos. The resulting hook event must not
-        // be interpreted as another portal movement.
+        var previous = session.LastPosition ?? observation.PreviousPosition ?? current;
+        session.LastPosition = current;
+
+        var currentOnTarget = observation.CurrentDisplay is not null &&
+            observation.CurrentDisplay.DeviceName.Equals(session.DeviceName, StringComparison.OrdinalIgnoreCase);
+
+        if (!currentOnTarget)
+        {
+            // Windows may cross directly from the virtual monitor into an adjacent
+            // display in a single mouse move. Treat that as portal exit instead of
+            // silently cancelling the session as the previous implementation did.
+            if (InsideDisplay(session, previous))
+            {
+                var crossedEdge = ChooseCrossedEdge(session, previous, current);
+                ReturnToBrowser(session, crossedEdge, previous);
+            }
+            else
+            {
+                Cancel(session.VmuId);
+            }
+
+            return;
+        }
+
+        var dx = current.X - previous.X;
+        var dy = current.Y - previous.Y;
+        var edge = DetectReachedEdge(session, current, dx, dy);
+        if (edge is null) return;
+
+        ReturnToBrowser(session, edge.Value, current);
+    }
+
+    private static PortalEdge? DetectReachedEdge(PortalSession session, CursorPoint current, int dx, int dy)
+    {
+        var leftDistance = current.X - session.DisplayLeft;
+        var rightDistance = session.DisplayRight - 1 - current.X;
+        var topDistance = current.Y - session.DisplayTop;
+        var bottomDistance = session.DisplayBottom - 1 - current.Y;
+
+        var left = leftDistance <= EdgeThreshold && dx < 0;
+        var right = rightDistance <= EdgeThreshold && dx > 0;
+        var top = topDistance <= EdgeThreshold && dy < 0;
+        var bottom = bottomDistance <= EdgeThreshold && dy > 0;
+
+        if (!left && !right && !top && !bottom) return null;
+        return ChooseEdge(left, right, top, bottom, dx, dy);
+    }
+
+    private static PortalEdge ChooseCrossedEdge(PortalSession session, CursorPoint previous, CursorPoint current)
+    {
+        var dx = current.X - previous.X;
+        var dy = current.Y - previous.Y;
+
+        var crossedLeft = current.X < session.DisplayLeft;
+        var crossedRight = current.X >= session.DisplayRight;
+        var crossedTop = current.Y < session.DisplayTop;
+        var crossedBottom = current.Y >= session.DisplayBottom;
+
+        if (crossedLeft || crossedRight || crossedTop || crossedBottom)
+            return ChooseEdge(crossedLeft, crossedRight, crossedTop, crossedBottom, dx, dy);
+
+        // A topology hand-off can report another display even when the sampled
+        // point is numerically on the shared edge. Fall back to travel direction.
+        if (Math.Abs(dx) >= Math.Abs(dy))
+            return dx < 0 ? PortalEdge.Left : PortalEdge.Right;
+        return dy < 0 ? PortalEdge.Top : PortalEdge.Bottom;
+    }
+
+    private static PortalEdge ChooseEdge(bool left, bool right, bool top, bool bottom, int dx, int dy)
+    {
+        if ((left || right) && !(top || bottom)) return left ? PortalEdge.Left : PortalEdge.Right;
+        if ((top || bottom) && !(left || right)) return top ? PortalEdge.Top : PortalEdge.Bottom;
+
+        if (Math.Abs(dx) >= Math.Abs(dy))
+            return left ? PortalEdge.Left : PortalEdge.Right;
+        return top ? PortalEdge.Top : PortalEdge.Bottom;
+    }
+
+    private static void ReturnToBrowser(PortalSession session, PortalEdge edge, CursorPoint source)
+    {
+        var destination = MapReturnPoint(session, edge, source);
+
+        // Clear the session before SetCursorPos. The generated cursor event must
+        // never be interpreted as another portal movement.
         lock (Sync)
         {
             if (!ReferenceEquals(_session, session)) return;
@@ -99,21 +192,6 @@ internal static class TerminalMousePortalService
 
         if (!SetCursorPos(destination.X, destination.Y))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows could not return the cursor from the Terminal portal.");
-    }
-
-    private static PortalEdge ChooseEdge(bool left, bool right, bool top, bool bottom, CursorPoint? previous, CursorPoint current)
-    {
-        if ((left || right) && !(top || bottom)) return left ? PortalEdge.Left : PortalEdge.Right;
-        if ((top || bottom) && !(left || right)) return top ? PortalEdge.Top : PortalEdge.Bottom;
-
-        if (previous is not null)
-        {
-            var dx = Math.Abs(current.X - previous.X);
-            var dy = Math.Abs(current.Y - previous.Y);
-            if (dx >= dy) return left ? PortalEdge.Left : PortalEdge.Right;
-        }
-
-        return top ? PortalEdge.Top : PortalEdge.Bottom;
     }
 
     private static CursorPoint MapReturnPoint(PortalSession session, PortalEdge edge, CursorPoint current)
@@ -141,19 +219,45 @@ internal static class TerminalMousePortalService
         return new CursorPoint(checked((int)Math.Round(x)), checked((int)Math.Round(y)));
     }
 
+    private static bool InsideDisplay(PortalSession session, CursorPoint point)
+        => point.X >= session.DisplayLeft && point.X < session.DisplayRight &&
+           point.Y >= session.DisplayTop && point.Y < session.DisplayBottom;
+
+    private static double DistanceFrom(CursorPoint origin, CursorPoint point)
+    {
+        var dx = point.X - origin.X;
+        var dy = point.Y - origin.Y;
+        return Math.Sqrt((double)dx * dx + (double)dy * dy);
+    }
+
     private enum PortalEdge { Left, Right, Top, Bottom }
 
-    private sealed record PortalSession(
-        string VmuId,
-        string DeviceName,
-        int DisplayLeft,
-        int DisplayTop,
-        int DisplayRight,
-        int DisplayBottom,
-        double BrowserLeft,
-        double BrowserTop,
-        double BrowserRight,
-        double BrowserBottom);
+    private sealed class PortalSession(
+        string vmuId,
+        string deviceName,
+        int displayLeft,
+        int displayTop,
+        int displayRight,
+        int displayBottom,
+        double browserLeft,
+        double browserTop,
+        double browserRight,
+        double browserBottom)
+    {
+        public string VmuId { get; } = vmuId;
+        public string DeviceName { get; } = deviceName;
+        public int DisplayLeft { get; } = displayLeft;
+        public int DisplayTop { get; } = displayTop;
+        public int DisplayRight { get; } = displayRight;
+        public int DisplayBottom { get; } = displayBottom;
+        public double BrowserLeft { get; } = browserLeft;
+        public double BrowserTop { get; } = browserTop;
+        public double BrowserRight { get; } = browserRight;
+        public double BrowserBottom { get; } = browserBottom;
+        public CursorPoint? EntryPosition { get; set; }
+        public CursorPoint? LastPosition { get; set; }
+        public bool Armed { get; set; }
+    }
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
