@@ -21,7 +21,7 @@ internal static class TerminalMousePortalService
     private const int ReturnOffset = 2;
     private const int EdgeThreshold = 2;
     private const int ArmDistance = 2;
-    private const string LogService = "TERMINAL_PORTAL";
+    private const string LogService = "WEB";
 
     private static readonly object Sync = new();
     private static PortalSession? _session;
