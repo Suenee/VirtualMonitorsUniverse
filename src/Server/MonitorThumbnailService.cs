@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Text.Json;
 using SharpGen.Runtime;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
@@ -21,9 +22,13 @@ internal sealed class MonitorThumbnailService
     private const int DxgiErrorAccessLost = unchecked((int)0x887A0026);
     private const int DxgiErrorWaitTimeout = unchecked((int)0x887A0027);
     private static readonly FeatureLevel[] FeatureLevels = [FeatureLevel.Level_11_1, FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0];
+    private static readonly Lazy<LogStore> DiagnosticLog = new(CreateDiagnosticLog, LazyThreadSafetyMode.ExecutionAndPublication);
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _captureLocks = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, LiveCaptureSession> _liveSessions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _diagnosticStarted = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _diagnosticWaiting = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _diagnosticFirstFrame = new(StringComparer.OrdinalIgnoreCase);
     private readonly TimeSpan _cacheLifetime = TimeSpan.FromSeconds(5);
 
     public async Task<byte[]> GetThumbnailAsync(string cacheKey, string deviceName, CancellationToken cancellationToken)
@@ -55,6 +60,12 @@ internal sealed class MonitorThumbnailService
 
     public async Task<byte[]> GetLiveFrameAsync(string cacheKey, string deviceName, CancellationToken cancellationToken)
     {
+        if (_diagnosticStarted.TryAdd(cacheKey, 0))
+        {
+            WriteDiagnostic("INFO", "TERMINAL_CAPTURE_BEGIN", "Terminal live capture entered the DXGI capture layer.", cacheKey,
+                new { deviceName });
+        }
+
         var gate = _captureLocks.GetOrAdd(cacheKey, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken);
         try
@@ -67,21 +78,39 @@ internal sealed class MonitorThumbnailService
                 try
                 {
                     var frame = await Task.Run(session.TryCaptureFrame, cancellationToken);
-                    if (frame is { Length: > 0 }) return frame;
+                    if (frame is { Length: > 0 })
+                    {
+                        if (_diagnosticFirstFrame.TryAdd(cacheKey, 0))
+                        {
+                            WriteDiagnostic("INFO", "TERMINAL_FIRST_FRAME", "Terminal DXGI capture produced its first frame.", cacheKey,
+                                new { deviceName, bytes = frame.Length });
+                        }
+                        return frame;
+                    }
+
+                    if (_diagnosticWaiting.TryAdd(cacheKey, 0))
+                    {
+                        WriteDiagnostic("DEBUG", "TERMINAL_CAPTURE_WAITING", "Terminal DXGI capture is alive but has not produced a frame yet.", cacheKey,
+                            new { deviceName, acquireTimeoutMs = 5000 });
+                    }
 
                     // A timeout before the first frame is not a broken stream. Keep the
                     // existing HTTP request alive and wait for Desktop Duplication to
                     // report an actual desktop/pointer update.
                     continue;
                 }
-                catch (DesktopDuplicationAccessLostException)
+                catch (DesktopDuplicationAccessLostException ex)
                 {
+                    WriteDiagnostic("WARN", "TERMINAL_CAPTURE_ACCESS_LOST", ex.Message, cacheKey,
+                        new { deviceName, retryDelayMs = (int)retryDelay.TotalMilliseconds });
                     RemoveLiveSession(cacheKey, session);
                     await Task.Delay(retryDelay, cancellationToken);
                     retryDelay = TimeSpan.FromMilliseconds(Math.Min(1000, retryDelay.TotalMilliseconds * 2));
                 }
-                catch
+                catch (Exception ex)
                 {
+                    WriteDiagnostic("ERROR", "TERMINAL_CAPTURE_FAILED", ex.Message, cacheKey,
+                        new { deviceName, exception = ex.ToString() });
                     RemoveLiveSession(cacheKey, session);
                     throw;
                 }
@@ -103,6 +132,8 @@ internal sealed class MonitorThumbnailService
         if (session is not null) RemoveLiveSession(cacheKey, session);
         var created = new LiveCaptureSession(deviceName);
         _liveSessions[cacheKey] = created;
+        WriteDiagnostic("DEBUG", "TERMINAL_CAPTURE_SESSION", "Terminal DXGI capture session was created.", cacheKey,
+            new { deviceName });
         return created;
     }
 
@@ -111,6 +142,28 @@ internal sealed class MonitorThumbnailService
         if (_liveSessions.TryGetValue(cacheKey, out var current) && ReferenceEquals(current, expected))
             _liveSessions.TryRemove(cacheKey, out _);
         expected.Dispose();
+    }
+
+    private static LogStore CreateDiagnosticLog()
+    {
+        var repoRoot = Environment.GetEnvironmentVariable("VMU_REPO_ROOT");
+        var dataRoot = !string.IsNullOrWhiteSpace(repoRoot)
+            ? Path.Combine(repoRoot, "data")
+            : Path.Combine(AppContext.BaseDirectory, "data");
+        return new LogStore(Path.Combine(dataRoot, "vmu.db"));
+    }
+
+    private static void WriteDiagnostic(string level, string eventName, string message, string monitorId, object? details = null)
+    {
+        try
+        {
+            DiagnosticLog.Value.Write(level, "WEB", eventName, message, monitorId,
+                details is null ? null : JsonSerializer.Serialize(details));
+        }
+        catch
+        {
+            // Diagnostics must never affect capture behavior.
+        }
     }
 
     private static byte[] CaptureFrame(string deviceName, int maximumWidth, long quality)
