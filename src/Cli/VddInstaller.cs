@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Principal;
 using VirtualMonitorsUniverse.Core;
 
 namespace VirtualMonitorsUniverse.Cli;
@@ -43,6 +44,15 @@ internal static class VddInstaller
 
             Console.WriteLine("VDD INSTALL ............. FAIL - device exists but MTTVirtualDisplayPipe is unavailable; refusing to mutate an unhealthy state");
             return 1;
+        }
+
+        // Importing the catalog certificate and creating the root device both require
+        // administrative rights. Do not elevate the original executable in place:
+        // an elevated Windows token may not see mapped network drives. Instead copy
+        // the published CLI runtime to a local TEMP directory and elevate that copy.
+        if (!IsAdministrator())
+        {
+            return RunElevatedFromLocalStage();
         }
 
         var workRoot = Path.Combine(Path.GetTempPath(), $"VMU-VDD-{Guid.NewGuid():N}");
@@ -100,8 +110,107 @@ internal static class VddInstaller
         }
         finally
         {
-            try { if (Directory.Exists(workRoot)) Directory.Delete(workRoot, true); }
-            catch { /* TEMP cleanup must not hide the installation result. */ }
+            TryDeleteDirectory(workRoot);
+        }
+    }
+
+    private static int RunElevatedFromLocalStage()
+    {
+        var stageRoot = Path.Combine(Path.GetTempPath(), $"VMU-Elevated-{Guid.NewGuid():N}");
+        try
+        {
+            Console.WriteLine("  VDD INSTALL: administrator rights required; preparing local elevation staging...");
+            CopyDirectory(AppContext.BaseDirectory, stageRoot);
+
+            var currentProcess = Environment.ProcessPath
+                ?? throw new InvalidOperationException("Cannot determine the current process executable for UAC elevation.");
+            var currentProcessName = Path.GetFileName(currentProcess);
+            var assemblyName = Path.GetFileName(typeof(VddInstaller).Assembly.Location);
+            var stagedAssembly = Path.Combine(stageRoot, assemblyName);
+
+            var info = new ProcessStartInfo
+            {
+                UseShellExecute = true,
+                Verb = "runas",
+                WorkingDirectory = stageRoot,
+                WindowStyle = ProcessWindowStyle.Normal
+            };
+
+            if (string.Equals(currentProcessName, "dotnet.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                info.FileName = currentProcess;
+                info.ArgumentList.Add(stagedAssembly);
+            }
+            else
+            {
+                var stagedExecutable = Path.Combine(stageRoot, currentProcessName);
+                if (!File.Exists(stagedExecutable))
+                {
+                    throw new FileNotFoundException("The staged VMU CLI executable was not found.", stagedExecutable);
+                }
+
+                info.FileName = stagedExecutable;
+            }
+
+            info.ArgumentList.Add("driver");
+            info.ArgumentList.Add("install");
+
+            Console.WriteLine("  VDD INSTALL: requesting Windows UAC confirmation...");
+            using var process = Process.Start(info)
+                ?? throw new InvalidOperationException("Could not start the elevated VMU driver installer.");
+            process.WaitForExit();
+            Console.WriteLine($"  VDD INSTALL: elevated installer exit code {process.ExitCode}");
+            return process.ExitCode;
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            Console.WriteLine("VDD INSTALL ............. FAIL - Windows UAC confirmation was cancelled.");
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"VDD INSTALL ............. FAIL - elevation bootstrap failed: {ex.Message}");
+            return 1;
+        }
+        finally
+        {
+            TryDeleteDirectory(stageRoot);
+        }
+    }
+
+    private static bool IsAdministrator()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private static void CopyDirectory(string sourceRoot, string destinationRoot)
+    {
+        Directory.CreateDirectory(destinationRoot);
+        foreach (var directory in Directory.EnumerateDirectories(sourceRoot, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(sourceRoot, directory);
+            Directory.CreateDirectory(Path.Combine(destinationRoot, relative));
+        }
+
+        foreach (var file in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(sourceRoot, file);
+            var destination = Path.Combine(destinationRoot, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            File.Copy(file, destination, true);
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, true);
+        }
+        catch
+        {
+            // TEMP cleanup must never hide the installation result.
         }
     }
 
@@ -166,6 +275,8 @@ internal static class VddInstaller
 
     private static void RunElevated(string fileName, string arguments)
     {
+        // This method is retained as a defense-in-depth fallback. In the normal
+        // path the entire installer is already running elevated from local TEMP.
         var info = new ProcessStartInfo
         {
             FileName = fileName,
