@@ -32,7 +32,17 @@ Install the pinned ALPHA-validated dependency:
 vmu driver install
 ```
 
-The install command may trigger the standard Windows UAC confirmation. Apart from UAC, the installation runs without opening another visible terminal window.
+The install command is responsible for its own elevation. The user must not need to open an Administrator Command Prompt manually.
+
+When administrative rights are required, VMU copies the already-published CLI runtime to a unique local `%TEMP%\VMU-Elevated-*` staging directory and starts that local copy through standard Windows UAC. This is intentional: an elevated token may not inherit mapped network drives such as `N:`, while the non-elevated process can still copy the required runtime from a mapped drive or UNC share before requesting elevation.
+
+After the privileged child process exits, the staging directory is removed on a best-effort basis. A cleanup failure never hides the real installation result.
+
+This makes the supported entry point identical for local disks, mapped network drives and UNC-backed repositories:
+
+```bat
+vmu driver install
+```
 
 ## Pinned ALPHA dependency
 
@@ -44,17 +54,28 @@ The current DEVEL installer intentionally reproduces the dependency combination 
 - SHA-256 verification for both downloaded archives
 - signed catalog certificate import only when required
 
-Temporary payloads are stored exclusively below `%TEMP%` and removed after the operation.
+The driver and NefCon payloads are downloaded only after elevation has been established. Temporary payloads are stored exclusively below `%TEMP%` and removed after the operation.
 
 ## Safety behavior
 
 `vmu driver install` is deliberately conservative.
 
-If `ROOT\MTTVDD` already exists and `MTTVirtualDisplayPipe` is healthy, the command exits successfully without reinstalling anything.
+If `ROOT\MTTVDD` already exists and `MTTVirtualDisplayPipe` is healthy, the command exits successfully without requesting UAC or reinstalling anything.
 
 If `ROOT\MTTVDD` already exists but the runtime pipe is unavailable, the command refuses to guess at a repair. A dedicated repair operation must be designed for that state rather than mutating an unknown or partially failed driver installation.
 
 The installer never selects or enables `ROOT\DISPLAY\0000` as a substitute VDD device.
+
+## Required regression scenarios
+
+The driver installation workflow must be validated on Windows 10 and Windows 11 in at least these cases:
+
+- CLI launched from a local disk without administrative rights;
+- CLI launched from a local disk from an already elevated terminal;
+- CLI launched from a mapped network drive without administrative rights;
+- CLI launched from a UNC path without administrative rights.
+
+All four cases must use the same operator command. UAC is allowed; manual remapping, copying the repository to another drive, or reopening the shell as administrator is not.
 
 ## Relationship to self-test
 

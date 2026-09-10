@@ -1,98 +1,90 @@
 # VMU Upgrade Bootstrap Contract
 
-`upgrade.cmd` is the single supported developer entry point for synchronizing and preparing a Virtual Monitors Universe DEVEL working copy.
+`upgrade.cmd` is the single supported developer bootstrap for obtaining, synchronizing, building and optionally starting Virtual Monitors Universe on Windows 10 and newer.
 
-## Architecture
+## Goals
 
-The upgrade mechanism deliberately follows the proven FHM pattern:
+The bootstrap must work from a local disk, a mapped network drive, or a UNC-backed working directory without requiring the user to prepare Git manually or open an elevated terminal.
 
-- `upgrade.cmd` is a very small and stable bootstrap.
-- `upgrade.ps1` contains the real upgrade implementation.
-- the current `upgrade.ps1` is extracted from `origin/devel` into `%TEMP%` before it is executed;
-- the temporary PowerShell runner may safely synchronize and replace files in the repository, including `upgrade.cmd` itself;
-- `logs` contains logs only.
+A standalone copy of `upgrade.cmd` may be placed in an empty target directory and run directly. If the directory is not already a VMU Git working tree, the bootstrap obtains the current `devel` branch and installs it into that same directory. The only pre-existing items accepted in bootstrap mode are `upgrade.cmd`, `logs`, and `.cache`; unknown files are never overwritten.
 
-## Bootstrap flow
+## Git bootstrap
 
-`upgrade.cmd` performs only the minimum work required to obtain and start the current upgrade implementation:
+`upgrade.cmd` first searches for Git in PATH, the standard Git for Windows installation directories, and the Git for Windows registry keys.
 
-1. Resolve the repository directory.
-2. Ensure `logs` exists so bootstrap failures can be recorded in `logs/upgrade.log`.
-3. Verify that Git is available and the directory is a Git working tree.
-4. Run `git fetch origin`.
-5. Extract `origin/devel:upgrade.ps1` with `git show` into a uniquely named `%TEMP%\VMU-upgrade-<random>.ps1` file.
-6. Set `VMU_UPGRADE_REPO` to the repository directory.
-7. Run the temporary PowerShell runner.
-8. Delete the temporary runner.
-9. Return the runner's exit code.
+If Git is unavailable, the script uses Windows Package Manager with the explicit `winget` community source and accepts the required package/source agreements. This deliberately avoids an unrelated Microsoft Store agreement prompt. After the installation attempt the script searches for `git.exe` again instead of trusting the WinGet exit code, because WinGet can report that Git is already registered even when the executable is not currently reachable. If necessary, a forced package repair/reinstall is attempted.
 
-The final CMD block is intentionally parsed before PowerShell starts. `upgrade.ps1` can therefore update `upgrade.cmd` on disk without the currently running CMD process accidentally continuing inside newly replaced batch-file content.
+The current process prepends the discovered Git directory to PATH, so a new Command Prompt is not required.
 
-## PowerShell runner
+## Network repositories and safe.directory
 
-`upgrade.ps1` is the authoritative upgrade implementation. Because it runs from `%TEMP%`, it remains stable while the repository is synchronized underneath it.
+Git's dubious-ownership protection can identify a mapped drive by its UNC path, which means a literal mapped-drive `safe.directory` value is not reliable.
 
-Its responsibilities are:
+VMU therefore sets `safe.directory=*` only through the process-local `GIT_CONFIG_*` environment mechanism. It does not modify the user's global Git configuration. The trust scope disappears when the bootstrap process exits and is acceptable here because the bootstrap intentionally operates only on the explicitly selected VMU working directory.
 
-- create and maintain `logs/upgrade.log`;
-- show upgrade output live in the terminal while recording the same session in the log;
-- verify the active `devel` branch;
-- refuse to overwrite tracked or staged local changes;
-- synchronize the working tree to `origin/devel`;
-- remove known obsolete/generated VMU artifacts;
-- verify repository hygiene;
-- ensure .NET 10 SDK is installed;
-- restore, build and test VMU on .NET 10 before any .NET 8 SDK removal attempt;
-- retire the .NET 8 SDK safely when possible, without removing .NET runtimes;
-- perform the final restore/build/test/publish cycle;
-- publish the CLI under `.runtime\cli`;
-- perform final workspace and SDK validation.
+## In-place repository bootstrap
 
-## Bootstrap boundary
+A running batch file must not overwrite itself while it is still being parsed. For a new working directory, `upgrade.cmd` therefore copies itself to a randomized `%TEMP%` handoff and continues from that copy.
 
-Do not move project-specific upgrade logic back into `upgrade.cmd`.
+The temporary bootstrap:
 
-The batch bootstrap should remain limited to:
+1. validates the target directory;
+2. clones `devel` to a local temporary directory;
+3. copies the complete working tree, including `.git`, into the selected target directory;
+4. removes the temporary clone;
+5. starts the repository-owned `upgrade.cmd` from the new working tree.
 
-- CMD built-ins;
-- Git;
-- launching PowerShell;
-- `%TEMP%` for the extracted runner;
-- `logs/upgrade.log` only for bootstrap failure diagnostics.
+This design also avoids depending on network-drive visibility across UAC boundaries.
 
-It must not contain .NET installation logic, build logic, test logic, workspace cleanup logic, or helper-launcher logic.
+## Normal upgrade flow
 
-## TEMP policy
+Once a Git working tree exists, `upgrade.cmd`:
 
-Temporary executable/helper files belong in `%TEMP%`, not in `logs`.
+1. normalizes `origin` to the official VMU repository;
+2. fetches `devel`;
+3. extracts the current `origin/devel:upgrade.ps1` to a randomized `%TEMP%` file;
+4. sets `VMU_UPGRADE_REPO`;
+5. runs the temporary PowerShell implementation;
+6. deletes the temporary runner;
+7. optionally runs `vmu selftest` when `--test` was requested;
+8. optionally calls `run.cmd` when `--run` was requested.
 
-`logs` is reserved exclusively for log files. In particular, `logs/upgrade-handoff.cmd` and similar launcher files must never be part of the VMU upgrade design.
+The PowerShell runner remains authoritative for dependency maintenance, restore, build, tests, publish, workspace hygiene and version reporting.
 
-The temporary runner uses a randomized name and is deleted after PowerShell returns.
+## Server launcher
 
-## Logging
+`run.cmd` is the canonical server launcher. It is idempotent from the operator's perspective: if no VMU Server process exists it starts one; if VMU Server is already running it stops the existing process first and then starts one fresh instance.
 
-All VMU logs belong under `logs/`, which is ignored by Git.
+`vmu-server.cmd` is retained only as a backward-compatible shim for older shortcuts and scripts and forwards to `run.cmd`.
 
-The main upgrade log is:
+## TEMP and cache policy
 
-`logs/upgrade.log`
+Persistent VMU build caches stay below the repository `.cache` directory. `%TEMP%` is used only for transient bootstrap, clone, upgrade-runner, and privileged staging files.
 
-The PowerShell runner uses a transcript so the live terminal session and the persistent log describe the same upgrade run.
+`logs` contains logs only.
 
 ## Safety guarantees
 
 The updater must not:
 
 - use blanket `git clean` operations that can delete unknown user files;
-- overwrite tracked or staged local development changes;
-- remove .NET 8 SDK before VMU has successfully restored, built and tested on .NET 10;
-- automatically remove .NET runtimes as part of SDK cleanup;
-- store executable bootstrap helpers in `logs`;
-- require manual `git fetch` / `git reset` merely because `upgrade.cmd` itself changed.
+- overwrite unknown files during a fresh in-place bootstrap;
+- overwrite tracked or staged local development changes in the normal PowerShell synchronization path;
+- make a permanent global `safe.directory=*` change;
+- require a shell restart merely to discover a newly installed Git executable;
+- require an administrator Command Prompt merely because a later operation needs UAC elevation;
+- store executable bootstrap helpers persistently in `logs`.
 
-## Regression requirement
+## Regression scenarios
 
-Whenever `upgrade.cmd` is modified, preserve the FHM-style bootstrap contract first.
+Changes to the bootstrap must preserve these scenarios:
 
-The important regression scenario is an old local `upgrade.cmd` starting while a newer version exists on `origin/devel`. The old bootstrap must fetch Git, extract the current `upgrade.ps1` into `%TEMP%`, and execute that current runner without depending on the new repository-side implementation already being present locally.
+- existing local working tree;
+- existing working tree on a mapped network drive;
+- UNC-backed working tree;
+- new empty local target with only `upgrade.cmd`;
+- new empty network target with only `upgrade.cmd`;
+- Git already available in PATH;
+- Git installed but not present in the current PATH;
+- WinGet reporting an already registered Git package;
+- old local `upgrade.cmd` handing control to the newest `origin/devel:upgrade.ps1`.

@@ -1,14 +1,5 @@
 @echo off
-setlocal EnableExtensions
-cd /d "%~dp0"
-set "VMU_REPO_ROOT=%CD%"
-set "VMU_SERVER=%~dp0.runtime\server\VirtualMonitorsUniverse.Server.exe"
-
-if not exist "%VMU_SERVER%" (
-    echo VMU Server is not built yet.
-    echo Run upgrade.cmd first.
-    exit /b 1
-)
-
-start "" "%VMU_SERVER%"
-exit /b 0
+rem Backward-compatible launcher retained for existing shortcuts and older scripts.
+echo NOTE: vmu-server.cmd is deprecated. Use run.cmd.
+call "%~dp0run.cmd" %*
+exit /b %ERRORLEVEL%

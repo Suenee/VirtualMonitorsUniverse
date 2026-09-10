@@ -2,46 +2,21 @@
 cls
 setlocal EnableExtensions EnableDelayedExpansion
 
-set "UPGRADE_REV=2.5-repo-cache"
+set "UPGRADE_REV=3.0-portable-bootstrap"
 set "REPOSITORY_URL=https://github.com/Suenee/VirtualMonitorsUniverse.git"
 set "REPOSITORY_BRANCH=devel"
 set "ORIGINAL_ARGS=%*"
-set "REPO_DIR=%~dp0"
-if "!REPO_DIR:~-1!"=="\" set "REPO_DIR=!REPO_DIR:~0,-1!"
+set "CALLER_DIR=%CD%"
+set "SCRIPT_DIR=%~dp0"
+if "!SCRIPT_DIR:~-1!"=="\" set "SCRIPT_DIR=!SCRIPT_DIR:~0,-1!"
 
-rem Use pushd instead of cd /d. Besides mapped drives (for example N:), pushd
-rem also supports UNC paths by assigning a temporary drive letter for cmd.exe.
-pushd "!REPO_DIR!" >nul 2>nul
-if errorlevel 1 (
-    echo ERROR: Repository path is not accessible:
-    echo   !REPO_DIR!
-    exit /b 1
+if defined VMU_BOOTSTRAP_TARGET (
+    set "REPO_DIR=!VMU_BOOTSTRAP_TARGET!"
+) else if exist "!SCRIPT_DIR!\.git" (
+    set "REPO_DIR=!SCRIPT_DIR!"
+) else (
+    set "REPO_DIR=!CALLER_DIR!"
 )
-
-rem VMU-owned persistent state stays with the repository. Windows TEMP may be
-rem used for genuinely temporary files such as the transient upgrade.ps1 runner,
-rem but AppData and other persistent C: locations are not used for VMU caches.
-set "VMU_CACHE_ROOT=!REPO_DIR!\.cache"
-set "DOTNET_CLI_HOME=!VMU_CACHE_ROOT!\dotnet-home"
-set "NUGET_PACKAGES=!VMU_CACHE_ROOT!\nuget\packages"
-set "NUGET_HTTP_CACHE_PATH=!VMU_CACHE_ROOT!\nuget\http-cache"
-set "NUGET_SCRATCH=!VMU_CACHE_ROOT!\nuget\scratch"
-set "DOTNET_CLI_TELEMETRY_OPTOUT=1"
-set "DOTNET_NOLOGO=1"
-for %%D in ("!DOTNET_CLI_HOME!" "!NUGET_PACKAGES!" "!NUGET_HTTP_CACHE_PATH!" "!NUGET_SCRATCH!") do if not exist "%%~D" mkdir "%%~D" >nul 2>nul
-
-rem Remove the legacy VMU-specific AppData cache created by older revisions.
-if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\VirtualMonitorsUniverse" (
-    echo Removing legacy VMU cache from LocalAppData...
-    rmdir /s /q "%LOCALAPPDATA%\VirtualMonitorsUniverse" >nul 2>nul
-)
-
-rem Trust only this explicitly selected working tree for this process. This
-rem prevents Git's dubious-ownership protection from breaking a repository that
-rem is intentionally hosted on a network share, without modifying global config.
-set "GIT_CONFIG_COUNT=1"
-set "GIT_CONFIG_KEY_0=safe.directory"
-set "GIT_CONFIG_VALUE_0=!REPO_DIR!"
 
 set "DO_TEST=0"
 set "DO_RUN=0"
@@ -50,7 +25,6 @@ if "%~1"=="" goto args_done
 if /I "%~1"=="--test" (set "DO_TEST=1"&shift&goto parse_args)
 if /I "%~1"=="--run" (set "DO_RUN=1"&shift&goto parse_args)
 echo ERROR: Unknown upgrade option: %~1
-popd >nul 2>nul
 exit /b 2
 :args_done
 
@@ -59,130 +33,167 @@ set "RUN_LABEL=no"
 if "!DO_TEST!"=="1" set "TEST_LABEL=yes"
 if "!DO_RUN!"=="1" set "RUN_LABEL=yes"
 echo Requested post actions: test=!TEST_LABEL!, run=!RUN_LABEL!
-echo VMU build cache: !VMU_CACHE_ROOT!
+echo Bootstrap target: !REPO_DIR!
 
-if not exist "!REPO_DIR!\logs" mkdir "!REPO_DIR!\logs" >nul 2>nul
-set "BOOTSTRAP_LOG=!REPO_DIR!\logs\upgrade.log"
+rem Process-local trust is intentionally broad because this bootstrap may move
+rem between a mapped drive and its UNC representation. It never changes the
+rem user's global Git configuration and applies only to this cmd.exe process.
+set "GIT_CONFIG_COUNT=1"
+set "GIT_CONFIG_KEY_0=safe.directory"
+set "GIT_CONFIG_VALUE_0=*"
 
-rem ---------------------------------------------------------------------------
-rem Git bootstrap
-rem ---------------------------------------------------------------------------
-rem A copied upgrade.cmd can bootstrap a new Windows computer. Prefer the
-rem standard Windows package manager instead of downloading an installer from an
-rem unversioned URL. After installation, refresh the common Git PATH locations
-rem because the current cmd.exe process does not inherit environment changes.
-where git.exe >nul 2>nul
-if errorlevel 1 (
+call :FindGit
+if not defined GIT_EXE (
     echo Git was not found. Installing Git for Windows...
-    >> "!BOOTSTRAP_LOG!" echo INFO: Git was not found in PATH. Starting winget bootstrap.
-
     where winget.exe >nul 2>nul
     if errorlevel 1 (
-        >> "!BOOTSTRAP_LOG!" echo ERROR: Neither Git nor winget was found.
-        powershell.exe -NoProfile -Command "Write-Host 'ERROR: Git is missing and Windows Package Manager (winget) is unavailable.' -ForegroundColor Red"
-        powershell.exe -NoProfile -Command "Write-Host 'Install Microsoft App Installer / winget, then run upgrade.cmd again.' -ForegroundColor Yellow"
-        popd >nul 2>nul
+        echo ERROR: Git is missing and Windows Package Manager ^(winget^) is unavailable.
+        echo Install Microsoft App Installer / winget, then run upgrade.cmd again.
         exit /b 1
     )
 
+    rem Restrict WinGet to its community source so Microsoft Store agreements do
+    rem not block a non-interactive bootstrap. Do not trust the WinGet exit code
+    rem alone: an already-registered Git package can return a non-zero status.
     winget install --id Git.Git --exact --source winget --silent --disable-interactivity --accept-source-agreements --accept-package-agreements
-    set "GIT_INSTALL_RC=!ERRORLEVEL!"
-    if not "!GIT_INSTALL_RC!"=="0" (
-        >> "!BOOTSTRAP_LOG!" echo ERROR: winget failed to install Git. Exit code !GIT_INSTALL_RC!.
-        powershell.exe -NoProfile -Command "Write-Host 'ERROR: winget could not install Git for Windows.' -ForegroundColor Red"
-        popd >nul 2>nul
-        exit /b !GIT_INSTALL_RC!
+    call :FindGit
+
+    if not defined GIT_EXE (
+        echo Git is registered but git.exe is still unavailable. Attempting forced repair...
+        winget install --id Git.Git --exact --source winget --silent --disable-interactivity --accept-source-agreements --accept-package-agreements --force
+        call :FindGit
     )
 
-    if exist "%ProgramFiles%\Git\cmd\git.exe" set "PATH=%ProgramFiles%\Git\cmd;!PATH!"
-    if exist "%ProgramFiles(x86)%\Git\cmd\git.exe" set "PATH=%ProgramFiles(x86)%\Git\cmd;!PATH!"
-    if exist "%LocalAppData%\Programs\Git\cmd\git.exe" set "PATH=%LocalAppData%\Programs\Git\cmd;!PATH!"
-
-    where git.exe >nul 2>nul
-    if errorlevel 1 (
-        >> "!BOOTSTRAP_LOG!" echo ERROR: Git installation completed but git.exe is still unavailable.
-        powershell.exe -NoProfile -Command "Write-Host 'ERROR: Git was installed but git.exe is not available to this process.' -ForegroundColor Red"
-        powershell.exe -NoProfile -Command "Write-Host 'Open a new Command Prompt and run upgrade.cmd again.' -ForegroundColor Yellow"
-        popd >nul 2>nul
+    if not defined GIT_EXE (
+        echo ERROR: Git for Windows could not be located after installation/repair.
         exit /b 1
     )
-
-    for /f "delims=" %%G in ('git --version 2^>nul') do set "GIT_VERSION=%%G"
-    echo Git installed successfully: !GIT_VERSION!
-    >> "!BOOTSTRAP_LOG!" echo INFO: Git bootstrap completed: !GIT_VERSION!.
 )
 
-rem ---------------------------------------------------------------------------
-rem Repository bootstrap
-rem ---------------------------------------------------------------------------
-git rev-parse --is-inside-work-tree >nul 2>nul
+for %%G in ("!GIT_EXE!") do set "PATH=%%~dpG;!PATH!"
+for /f "delims=" %%G in ('"!GIT_EXE!" --version 2^>nul') do set "GIT_VERSION=%%G"
+echo Git: !GIT_VERSION!
+
+pushd "!REPO_DIR!" >nul 2>nul
 if errorlevel 1 (
-    rem This mode is intended for a standalone copy of upgrade.cmd. Put the file
-    rem in the parent directory where the VMU folder should be created.
-    set "CLONE_DIR=!REPO_DIR!\VirtualMonitorsUniverse"
-    echo.
-    echo No VMU Git working tree was found.
-    echo Cloning !REPOSITORY_BRANCH! into:
-    echo   !CLONE_DIR!
-    >> "!BOOTSTRAP_LOG!" echo INFO: No working tree found. Cloning !REPOSITORY_URL! branch !REPOSITORY_BRANCH! to !CLONE_DIR!.
-
-    if exist "!CLONE_DIR!\.git" (
-        powershell.exe -NoProfile -Command "Write-Host 'ERROR: Target folder already contains a Git repository.' -ForegroundColor Red"
-        popd >nul 2>nul
-        exit /b 1
-    )
-    if exist "!CLONE_DIR!" (
-        dir /b "!CLONE_DIR!" 2>nul | findstr . >nul
-        if not errorlevel 1 (
-            powershell.exe -NoProfile -Command "Write-Host 'ERROR: Target folder already exists and is not empty:' -ForegroundColor Red"
-            echo !CLONE_DIR!
-            popd >nul 2>nul
-            exit /b 1
-        )
-    )
-
-    git clone --branch "!REPOSITORY_BRANCH!" --single-branch "!REPOSITORY_URL!" "!CLONE_DIR!"
-    if errorlevel 1 (
-        >> "!BOOTSTRAP_LOG!" echo ERROR: Repository clone failed.
-        powershell.exe -NoProfile -Command "Write-Host 'ERROR: VMU repository clone failed.' -ForegroundColor Red"
-        popd >nul 2>nul
-        exit /b 1
-    )
-
-    echo.
-    echo Repository cloned successfully.
-    echo Continuing with the repository upgrade script...
-    call "!CLONE_DIR!\upgrade.cmd" !ORIGINAL_ARGS!
-    set "CHILD_RC=!ERRORLEVEL!"
-    popd >nul 2>nul
-    exit /b !CHILD_RC!
+    echo ERROR: Target path is not accessible:
+    echo   !REPO_DIR!
+    exit /b 1
 )
 
-rem ---------------------------------------------------------------------------
-rem Normal in-repository upgrade
-rem ---------------------------------------------------------------------------
-git fetch origin >nul 2>nul
+"!GIT_EXE!" rev-parse --is-inside-work-tree >nul 2>nul
+if errorlevel 1 goto bootstrap_repository
+goto repository_ready
+
+:bootstrap_repository
+rem Run the bootstrap from TEMP before replacing files in the target directory.
+rem This makes an in-place install safe even when the only file initially present
+rem is the very upgrade.cmd that is currently executing.
+if not "!VMU_BOOTSTRAP_CHILD!"=="1" (
+    set "HANDOFF=%TEMP%\VMU-bootstrap-%RANDOM%-%RANDOM%.cmd"
+    copy /y "%~f0" "!HANDOFF!" >nul
+    if errorlevel 1 (
+        popd >nul 2>nul
+        echo ERROR: Could not create temporary bootstrap handoff.
+        exit /b 1
+    )
+    set "VMU_BOOTSTRAP_TARGET=!REPO_DIR!"
+    set "VMU_BOOTSTRAP_CHILD=1"
+    popd >nul 2>nul
+    call "!HANDOFF!" !ORIGINAL_ARGS!
+    set "HANDOFF_RC=!ERRORLEVEL!"
+    del /q "!HANDOFF!" >nul 2>nul
+    exit /b !HANDOFF_RC!
+)
+
+echo.
+echo No VMU Git working tree was found. Bootstrapping DEVEL into the current directory...
+set "VMU_BOOTSTRAP_TARGET=!REPO_DIR!"
+powershell.exe -NoProfile -Command "$allowed=@('upgrade.cmd','logs','.cache'); $bad=@(Get-ChildItem -LiteralPath $env:VMU_BOOTSTRAP_TARGET -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $allowed }); if($bad.Count -gt 0){ Write-Host 'ERROR: Target directory contains non-VMU files:' -ForegroundColor Red; $bad | ForEach-Object { Write-Host ('  ' + $_.Name) }; exit 3 }"
+if errorlevel 1 (
+    popd >nul 2>nul
+    exit /b 1
+)
+
+set "CLONE_TEMP=%TEMP%\VMU-clone-%RANDOM%-%RANDOM%"
+"!GIT_EXE!" clone --branch "!REPOSITORY_BRANCH!" --single-branch "!REPOSITORY_URL!" "!CLONE_TEMP!"
+if errorlevel 1 (
+    popd >nul 2>nul
+    echo ERROR: VMU repository clone failed.
+    exit /b 1
+)
+
+robocopy "!CLONE_TEMP!" "!REPO_DIR!" /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP >nul
+set "COPY_RC=!ERRORLEVEL!"
+rmdir /s /q "!CLONE_TEMP!" >nul 2>nul
+if !COPY_RC! GEQ 8 (
+    popd >nul 2>nul
+    echo ERROR: Repository was cloned, but copying it into the target directory failed.
+    exit /b !COPY_RC!
+)
+
+if not exist "!REPO_DIR!\upgrade.cmd" (
+    popd >nul 2>nul
+    echo ERROR: Bootstrap completed, but upgrade.cmd is missing from the target.
+    exit /b 1
+)
+
+echo Repository bootstrap complete. Continuing with the repository-owned upgrade.cmd...
+popd >nul 2>nul
+call "!REPO_DIR!\upgrade.cmd" !ORIGINAL_ARGS!
+exit /b !ERRORLEVEL!
+
+:repository_ready
+rem From this point onward the repository exists and persistent VMU caches can be
+rem anchored safely inside it. TEMP remains reserved for transient handoff files.
+set "VMU_CACHE_ROOT=!REPO_DIR!\.cache"
+set "DOTNET_CLI_HOME=!VMU_CACHE_ROOT!\dotnet-home"
+set "NUGET_PACKAGES=!VMU_CACHE_ROOT!\nuget\packages"
+set "NUGET_HTTP_CACHE_PATH=!VMU_CACHE_ROOT!\nuget\http-cache"
+set "NUGET_SCRATCH=!VMU_CACHE_ROOT!\nuget\scratch"
+set "DOTNET_CLI_TELEMETRY_OPTOUT=1"
+set "DOTNET_NOLOGO=1"
+for %%D in ("!DOTNET_CLI_HOME!" "!NUGET_PACKAGES!" "!NUGET_HTTP_CACHE_PATH!" "!NUGET_SCRATCH!") do if not exist "%%~D" mkdir "%%~D" >nul 2>nul
+if not exist "!REPO_DIR!\logs" mkdir "!REPO_DIR!\logs" >nul 2>nul
+set "BOOTSTRAP_LOG=!REPO_DIR!\logs\upgrade.log"
+echo VMU build cache: !VMU_CACHE_ROOT!
+
+if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\VirtualMonitorsUniverse" (
+    echo Removing legacy VMU cache from LocalAppData...
+    rmdir /s /q "%LOCALAPPDATA%\VirtualMonitorsUniverse" >nul 2>nul
+)
+
+"!GIT_EXE!" remote get-url origin >nul 2>nul
+if errorlevel 1 (
+    "!GIT_EXE!" remote add origin "!REPOSITORY_URL!"
+) else (
+    "!GIT_EXE!" remote set-url origin "!REPOSITORY_URL!"
+)
+if errorlevel 1 (
+    > "!BOOTSTRAP_LOG!" echo ERROR: Could not configure Git origin.
+    popd >nul 2>nul
+    exit /b 1
+)
+
+"!GIT_EXE!" fetch origin "!REPOSITORY_BRANCH!" >nul 2>nul
 if errorlevel 1 (
     > "!BOOTSTRAP_LOG!" echo ERROR: git fetch origin failed before PowerShell runner bootstrap.
     >> "!BOOTSTRAP_LOG!" echo STATUS: FAILED - phase=SELF-UPDATE/BOOTSTRAP
-    powershell.exe -NoProfile -Command "Write-Host 'ERROR: git fetch origin failed before upgrade bootstrap.' -ForegroundColor Red"
+    echo ERROR: git fetch origin failed before upgrade bootstrap.
     popd >nul 2>nul
     exit /b 1
 )
 
-rem This file is intentionally transient, so Windows TEMP is the correct place.
 set "RUNNER_TEMP=%TEMP%\VMU-upgrade-%RANDOM%-%RANDOM%.ps1"
-git show origin/devel:upgrade.ps1 > "!RUNNER_TEMP!" 2>nul
+"!GIT_EXE!" show origin/!REPOSITORY_BRANCH!:upgrade.ps1 > "!RUNNER_TEMP!" 2>nul
 if errorlevel 1 (
     > "!BOOTSTRAP_LOG!" echo ERROR: Could not extract origin/devel:upgrade.ps1.
     >> "!BOOTSTRAP_LOG!" echo STATUS: FAILED - phase=SELF-UPDATE/BOOTSTRAP
-    powershell.exe -NoProfile -Command "Write-Host 'ERROR: Could not extract upgrade.ps1 from origin/devel.' -ForegroundColor Red"
+    echo ERROR: Could not extract upgrade.ps1 from origin/devel.
     popd >nul 2>nul
     exit /b 1
 )
 
-rem The runner may update this file while executing, so keep post-actions in this
-rem already parsed block. They run only after a completely successful upgrade.
 (
     set "VMU_UPGRADE_REPO=!REPO_DIR!"
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "!RUNNER_TEMP!"
@@ -201,19 +212,19 @@ rem already parsed block. They run only after a completely successful upgrade.
         call "!REPO_DIR!\vmu.cmd" selftest
         set "TEST_RC=!ERRORLEVEL!"
         if not "!TEST_RC!"=="0" (
-            powershell.exe -NoProfile -Command "Write-Host 'CLI selftest failed. --run will not be executed.' -ForegroundColor Red"
+            echo CLI selftest failed. --run will not be executed.
             popd >nul 2>nul
             exit /b !TEST_RC!
         )
     )
 
     if "!DO_RUN!"=="1" (
-        tasklist /FI "IMAGENAME eq VirtualMonitorsUniverse.Server.exe" 2>nul | find /I "VirtualMonitorsUniverse.Server.exe" >nul
-        if errorlevel 1 (
-            echo Starting VMU Server...
-            start "" "!REPO_DIR!\vmu-server.cmd"
-        ) else (
-            echo VMU Server is already running; --run skipped.
+        echo Restarting VMU Server through run.cmd...
+        call "!REPO_DIR!\run.cmd"
+        set "RUN_RC=!ERRORLEVEL!"
+        if not "!RUN_RC!"=="0" (
+            popd >nul 2>nul
+            exit /b !RUN_RC!
         )
     )
 
@@ -225,3 +236,13 @@ rem already parsed block. They run only after a completely successful upgrade.
     popd >nul 2>nul
     exit /b 0
 )
+
+:FindGit
+set "GIT_EXE="
+for /f "delims=" %%G in ('where git.exe 2^>nul') do if not defined GIT_EXE set "GIT_EXE=%%G"
+if not defined GIT_EXE if exist "%ProgramFiles%\Git\cmd\git.exe" set "GIT_EXE=%ProgramFiles%\Git\cmd\git.exe"
+if not defined GIT_EXE if exist "%ProgramFiles%\Git\bin\git.exe" set "GIT_EXE=%ProgramFiles%\Git\bin\git.exe"
+if not defined GIT_EXE if defined ProgramFiles(x86) if exist "%ProgramFiles(x86)%\Git\cmd\git.exe" set "GIT_EXE=%ProgramFiles(x86)%\Git\cmd\git.exe"
+if not defined GIT_EXE if defined LocalAppData if exist "%LocalAppData%\Programs\Git\cmd\git.exe" set "GIT_EXE=%LocalAppData%\Programs\Git\cmd\git.exe"
+if not defined GIT_EXE for /f "delims=" %%G in ('powershell.exe -NoProfile -Command "$roots=@('HKLM:\SOFTWARE\GitForWindows','HKLM:\SOFTWARE\WOW6432Node\GitForWindows','HKCU:\SOFTWARE\GitForWindows'); foreach($r in $roots){$p=(Get-ItemProperty -Path $r -ErrorAction SilentlyContinue).InstallPath; if($p){$g=Join-Path $p 'cmd\git.exe'; if(Test-Path -LiteralPath $g){Write-Output $g; break}}}" 2^>nul') do if not defined GIT_EXE set "GIT_EXE=%%G"
+exit /b 0
